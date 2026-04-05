@@ -1,0 +1,1 @@
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "QuickSTT" /t REG_SZ /d "\"C:\Users\hemsh_sfya5gq\.gemini\antigravity\scratch\quick_stt_app\QuickSTT_App\QuickSTT.exe\" --background" /f

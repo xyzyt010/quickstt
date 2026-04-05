@@ -1,0 +1,8 @@
+# One public URL or host per line.
+# These entries are copied into distributed bootstrap packages as server_urls.txt.
+# Examples:
+# http://203.0.113.42:5000
+# https://downloads.example.com/quickstt
+# 203.0.113.42
+# [2001:db8::42]
+

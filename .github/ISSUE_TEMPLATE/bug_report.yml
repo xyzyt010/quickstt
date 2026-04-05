@@ -1,0 +1,40 @@
+name: Bug Report
+description: Report a reproducible problem in QuickSTT
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Provide exact steps.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: QuickSTT Version
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Windows 11 / Intel / NVIDIA / etc.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs or Screenshots
+

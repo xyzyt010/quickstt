@@ -1,0 +1,58 @@
+# Build directories
+/build/
+/build_tmp/
+/dist/
+/deps/
+/ort_dist/
+/tmp_*/
+/tmp*/
+/Source/build/
+/Source/dist/
+
+# Packaged outputs
+/QuickSTT_App/
+/QuickSTT_Server/
+/QuickSTT_DirectDownload/
+/QuickSTT_Portable.exe
+/third_party/package_cache/
+
+# Local runtime payloads and archives
+*.zip
+*.tar
+*.7z
+
+# Logs and transient files
+*.log
+*.tmp
+*.bak
+*.obj
+*.o
+*.pdb
+*.ilk
+*.idb
+*.res
+startup_log.txt
+service_error.log
+error.log
+server_log.txt
+build_err.txt
+build_log.txt
+vshist.txt
+tmp_whisper_cpu_test.txt
+test_input.exe
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Local configuration
+server_urls.txt
+published_server_urls.txt
+server_config.json
+
+# IDE / OS noise
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
