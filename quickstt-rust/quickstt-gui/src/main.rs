@@ -23,6 +23,12 @@ use muda::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 
 mod widget_platform;
 
+/// Fixed tray-menu item ids (stable across the GTK tray thread and main thread).
+const TRAY_ID_DASH: &str = "quickstt-dash";
+const TRAY_ID_SHOW: &str = "quickstt-show";
+const TRAY_ID_HIDE: &str = "quickstt-hide";
+const TRAY_ID_QUIT: &str = "quickstt-quit";
+
 /// TCP port used for single-instance IPC. The first instance binds a listener
 /// on 127.0.0.1 and later invocations (`quickstt --show` etc.) forward the
 /// command here and exit.
@@ -486,8 +492,7 @@ struct QuickSttApp {
 
     // System integrations
     _hotkey_manager: GlobalHotKeyManager,
-    #[cfg(not(target_os = "linux"))]
-    _tray_icon: TrayIcon,
+    _tray_icon: Option<TrayIcon>,
     initialized: bool,
     positioned: bool,
     last_widget_visible: bool,
@@ -694,33 +699,13 @@ impl QuickSttApp {
 
     let icon = create_tray_icon_image();
 
-    let dash_item = MenuItem::new("Dashboard", true, None);
-    let show_item = MenuItem::new("Show", true, None);
-    let hide_item = MenuItem::new("Hide", true, None);
-    let quit_item = MenuItem::new("Quit", true, None);
-
-    let menu = Menu::new();
-    menu.append_items(&[
-        &dash_item,
-        &show_item,
-        &hide_item,
-        &PredefinedMenuItem::separator(),
-        &quit_item,
-    ])
-    .unwrap();
-
-    let menu_dash_id = dash_item.id().clone();
-    let menu_show_id = show_item.id().clone();
-    let menu_hide_id = hide_item.id().clone();
-    let menu_quit_id = quit_item.id().clone();
+    let mut tray: Option<TrayIcon> = None;
 
     #[cfg(target_os = "linux")]
     {
-        // Linux: tray-icon/muda need a GTK main loop. Spawn a dedicated thread
-        // that initialises GTK, owns the TrayIcon and runs gtk::main().
-        // Menu events still arrive via the global MenuEvent channel which is
-        // polled each frame in `poll_tray_and_hotkeys`.
-        let icon_clone_icon = icon.clone();
+        // Linux: tray-icon/muda need a GTK main loop AND their types are
+        // !Send (Rc-based), so the entire menu + tray construction happens
+        // inside the GTK thread. Events are matched by fixed string IDs.
         std::thread::Builder::new()
             .name("tray-gtk".to_string())
             .spawn(move || {
@@ -728,9 +713,24 @@ impl QuickSttApp {
                     warn!("gtk init failed — system tray unavailable");
                     return;
                 }
+                let dash_item = MenuItem::with_id(TRAY_ID_DASH, "Dashboard", true, None);
+                let show_item = MenuItem::with_id(TRAY_ID_SHOW, "Show", true, None);
+                let hide_item = MenuItem::with_id(TRAY_ID_HIDE, "Hide", true, None);
+                let quit_item = MenuItem::with_id(TRAY_ID_QUIT, "Quit", true, None);
+                let mut menu = Menu::new();
+                if let Err(e) = menu.append_items(&[
+                    &dash_item,
+                    &show_item,
+                    &hide_item,
+                    &PredefinedMenuItem::separator(),
+                    &quit_item,
+                ]) {
+                    warn!("Tray menu build failed: {e}");
+                    return;
+                }
                 match TrayIconBuilder::new()
                     .with_tooltip("QuickSTT")
-                    .with_icon(icon_clone_icon)
+                    .with_icon(icon)
                     .with_menu(Box::new(menu))
                     .build()
                 {
@@ -743,15 +743,29 @@ impl QuickSttApp {
                 }
             })
             .expect("spawn tray thread");
-        let _ = icon; // moved clone above
     }
     #[cfg(not(target_os = "linux"))]
-    let tray = TrayIconBuilder::new()
-        .with_tooltip("QuickSTT")
-        .with_icon(icon)
-        .with_menu(Box::new(menu))
-        .build()
-        .expect("tray");
+    {
+        let dash_item = MenuItem::with_id(TRAY_ID_DASH, "Dashboard", true, None);
+        let show_item = MenuItem::with_id(TRAY_ID_SHOW, "Show", true, None);
+        let hide_item = MenuItem::with_id(TRAY_ID_HIDE, "Hide", true, None);
+        let quit_item = MenuItem::with_id(TRAY_ID_QUIT, "Quit", true, None);
+        let mut menu = Menu::new();
+        menu.append_items(&[
+            &dash_item,
+            &show_item,
+            &hide_item,
+            &PredefinedMenuItem::separator(),
+            &quit_item,
+        ])
+        .unwrap();
+        tray = TrayIconBuilder::new()
+            .with_tooltip("QuickSTT")
+            .with_icon(icon)
+            .with_menu(Box::new(menu))
+            .build()
+            .ok();
+    }
 
         let names = {
             let s = state.lock().unwrap();
@@ -826,17 +840,16 @@ impl QuickSttApp {
             resize_anchor_size: vec2(0.0, 0.0),
             resize_anchor_topleft: pos2(0.0, 0.0),
             _hotkey_manager: hotkey_manager,
-            #[cfg(not(target_os = "linux"))]
             _tray_icon: tray,
             initialized: false,
             positioned: false,
             last_widget_visible: widget_visible_init,
             #[cfg(target_os = "windows")]
             widget_hwnd: None,
-            menu_dash_id,
-            menu_show_id,
-            menu_hide_id,
-            menu_quit_id,
+            menu_dash_id: MenuId::new(TRAY_ID_DASH),
+            menu_show_id: MenuId::new(TRAY_ID_SHOW),
+            menu_hide_id: MenuId::new(TRAY_ID_HIDE),
+            menu_quit_id: MenuId::new(TRAY_ID_QUIT),
             id_hotkey_super_toggle: id_super_toggle,
             id_hotkey_toggle_listen: id_toggle,
             id_hotkey_show_widget: id_show_widget_hotkey,
