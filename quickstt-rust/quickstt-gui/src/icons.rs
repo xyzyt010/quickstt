@@ -1,7 +1,7 @@
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 
-const MIC_ACTIVE_SVG: &[u8] = include_bytes!("../../../QuickSTT_App/mic_active.svg");
-const MIC_INACTIVE_SVG: &[u8] = include_bytes!("../../../QuickSTT_App/mic_inactive.svg");
+const MIC_ACTIVE_SVG: &[u8] = include_bytes!("../../assets/mic_active.svg");
+const MIC_INACTIVE_SVG: &[u8] = include_bytes!("../../assets/mic_inactive.svg");
 const APP_ICON_SVG: &[u8] = include_bytes!("../../assets/app_icon.svg");
 
 pub struct IconSet {
