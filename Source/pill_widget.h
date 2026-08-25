@@ -41,6 +41,9 @@
 #include <windows.h>
 #endif
 
+class MicroPillOverlay;
+class GlobalHotkeyX11;
+
 // Custom ComboBox to track Open/Close state for Arrow rotation
 class PillComboBox : public QComboBox {
   Q_OBJECT
@@ -78,8 +81,6 @@ protected:
   }
 
   void showPopup() override {
-    if (!(QApplication::mouseButtons() & Qt::LeftButton))
-      return;
     isOpen = true;
     animateArrowTo(180.0);
     QComboBox::showPopup();
@@ -245,6 +246,8 @@ public slots:
   void openDashboard();
   void restoreFromExternalTrigger();
   void showMainWidgetExplicitly();
+  void quitApp();
+  void toggleDictationExternal();
 
 private slots:
   void toggleTextBoard();
@@ -422,6 +425,12 @@ private:
   void forwardEventToPopup(const QString &event, const QString &payload);
   void launchPopupProcess();
   QProcess *m_popupProcess = nullptr;
+
+  // Linux: in-process micro pill overlay + X11 global hotkeys
+  MicroPillOverlay *m_microPill = nullptr;
+  GlobalHotkeyX11 *m_globalHotkeys = nullptr;
+  int m_backendStartFailures = 0;
+  void initLinuxHotkeysAndOverlay();
 };
 
 #endif // PILL_WIDGET_H

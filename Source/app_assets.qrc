@@ -1,0 +1,9 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/quickstt">
+    <file alias="mic_active.svg">mic_active.svg</file>
+    <file alias="mic_inactive.svg">mic_inactive.svg</file>
+    <file alias="app.svg">Untitled-1.svg</file>
+    <file alias="white_tick.svg">WhiteTick.svg</file>
+  </qresource>
+</RCC>

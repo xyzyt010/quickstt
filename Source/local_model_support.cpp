@@ -121,6 +121,7 @@ QStringList installRootCandidates(const QString &rootKey) {
   if (!appRoot.isEmpty())
     roots << appRoot;
 
+#ifdef Q_OS_WIN
   // Prefer LocalAppData (primary Windows install root for large GGUF models
   // like Nemotron), then Roaming APPDATA for older installs.
   const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
@@ -130,6 +131,20 @@ QStringList installRootCandidates(const QString &rootKey) {
   const QString appData = qEnvironmentVariable("APPDATA");
   if (!appData.isEmpty())
     roots << QDir(appData).filePath(QStringLiteral("QuickSTT"));
+#else
+  // Linux: writable XDG data root — MUST match the native stt_service's
+  // getAppDataDir() (~/.local/share/QuickSTT/models) or downloaded models are
+  // invisible to the backend. System paths like /usr/lib/quickstt/data stay
+  // last as read-only fallbacks.
+  QString xdgData = qEnvironmentVariable("XDG_DATA_HOME");
+  if (xdgData.trimmed().isEmpty()) {
+    const QString home = QDir::homePath();
+    if (!home.isEmpty())
+      xdgData = QDir(home).filePath(QStringLiteral(".local/share"));
+  }
+  if (!xdgData.trimmed().isEmpty())
+    roots.prepend(QDir(xdgData.trimmed()).filePath(QStringLiteral("QuickSTT")));
+#endif
 
   QStringList expanded;
   for (const QString &root : roots) {
@@ -204,6 +219,11 @@ LocalModelDescriptor makeVoskDescriptor(const QString &displayName,
   item.preferredMemoryMb = minRamMb + 1024;
   item.widgetSelectable = true;
   item.directDownload = directDownload;
+#ifndef Q_OS_WIN
+  // Linux: the native stt_service dlopens libvosk.so. Provision it as a tiny
+  // runtime package so Vosk models work out of the box on deb installs.
+  item.runtimePackageId = QStringLiteral("rt_vosk_linux");
+#endif
   return item;
 }
 
@@ -435,6 +455,16 @@ QVector<LocalModelDescriptor> allDescriptors() {
 
 QVector<LocalModelPackageInfo> allPackages() {
   static const QVector<LocalModelPackageInfo> packages = {
+#ifndef Q_OS_WIN
+      {QStringLiteral("rt_vosk_linux"),
+       QStringLiteral("Vosk Runtime (libvosk.so)"),
+       QStringLiteral("models/runtimes/vosk/vosk-linux-x86_64-0.3.45.zip"),
+       QStringLiteral("https://github.com/alphacep/vosk-api/releases/download/"
+                      "v0.3.45/vosk-linux-x86_64-0.3.45.zip"),
+       QStringLiteral("models"), QStringLiteral("runtimes/vosk"),
+       {QStringLiteral("runtimes/vosk/libvosk.so")},
+       {QStringLiteral("runtimes/vosk/libvosk.so")}, true},
+#endif
       {QStringLiteral("pkg_vosk_small_en"), QStringLiteral("Vosk Small En"),
        QStringLiteral("models/vosk/vosk-model-small-en-us-0.15.zip"),
        QStringLiteral(
@@ -1253,11 +1283,21 @@ QString quickSttDataRoot() {
   static const QString root = []() {
     const QString legacyRoot =
         QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("data"));
+#ifdef Q_OS_WIN
     const QString appData = qEnvironmentVariable("APPDATA").trimmed();
     const QString preferredRoot =
         appData.isEmpty()
             ? legacyRoot
             : QDir(appData).filePath(QStringLiteral("QuickSTT"));
+#else
+    // Linux: writable XDG data root shared with the native stt_service
+    // (~/.local/share/QuickSTT). System install dirs are read-only.
+    QString preferredBase = qEnvironmentVariable("XDG_DATA_HOME").trimmed();
+    if (preferredBase.isEmpty())
+      preferredBase = QDir::home().filePath(QStringLiteral(".local/share"));
+    const QString preferredRoot =
+        QDir(preferredBase).filePath(QStringLiteral("QuickSTT"));
+#endif
     QDir().mkpath(preferredRoot);
     migrateLegacyQuickSttData(legacyRoot, preferredRoot);
     return preferredRoot;

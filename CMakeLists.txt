@@ -56,12 +56,20 @@ set(QUICKSTT_APP_SOURCES
     Source/text_board.h
     Source/windows_secret_store.cpp
     Source/windows_secret_store.h
+    Source/app_assets.qrc
 )
 if(WIN32)
 list(APPEND QUICKSTT_APP_SOURCES
     Source/ahk_bridge.cpp
     Source/ahk_bridge.h
     resources_app.rc
+)
+else()
+list(APPEND QUICKSTT_APP_SOURCES
+    Source/global_hotkey_x11.cpp
+    Source/global_hotkey_x11.h
+    Source/micro_pill_overlay.cpp
+    Source/micro_pill_overlay.h
 )
 endif()
 
@@ -72,7 +80,30 @@ if(WIN32)
 target_link_libraries(QuickSTT_App PRIVATE dxgi crypt32)
 set_target_properties(QuickSTT_App PROPERTIES WIN32_EXECUTABLE ON)
 else()
+# X11 for global hotkeys (XGrabKey) — Mint/Ubuntu X11 sessions
+find_package(X11 QUIET)
+if(X11_FOUND)
+  target_include_directories(QuickSTT_App PRIVATE ${X11_INCLUDE_DIR})
+  target_link_libraries(QuickSTT_App PRIVATE ${X11_LIBRARIES})
+  target_compile_definitions(QuickSTT_App PRIVATE QUICKSTT_HAS_X11=1)
+else()
+  target_compile_definitions(QuickSTT_App PRIVATE QUICKSTT_HAS_X11=0)
+  message(WARNING "X11 development files not found — global hotkeys disabled")
+endif()
 set_target_properties(QuickSTT_App PROPERTIES OUTPUT_NAME "quickstt-app")
+
+# Stage the SVG/PNG assets beside the binary (mirrors the Windows layout).
+add_custom_command(TARGET QuickSTT_App POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/Source/mic_active.svg"
+        "${CMAKE_SOURCE_DIR}/Source/mic_inactive.svg"
+        "${CMAKE_SOURCE_DIR}/Source/Untitled-1.svg"
+        "$<TARGET_FILE_DIR:QuickSTT_App>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/quickstt-rust/assets/icon_app.png"
+        "$<TARGET_FILE_DIR:QuickSTT_App>/icon_app.png"
+    VERBATIM
+)
 endif()
 endif()
 

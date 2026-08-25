@@ -12,6 +12,7 @@
 #include <QMetaObject>
 #include <QSettings>
 #include <QSharedMemory>
+#include <QStandardPaths>
 #include <QTextStream>
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -56,16 +57,30 @@ QIcon loadPackagedAppIcon() {
   for (const char *name : {"icon_app.png", "icon_app.ico", "app_icon.svg"})
     if (QFileInfo::exists(QDir(dir).filePath(QLatin1String(name))))
       return QIcon(QDir(dir).filePath(QLatin1String(name)));
+
+  // Installed deb layout: freedesktop hicolor icon shipped by the package.
+  for (const char *path :
+       {"/usr/share/icons/hicolor/256x256/apps/quickstt.png",
+        "/usr/share/pixmaps/quickstt.png"})
+    if (QFileInfo::exists(QLatin1String(path)))
+      return QIcon(QLatin1String(path));
+
+  // Embedded resource icon — always available regardless of install layout.
+  {
+    QIcon resourceIcon(QStringLiteral(":/quickstt/app.svg"));
+    if (!resourceIcon.isNull())
+      return resourceIcon;
+  }
   return QIcon();
 }
 
-bool notifyRunningInstance() {
+bool notifyRunningInstance(const QByteArray &message = QByteArray("SHOW\n")) {
   QLocalSocket socket;
   socket.connectToServer(QString::fromLatin1(kActivationServerName),
                          QIODevice::WriteOnly);
   if (!socket.waitForConnected(800))
     return false;
-  socket.write("SHOW\n");
+  socket.write(message);
   socket.flush();
   socket.waitForBytesWritten(800);
   socket.disconnectFromServer();
@@ -87,6 +102,16 @@ int main(int argc, char *argv[]) {
   QString appDir = detectAppDir();
   QDir::setCurrent(appDir);
   g_logPath = QDir(appDir).filePath("startup_log.txt");
+  // System install dirs (/usr/lib/quickstt) are read-only on Linux — keep
+  // diagnostics in the per-user data root instead.
+  if (!QFileInfo(appDir).isWritable()) {
+    const QString userLogDir = QStandardPaths::writableLocation(
+        QStandardPaths::AppDataLocation);
+    if (!userLogDir.isEmpty()) {
+      QDir().mkpath(userLogDir);
+      g_logPath = QDir(userLogDir).filePath("startup_log.txt");
+    }
+  }
 
   // Keep startup history for diagnostics
   qInstallMessageHandler(customMessageHandler);
@@ -103,6 +128,20 @@ int main(int argc, char *argv[]) {
     a.setWindowIcon(appIcon);
   qDebug() << "QApplication Created";
 
+  // ─── Command line (parsed before the single-instance guard so secondary
+  // launches can forward the request to the running instance) ──────────────
+  bool background = true;
+  bool toggleDictation = false;
+  for (int i = 1; i < argc; ++i) {
+    const QString arg = QString::fromLocal8Bit(argv[i]);
+    if (arg == "--show") {
+      background = false;
+      break;
+    }
+    if (arg == "--toggle-dictation")
+      toggleDictation = true; // Wayland compositor-shortcut entry point
+  }
+
   // ─── Single Instance Guard (Named Mutex on Windows + Socket Verification) ──
 #ifdef _WIN32
   HANDLE hSingleInstanceMutex = CreateMutexW(NULL, TRUE, L"Local\\QuickSTT_App_SingleInstance_v3");
@@ -116,7 +155,8 @@ int main(int argc, char *argv[]) {
   }
   qDebug() << "Single instance check passed (Windows Mutex acquired).";
 #else
-  if (notifyRunningInstance()) {
+  if (notifyRunningInstance(toggleDictation ? QByteArray("TOGGLE\n")
+                                            : QByteArray("SHOW\n"))) {
     qDebug() << "Another QuickSTT instance is active and responded. Exiting secondary launch.";
     return 0;
   }
@@ -137,11 +177,17 @@ int main(int argc, char *argv[]) {
         QLocalSocket *socket = activationServer.nextPendingConnection();
         if (!socket)
           continue;
-        socket->readAll();
+        const QByteArray message = socket->readAll().trimmed();
         socket->disconnectFromServer();
         socket->deleteLater();
-        qDebug() << "Received external restore trigger.";
-        if (widget) {
+        qDebug() << "Received external trigger:" << message;
+        if (!widget)
+          continue;
+        if (message == QByteArray("TOGGLE")) {
+          QTimer::singleShot(0, widget, [widget]() {
+            widget->toggleDictationExternal();
+          });
+        } else {
           QTimer::singleShot(0, widget, [widget]() {
             if (!widget->isAutoShowSuppressed()) {
               widget->restoreFromExternalTrigger();
@@ -152,14 +198,6 @@ int main(int argc, char *argv[]) {
         }
       }
     });
-  }
-
-  bool background = true;
-  for (int i = 1; i < argc; ++i) {
-    if (QString(argv[i]) == "--show") {
-      background = false;
-      break;
-    }
   }
 
   bool setupShown = false;
@@ -191,6 +229,8 @@ int main(int argc, char *argv[]) {
         w.activateWindow();
       });
       qDebug() << "Widget Show Scheduled.";
+    } else if (toggleDictation) {
+      QTimer::singleShot(400, &w, &PillWidget::toggleDictationExternal);
     } else {
       qDebug() << "Started in background/mini-widget mode.";
     }

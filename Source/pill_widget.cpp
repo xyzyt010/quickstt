@@ -6,6 +6,10 @@
 #include "optional_service_support.h"
 #include "startup_utils.h"
 #include "windows_secret_store.h"
+#ifndef _WIN32
+#include "global_hotkey_x11.h"
+#include "micro_pill_overlay.h"
+#endif
 #include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
@@ -642,9 +646,16 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
       "border-radius: 12px; padding-left: 10px; padding-right: 24px; "
       "border: none; } "
       "QComboBox::drop-down { width: 0px; border: 0px; } "
-      "QComboBox QAbstractItemView { background-color: #333333; color: #EEE; "
-      "selection-background-color: #555; outline: none; }");
+      "QComboBox QAbstractItemView { background-color: #2A2A2A; color: #EEEEEE; "
+      "selection-background-color: #0F5E9C; selection-color: #FFFFFF; "
+      "border: 1px solid #444444; border-radius: 8px; outline: none; "
+      "padding: 4px; font-size: 12px; }"
+      "QComboBox QAbstractItemView::item { min-height: 26px; padding: 3px 8px; "
+      "border-radius: 5px; margin: 1px 2px; }");
   modelCombo->view()->setTextElideMode(Qt::ElideRight);
+  modelCombo->view()->setWindowFlags(modelCombo->view()->windowFlags() |
+                                     Qt::FramelessWindowHint |
+                                     Qt::NoDropShadowWindowHint);
   QTimer::singleShot(0, this, &PillWidget::refreshModelCombo);
   connect(modelCombo, &QComboBox::currentTextChanged, this,
           &PillWidget::onModelChanged);
@@ -873,12 +884,29 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   updateModelDownloadButton();
 
   qDebug() << "Setup Tray...";
-  m_svgRenMicActive = new QSvgRenderer(
-      QCoreApplication::applicationDirPath() + "/mic_active.svg", this);
-  m_svgRenMicInactive = new QSvgRenderer(
-      QCoreApplication::applicationDirPath() + "/mic_inactive.svg", this);
-  m_svgRenApp = new QSvgRenderer(
-      QCoreApplication::applicationDirPath() + "/Untitled-1.svg", this);
+  // Prefer the SVGs embedded in the Qt resource bundle; fall back to files
+  // beside the executable for portable/dev layouts. Without this the Linux
+  // deb (which ships no loose .svg files) rendered the fallback blue dot.
+  const auto loadSvgRenderer = [this](const QStringList &candidates) {
+    for (const QString &path : candidates) {
+      if (!QFileInfo::exists(path))
+        continue;
+      auto renderer = new QSvgRenderer(path, this);
+      if (renderer->isValid())
+        return renderer;
+      delete renderer;
+    }
+    return new QSvgRenderer(this); // invalid — callers keep their fallbacks
+  };
+  m_svgRenMicActive = loadSvgRenderer(
+      {QStringLiteral(":/quickstt/mic_active.svg"),
+       QCoreApplication::applicationDirPath() + "/mic_active.svg"});
+  m_svgRenMicInactive = loadSvgRenderer(
+      {QStringLiteral(":/quickstt/mic_inactive.svg"),
+       QCoreApplication::applicationDirPath() + "/mic_inactive.svg"});
+  m_svgRenApp = loadSvgRenderer(
+      {QStringLiteral(":/quickstt/app.svg"),
+       QCoreApplication::applicationDirPath() + "/Untitled-1.svg"});
 
   setupTray();
   updateCachedIcons(); // This calls updateTrayIcon internally
@@ -904,14 +932,21 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   qDebug() << "Setup Backend...";
   backendProcess = new QProcess(this);
   backendProcess->setWorkingDirectory(appDir);
-  backendProcess->setStandardErrorFile(
-      QDir(appDir).filePath("service_error.log"));
+  // The system install dir (/usr/lib/quickstt) is read-only — keep the
+  // service log in the writable per-user data root.
+  const QString logDir = quickSttDataRoot();
+  QDir().mkpath(logDir);
+  backendProcess->setStandardErrorFile(QDir(logDir).filePath("service_error.log"));
   connect(backendProcess, &QProcess::readyReadStandardOutput, this,
           &PillWidget::onProcessOutput);
   connect(backendProcess, &QProcess::finished, this,
           &PillWidget::onBackendFinished);
   connect(backendProcess, &QProcess::errorOccurred, this,
           &PillWidget::onBackendError);
+  connect(backendProcess, &QProcess::started, this, [this]() {
+    // Backend came up — clear the failure circuit breaker.
+    m_backendStartFailures = 0;
+  });
   startBackend();
 
   backendHealthTimer = new QTimer(this);
@@ -998,6 +1033,21 @@ void PillWidget::startBackend() {
   if (backendProcess->state() != QProcess::NotRunning)
     return;
 
+  // Circuit breaker: after repeated immediate failures stop hammering the UI
+  // thread with restart attempts (each failed start used to block for 2s).
+  if (m_backendStartFailures >= 5) {
+    static bool reported = false;
+    if (!reported) {
+      reported = true;
+      statusLabel->show();
+      currentStatusText =
+          QStringLiteral("Audio engine failed to start — check service_error.log");
+      statusLabel->setText(currentStatusText);
+      qWarning() << "Backend start failures exceeded limit; retries paused";
+    }
+    return;
+  }
+
   QString appDir = QCoreApplication::applicationDirPath();
   QString modelStr = currentComboModelName();
 
@@ -1017,21 +1067,30 @@ void PillWidget::startBackend() {
     qDebug() << "Backend executable missing:" << backendPath;
     statusLabel->show();
     statusLabel->setText("Audio engine missing");
-    QTimer::singleShot(2000, this, &PillWidget::startBackend);
+    m_backendStartFailures++;
+    QTimer::singleShot(5000, this, &PillWidget::startBackend);
     return;
   }
 
+  ++m_backendStartFailures;
   backendProcess->setWorkingDirectory(appDir);
   backendProcess->setProgram(backendPath);
   backendProcess->setArguments({});
   backendProcess->start();
-
-  if (!backendProcess->waitForStarted(2000)) {
-    qDebug() << "Backend failed to start:" << backendProcess->errorString();
+  // Non-blocking: success/failure arrives via started/errorOccurred signals.
+  QTimer::singleShot(1500, this, [this]() {
+    if (m_isQuitting)
+      return;
+    if (backendProcess->state() == QProcess::NotRunning &&
+        m_backendStartFailures < 5) {
+      qWarning() << "Backend did not stay up — retrying"
+                 << m_backendStartFailures;
+      startBackend();
+    }
+  });
+  if (m_backendStartFailures == 1) {
     statusLabel->show();
-    statusLabel->setText("Restarting audio engine...");
-    QTimer::singleShot(2000, this, &PillWidget::startBackend);
-    return;
+    statusLabel->setText("Starting audio engine...");
   }
 
   qDebug() << "Backend started with PID" << backendProcess->processId();
@@ -1121,10 +1180,12 @@ void PillWidget::onBackendFinished(int exitCode,
            << " exitStatus=" << exitStatus;
   if (m_isQuitting)
     return;
+  // Backoff retry — avoids a 2s UI-thread-blocking restart storm when the
+  // engine keeps dying (missing libs, missing models, ...).
   statusLabel->show();
   statusLabel->setText("Restarting audio engine...");
-  QTimer::singleShot(2000, this,
-                     &PillWidget::startBackend); // Auto-Restart after 2s
+  QTimer::singleShot(5000, this,
+                     &PillWidget::startBackend); // Auto-Restart after 5s
 }
 
 void PillWidget::onBackendError(QProcess::ProcessError error) {
@@ -1135,7 +1196,7 @@ void PillWidget::onBackendError(QProcess::ProcessError error) {
   if (backendProcess->state() == QProcess::NotRunning) {
     statusLabel->show();
     statusLabel->setText("Restarting audio engine...");
-    QTimer::singleShot(2000, this, &PillWidget::startBackend);
+    QTimer::singleShot(5000, this, &PillWidget::startBackend);
   }
 }
 
@@ -1190,22 +1251,87 @@ PillWidget::~PillWidget() {
     backendHealthTimer->stop();
   if (waveformAnimationTimer)
     waveformAnimationTimer->stop();
+  if (blinkTimer)
+    blinkTimer->stop();
+  if (m_ramCompactTimer)
+    m_ramCompactTimer->stop();
+  if (m_offloadTimer)
+    m_offloadTimer->stop();
 #ifdef _WIN32
   if (m_ahkBridge)
     m_ahkBridge->stop();
+#else
+  delete m_globalHotkeys;
+  m_globalHotkeys = nullptr;
+  delete m_microPill;
+  m_microPill = nullptr;
 #endif
-  
+
   // Shut down all model processes (CrispASR, Parakeet, etc.)
   if (m_localFrontendSttManager) {
     m_localFrontendSttManager->shutdownAllModels();
   }
-  
+
   delete dashboard;
+  dashboard = nullptr;
   delete textBoardWindow;
-  if (backendProcess->state() == QProcess::Running) {
-    backendProcess->terminate();
-    backendProcess->waitForFinished(3000);
+  textBoardWindow = nullptr;
+
+  if (backendProcess) {
+    if (backendProcess->state() != QProcess::NotRunning) {
+      backendProcess->terminate();
+      if (!backendProcess->waitForFinished(1500)) {
+        backendProcess->kill();
+        backendProcess->waitForFinished(1000);
+      }
+    }
   }
+}
+
+void PillWidget::quitApp() {
+  qDebug() << "[QUIT] Quit requested from tray/menu";
+  if (m_isQuitting)
+    return;
+  m_isQuitting = true;
+
+  // Freeze every timer that could respawn work while we tear down.
+  if (backendHealthTimer)
+    backendHealthTimer->stop();
+  if (waveformAnimationTimer)
+    waveformAnimationTimer->stop();
+  if (blinkTimer)
+    blinkTimer->stop();
+  if (m_ramCompactTimer)
+    m_ramCompactTimer->stop();
+  if (m_offloadTimer)
+    m_offloadTimer->stop();
+  if (autoShowSuppressTimer)
+    autoShowSuppressTimer->stop();
+
+#ifndef _WIN32
+  if (m_globalHotkeys) {
+    delete m_globalHotkeys; // release X grabs before shutdown
+    m_globalHotkeys = nullptr;
+  }
+  if (m_microPill) {
+    m_microPill->hide();
+    m_microPill->deleteLater();
+    m_microPill = nullptr;
+  }
+#endif
+
+  hide();
+  if (trayIcon) {
+    trayIcon->hide(); // remove the StatusNotifier item immediately
+  }
+
+  // Ask the engine politely, then let the destructor escalate to kill().
+  if (backendProcess && backendProcess->state() == QProcess::Running)
+    backendProcess->write("QUIT\n");
+  if (m_localFrontendSttManager)
+    m_localFrontendSttManager->shutdownAllModels();
+
+  qApp->quit();
 }
 
 void PillWidget::onAhkResult(int reqId, bool commandExecuted,
@@ -1278,6 +1404,10 @@ void PillWidget::restoreFromExternalTrigger() {
 
 void PillWidget::showMainWidgetExplicitly() {
   qDebug() << "[PILL] Explicitly showing main widget from user tray interaction";
+  // A user-initiated "Show Widget" always wins over close-suppression.
+  m_temporarilySuppressAutoShow = false;
+  if (autoShowSuppressTimer)
+    autoShowSuppressTimer->stop();
   ensureBackendRunning();
   centerOnScreen();
   if (isMinimized())
@@ -1412,24 +1542,31 @@ void PillWidget::updateTrayIcon() {
   if (!trayIcon)
     return;
 
+  // Build the app icon from the embedded SVG at every standard size so panel
+  // zoom levels stay crisp (a single-pixmap QIcon looks blurry in trays).
   QIcon appIcon;
-  const QString icoPath = QCoreApplication::applicationDirPath() + "/icon_app.ico";
-  if (QFileInfo::exists(icoPath))
-    appIcon = QIcon(icoPath);
-
-  const QString svgPath = QCoreApplication::applicationDirPath() + "/Untitled-1.svg";
-  if (appIcon.isNull() && m_svgRenApp->isValid()) {
-    const int renderSize = 256;
-    QPixmap iconPix(renderSize, renderSize);
-    iconPix.fill(Qt::transparent);
-
-    QPainter p(&iconPix);
-    p.setRenderHint(QPainter::Antialiasing);
-    p.setRenderHint(QPainter::SmoothPixmapTransform);
-    drawSvg(p, *m_svgRenApp, renderSize, renderSize);
-    p.end();
-    appIcon = QIcon(iconPix);
+  if (m_svgRenApp && m_svgRenApp->isValid()) {
+    static const int sizes[] = {16, 22, 24, 32, 48, 64, 128, 256};
+    for (const int size : sizes) {
+      QPixmap iconPix(size, size);
+      iconPix.fill(Qt::transparent);
+      QPainter p(&iconPix);
+      p.setRenderHint(QPainter::Antialiasing);
+      p.setRenderHint(QPainter::SmoothPixmapTransform);
+      drawSvg(p, *m_svgRenApp, size, size);
+      p.end();
+      appIcon.addPixmap(iconPix);
+    }
   }
+
+#ifdef _WIN32
+  if (appIcon.isNull()) {
+    const QString icoPath =
+        QCoreApplication::applicationDirPath() + "/icon_app.ico";
+    if (QFileInfo::exists(icoPath))
+      appIcon = QIcon(icoPath);
+  }
+#endif
 
   if (appIcon.isNull()) {
     const int renderSize = 256;
@@ -1773,6 +1910,18 @@ void PillWidget::onSettingChanged(QString key, QVariant val) {
     } else {
       sendBackendCommand("PRELOAD:0\n");
       // Kill popup process
+#ifndef _WIN32
+      if (m_globalHotkeys) {
+        delete m_globalHotkeys;
+        m_globalHotkeys = nullptr;
+      }
+      if (m_microPill) {
+        m_microPill->cancelSession();
+        m_microPill->hide();
+        m_microPill->deleteLater();
+        m_microPill = nullptr;
+      }
+#endif
       if (m_popupProcess) {
         QProcess *process = m_popupProcess;
         m_popupProcess = nullptr;
@@ -2295,17 +2444,7 @@ void PillWidget::setupTray() {
     suppressAutoShowBriefly(12000);
     hide();
   });
-  trayMenu->addAction("Quit App", this, [this]() {
-    m_isQuitting = true;
-    if (backendHealthTimer)
-      backendHealthTimer->stop();
-    if (trayIcon)
-      trayIcon->hide();
-    if (backendProcess && backendProcess->state() == QProcess::Running) {
-      backendProcess->write("QUIT\n");
-    }
-    qApp->quit();
-  });
+  trayMenu->addAction("Quit App", this, &PillWidget::quitApp);
   trayIcon->setContextMenu(trayMenu);
   trayIcon->show();
   connect(trayIcon, &QSystemTrayIcon::activated,
@@ -3251,6 +3390,7 @@ void PillWidget::initPopupServer() {
 }
 
 void PillWidget::launchPopupProcess() {
+#ifdef _WIN32
   QString appDir = QCoreApplication::applicationDirPath();
   QString popupPath = QDir(appDir).filePath("quickstt_popup.exe");
   if (!QFile::exists(popupPath)) {
@@ -3285,8 +3425,64 @@ void PillWidget::launchPopupProcess() {
             qWarning() << "[POPUP] Process error" << error << process->errorString();
           });
   qDebug() << "[POPUP] Launched quickstt_popup.exe";
+#else
+  // Linux: the micro pill runs in-process (Qt overlay) and global hotkeys are
+  // registered via X11 XGrabKey — there is no external popup executable.
+  initLinuxHotkeysAndOverlay();
+#endif
 }
 
+// Wayland fallback + secondary-launch entry point: compositor custom
+// shortcuts can invoke `quickstt-app --toggle-dictation`.
+void PillWidget::toggleDictationExternal() {
+  ensureBackendRunning();
+  if (isHidden()) {
+    centerOnScreen();
+    show();
+  }
+  raise();
+  sendBackendCommand("TOGGLE\n");
+}
+
+#ifndef _WIN32
+void PillWidget::initLinuxHotkeysAndOverlay() {
+  if (!m_microPill) {
+    m_microPill = new MicroPillOverlay();
+    connect(m_microPill, &MicroPillOverlay::sessionFinished, this, []() {});
+  }
+  if (m_globalHotkeys)
+    return;
+
+  m_globalHotkeys = new GlobalHotkeyX11(this);
+  connect(m_globalHotkeys, &GlobalHotkeyX11::hotkeyPressed, this,
+          [this](int hotkeyId) {
+            if (!m_microPill)
+              return;
+            if (hotkeyId == GlobalHotkeyX11::kToggleDictation) {
+              if (m_microPill->sessionActive())
+                m_microPill->stopSession();
+              else
+                m_microPill->startSession();
+            } else if (hotkeyId == GlobalHotkeyX11::kPushToTalk) {
+              if (!m_microPill->sessionActive())
+                m_microPill->startSession();
+            }
+          });
+  connect(m_globalHotkeys, &GlobalHotkeyX11::hotkeyReleased, this,
+          [this](int hotkeyId) {
+            if (!m_microPill)
+              return;
+            if (hotkeyId == GlobalHotkeyX11::kPushToTalk &&
+                m_microPill->sessionActive())
+              m_microPill->stopSession();
+          });
+
+  if (!m_globalHotkeys->isActive())
+    qWarning() << "[HOTKEY]" << m_globalHotkeys->failureReason();
+  else
+    qDebug() << "[HOTKEY] Ctrl+Shift+Space toggle · Ctrl+Space push-to-talk active";
+}
+#endif // !_WIN32
 void PillWidget::onPopupConnected() {
   // Only allow one popup client at a time
   if (m_popupClient) {

@@ -1299,6 +1299,7 @@ public:
   VoskAPI vosk;
   VoskModel *voskModel = nullptr;
   VoskRecognizer *voskRec = nullptr;
+  bool voskAvailable = false;
   std::string activeModelPath;
   mutable std::recursive_mutex modelMutex;
   std::atomic<bool> loadingModel{false};
@@ -1509,7 +1510,7 @@ public:
 
   STTEngine() {
     exeDir = getExeDir();
-    modelsDir = getAppDataDir() + "\\models";
+    modelsDir = (fs::path(getAppDataDir()) / "models").string();
     settings = loadSettings();
     lastSpeechTime = std::chrono::steady_clock::now();
     lastActivationTime = lastSpeechTime;
@@ -1534,18 +1535,33 @@ public:
     if (!fs::exists(voskPath)) voskPath = (fs::path(exeDir) / "libvosk.dll").string();
     const char* voskLabel="libvosk.dll";
 #else
-    std::string voskPath = (fs::path(exeDir) / "libvosk.so").string();
-    if (!fs::exists(voskPath)) voskPath = (fs::path(exeDir) / "vosk" / "libvosk.so").string();
-    if (!fs::exists(voskPath)) voskPath = "/usr/lib/libvosk.so";
-    if (!fs::exists(voskPath)) voskPath = "/usr/local/lib/libvosk.so";
+    // Search order: beside exe → exe/vosk → user data runtimes (Rust GUI layout)
+    // → system paths. Missing libvosk is NOT fatal: Vosk models are disabled but
+    // Parakeet / Nemotron direct pipelines keep working (prevents restart storms).
+    std::vector<std::string> voskCandidates = {
+        (fs::path(exeDir) / "libvosk.so").string(),
+        (fs::path(exeDir) / "vosk" / "libvosk.so").string(),
+        (fs::path(getAppDataDir()) / "runtimes" / "vosk" / "libvosk.so").string(),
+        "/usr/lib/libvosk.so",
+        "/usr/local/lib/libvosk.so",
+        "/usr/lib/x86_64-linux-gnu/libvosk.so",
+    };
+    std::string voskPath;
+    for (const auto &candidate : voskCandidates) {
+      if (fs::exists(candidate)) { voskPath = candidate; break; }
+    }
     const char* voskLabel="libvosk.so";
 #endif
-    if (!vosk.load(voskPath)) {
-      svc_log("FATAL: Failed to load %s from %s", voskLabel, voskPath.c_str());
-      return false;
+    if (!voskPath.empty() && vosk.load(voskPath)) {
+      voskAvailable = true;
+      vosk.set_log_level(-1);
+      svc_log("%s loaded OK", voskLabel);
+    } else {
+      voskAvailable = false;
+      svc_log("WARN: %s not found — Vosk models disabled; "
+              "Parakeet/Nemotron pipelines remain available",
+              voskLabel);
     }
-    vosk.set_log_level(-1);
-    svc_log("%s loaded OK", voskLabel);
 
     preprocessor.init(exeDir);
     svc_log("Audio preprocessing: RNNoise=%s TEN-VAD=%s",
@@ -1877,19 +1893,21 @@ public:
   }
 
   std::string findParakeetModelPath() {
-    // Search for the ONNX Parakeet model directory
-    std::string dataDir = getAppDataDir();
+    // Search for the ONNX Parakeet model directory (cross-platform joins)
+    const fs::path dataDir = getAppDataDir();
     std::vector<std::string> candidates = {
-        dataDir + "\\models\\nemo\\tdt_0_6b_v3_int8",
-        dataDir + "\\models\\handy_parakeet",
-        exeDir + "\\data\\models\\nemo\\tdt_0_6b_v3_int8",
-        exeDir + "\\models\\nemo\\tdt_0_6b_v3_int8",
+        (dataDir / "models" / "nemo" / "tdt_0_6b_v3_int8").string(),
+        (dataDir / "models" / "handy_parakeet").string(),
+        (fs::path(exeDir) / "data" / "models" / "nemo" / "tdt_0_6b_v3_int8").string(),
+        (fs::path(exeDir) / "models" / "nemo" / "tdt_0_6b_v3_int8").string(),
     };
     // Also check APPDATA
     char *appdata = getenv("APPDATA");
     if (appdata) {
-      candidates.push_back(std::string(appdata) + "\\QuickSTT\\models\\nemo\\tdt_0_6b_v3_int8");
-      candidates.push_back(std::string(appdata) + "\\QuickSTT\\models\\handy_parakeet");
+      candidates.push_back((fs::path(appdata) / "QuickSTT" / "models" / "nemo" /
+                            "tdt_0_6b_v3_int8").string());
+      candidates.push_back(
+          (fs::path(appdata) / "QuickSTT" / "models" / "handy_parakeet").string());
     }
     for (const auto &c : candidates) {
       if (fs::exists(c)) return c;
@@ -1900,31 +1918,34 @@ public:
   // Handy layout: models/nemotron/nemotron-3.5-asr-streaming-0.6b/*.gguf
   // Also accept a direct .gguf path or older speech_streaming_0_6b dirs.
   std::string findNemotronModelPath() {
-    std::string dataDir = getAppDataDir();
+    const fs::path dataDir = getAppDataDir();
     std::vector<std::string> candidates = {
-        dataDir + "\\models\\nemotron\\nemotron-3.5-asr-streaming-0.6b",
-        dataDir + "\\models\\nemotron",
-        dataDir + "\\models\\nemotron\\speech_streaming_0_6b",
-        exeDir + "\\data\\models\\nemotron\\nemotron-3.5-asr-streaming-0.6b",
-        exeDir + "\\models\\nemotron\\nemotron-3.5-asr-streaming-0.6b",
+        (dataDir / "models" / "nemotron" / "nemotron-3.5-asr-streaming-0.6b").string(),
+        (dataDir / "models" / "nemotron").string(),
+        (dataDir / "models" / "nemotron" / "speech_streaming_0_6b").string(),
+        (fs::path(exeDir) / "data" / "models" / "nemotron" /
+         "nemotron-3.5-asr-streaming-0.6b").string(),
+        (fs::path(exeDir) / "models" / "nemotron" /
+         "nemotron-3.5-asr-streaming-0.6b").string(),
+        (fs::path(exeDir) / "models" / "nemotron").string(),
     };
     // LocalAppData is the primary QuickSTT models root on Windows.
     char *local = getenv("LOCALAPPDATA");
     if (local) {
       candidates.insert(
           candidates.begin(),
-          std::string(local) +
-              "\\QuickSTT\\models\\nemotron\\nemotron-3.5-asr-streaming-0.6b");
-      candidates.push_back(std::string(local) +
-                           "\\QuickSTT\\models\\nemotron");
+          (fs::path(local) / "QuickSTT" / "models" / "nemotron" /
+           "nemotron-3.5-asr-streaming-0.6b").string());
+      candidates.push_back(
+          (fs::path(local) / "QuickSTT" / "models" / "nemotron").string());
     }
     char *appdata = getenv("APPDATA");
     if (appdata) {
       candidates.push_back(
-          std::string(appdata) +
-          "\\QuickSTT\\models\\nemotron\\nemotron-3.5-asr-streaming-0.6b");
-      candidates.push_back(std::string(appdata) +
-                           "\\QuickSTT\\models\\nemotron");
+          (fs::path(appdata) / "QuickSTT" / "models" / "nemotron" /
+           "nemotron-3.5-asr-streaming-0.6b").string());
+      candidates.push_back(
+          (fs::path(appdata) / "QuickSTT" / "models" / "nemotron").string());
     }
     auto dirHasGguf = [](const std::string &dir) -> bool {
       if (!fs::exists(dir) || !fs::is_directory(dir))
@@ -2523,6 +2544,11 @@ public:
 
   bool loadVoskModel() {
     std::lock_guard<std::recursive_mutex> lock(modelMutex);
+    if (!voskAvailable) {
+      svc_log("Vosk load skipped: libvosk runtime unavailable");
+      sendEvent("STATE", "3,Vosk runtime missing — install a Vosk model");
+      return false;
+    }
     std::string path = findModelPath(modelsDir, activeEngine);
     if (path.empty())
       return false;
@@ -3869,14 +3895,29 @@ static void inputLoop(STTEngine &engine) {
 // Main entry point
 // ═══════════════════════════════════════════════════════════════════════════════
 
+static STTEngine *g_signalEngine = nullptr;
+extern "C" void quicksttSignalHandler(int sig) {
+  (void)sig;
+  // Terminate immediately — the GUI sends QUIT over stdin for graceful exits.
+  if (g_signalEngine)
+    g_signalEngine->stop();
+  _exit(0);
+}
+
 int main() {
   // Ensure stdout is unbuffered for pipe communication
   setvbuf(stdout, nullptr, _IONBF, 0);
   setvbuf(stderr, nullptr, _IONBF, 0);
 
+#ifndef _WIN32
+  std::signal(SIGTERM, quicksttSignalHandler);
+  std::signal(SIGINT, quicksttSignalHandler);
+#endif
+
   sendEvent("INIT", "Native Service Ready");
 
   STTEngine engine;
+  g_signalEngine = &engine;
   if (!engine.init()) {
     sendEvent("ERROR", "Engine init failed");
     return 1;

@@ -100,6 +100,9 @@ jobs:
             cp -f "$STT" dist/payload/stt_service 2>/dev/null || true
             cp -f target/release/quickstt-app dist/payload/quickstt-app 2>/dev/null || true
             cp -f target/release/stt_service dist/payload/stt_service 2>/dev/null || true
+            # SVG assets consumed by the Qt widget app at runtime
+            cp -f ../Source/mic_active.svg ../Source/mic_inactive.svg ../Source/Untitled-1.svg dist/payload/ 2>/dev/null || true
+            cp -f assets/icon_app.png dist/payload/icon_app.png 2>/dev/null || true
             cp -r target/release/tools dist/payload/tools 2>/dev/null || true
             cp -r target/release/wakeword_models dist/payload/wakeword_models 2>/dev/null || true
             mkdir -p dist/payload/assets
@@ -202,7 +205,16 @@ jobs:
 
           Floating offline voice typing pill — wakeword, VAD, tray, global hotkeys.
           Models download in-app: Vosk small EN 50M · Parakeet TDT 0.6B v3 INT8 · Nemotron 3.5 ASR Streaming 0.6B Q8_0 (716MB, transcribe.cpp).
-          NEW: full C++ Qt widget app included — run \`quickstt-app\` for the classic Dashboard + Pill UI (auto model suspend after idle).
+          Full C++ Qt widget app included — run \`quickstt-app\` for the classic Dashboard + Pill UI.
+
+          ### What's new in this release (widget app)
+          - Fixed backend crash-loop on Linux: libvosk.so now auto-provisioned with Vosk models; missing runtime no longer kills stt_service.
+          - Models install to ~/.local/share/QuickSTT/models (shared with the Rust app + native service) — no more read-only /usr/lib failures.
+          - Real SVG mic/app icons everywhere (pill, tray at all DPI sizes) — no more blue-dot fallback.
+          - Robust Quit: engine killed on exit, tray item removed, no restart storms (non-blocking backoff).
+          - **Ctrl+Shift+Space** toggles the new bottom-center micro-pill overlay · hold **Ctrl+Space** = push-to-talk (X11). Wayland: bind a compositor shortcut to \`quickstt-app --toggle-dictation\`.
+          - Micro-pill overlay types into any focused window via xdotool (or clipboard), with live waveform + transcribing animation.
+          - Polished model dropdown (dark rounded menu, hover selection).
 
           ### Linux Mint / Ubuntu / Debian — one-liner
           \`\`\`bash
@@ -218,7 +230,7 @@ jobs:
           ### First-run setup
           1. Pill appears bottom-center. Right-click it → Dashboard → Models → **Download** next to *Vosk Small EN (50M)* and *Parakeet TDT 0.6B v3*.
           2. Tray icon in panel: left-click toggles pill, menu has Show / Hide / Dashboard / Quit.
-          3. Hotkeys: **Super+Space** or Ctrl+Shift+Space toggle listening · Ctrl+Shift+H show/hide pill · hold Ctrl+Space = on-command transcription (enable in Dashboard → Wakeword).
+          3. Hotkeys: **Ctrl+Shift+Space** toggle micro-pill dictation · hold **Ctrl+Space** push-to-talk · Ctrl+Shift+H show/hide main pill.
 
           ### Checksums
           See \`SHA256SUMS\`.

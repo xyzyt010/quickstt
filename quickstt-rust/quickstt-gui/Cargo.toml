@@ -57,7 +57,7 @@ Floating voice typing widget for Linux — X11 & Wayland, transparent always-on-
  Includes integrated STT backends: Vosk small EN, Parakeet TDT 0.6B, Nemotron 3.5 streaming."""
 section = "utils"
 priority = "optional"
-depends = "libgtk-3-0, libayatana-appindicator3-1 | libappindicator3-1, librsvg2-2, libasound2, libpulse0, libx11-6, libxi6, libxtst6, libglib2.0-0, libqt6core6, libqt6gui6, libqt6widgets6, libqt6svg6, libqt6network6"
+depends = "libgtk-3-0, libayatana-appindicator3-1 | libappindicator3-1, librsvg2-2, libasound2, libpulse0, libportaudio2, libx11-6, libxi6, libxtst6, xdotool, libglib2.0-0, libqt6core6, libqt6gui6, libqt6widgets6, libqt6svg6, libqt6network6"
 assets = [
   ["../target/release/QuickSTT", "usr/bin/quickstt", "755"],
   ["../assets/quickstt.desktop", "usr/share/applications/quickstt.desktop", "644"],
@@ -66,6 +66,10 @@ assets = [
   ["../assets/quickstt-app-wrapper.sh", "usr/bin/quickstt-app", "755"],
   ["../../build/quickstt-app", "usr/lib/quickstt/quickstt-app", "755"],
   ["../../build/stt_service", "usr/lib/quickstt/stt_service", "755"],
+  ["../../Source/mic_active.svg", "usr/lib/quickstt/mic_active.svg", "644"],
+  ["../../Source/mic_inactive.svg", "usr/lib/quickstt/mic_inactive.svg", "644"],
+  ["../../Source/Untitled-1.svg", "usr/lib/quickstt/Untitled-1.svg", "644"],
+  ["../assets/icon_app.png", "usr/lib/quickstt/icon_app.png", "644"],
   ["../target/release/tools/parakeet/parakeet_engine", "usr/lib/quickstt/tools/parakeet/parakeet_engine", "755"],
   ["../target/release/tools/nemotron/transcribe-cli", "usr/lib/quickstt/tools/nemotron/transcribe-cli", "755"],
   ["../wakeword_models/agent/config.json", "usr/lib/quickstt/wakeword_models/agent/config.json", "644"],
