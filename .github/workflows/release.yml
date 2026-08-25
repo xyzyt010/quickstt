@@ -34,6 +34,7 @@ jobs:
             libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
             libasound2-dev libpulse-dev portaudio19-dev \
             libx11-dev libxi-dev libxtst-dev libxdo-dev libssl-dev \
+            libopenblas-dev \
             file patchelf zsync desktop-file-utils
           cargo install cargo-deb --locked || true
           # linuxdeploy
@@ -53,6 +54,15 @@ jobs:
           file ../quickstt-rust/target/release/tools/parakeet/parakeet_engine
       - name: Stage wakeword models for tarball
         run: cp -r quickstt-rust/wakeword_models quickstt-rust/target/release/wakeword_models
+      - name: Build transcribe.cpp (Nemotron GGUF engine)
+        run: |
+          git clone --depth 1 https://github.com/handy-computer/transcribe.cpp /tmp/tcpp
+          cmake -S /tmp/tcpp -B /tmp/tcpp/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/tcpp/build -j"$(nproc)"
+          mkdir -p quickstt-rust/target/release/tools/nemotron
+          cp -f /tmp/tcpp/build/bin/transcribe-cli quickstt-rust/target/release/tools/nemotron/
+          file quickstt-rust/target/release/tools/nemotron/transcribe-cli
+          ldd quickstt-rust/target/release/tools/nemotron/transcribe-cli | head -20
       - name: CMake stt_service
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -183,7 +193,7 @@ jobs:
           ## QuickSTT ${VER} — Ubuntu/Debian amd64 (Mint 21/22)
 
           Floating offline voice typing pill — wakeword, VAD, tray, global hotkeys.
-          Models download in-app: Vosk small EN 50M · Parakeet TDT 0.6B v3 INT8.
+          Models download in-app: Vosk small EN 50M · Parakeet TDT 0.6B v3 INT8 · Nemotron 3.5 ASR Streaming 0.6B Q8_0 (716MB, transcribe.cpp).
 
           ### Linux Mint / Ubuntu / Debian — one-liner
           \`\`\`bash

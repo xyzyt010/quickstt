@@ -62,9 +62,7 @@ fn install_model(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<
     match desc.engine_family {
         EngineFamily::Vosk => install_vosk(desc, state),
         EngineFamily::ParakeetRust => install_parakeet(desc, state),
-        EngineFamily::Nemotron => anyhow::bail!(
-            "Nemotron streaming engine is Windows-only for now — Linux build ships Vosk + Parakeet"
-        ),
+        EngineFamily::Nemotron => install_nemotron(desc, state),
         _ => anyhow::bail!("No download source registered for {}", desc.name),
     }
 }
@@ -301,4 +299,28 @@ fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+// ── Nemotron 3.5 ASR Streaming 0.6B (transcribe.cpp GGUF) ──
+
+const NEMOTRON_Q8_URL: &str =
+    "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf";
+
+fn install_nemotron(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<()> {
+    let models_root = catalog::models_root();
+    let model_dir = models_root.join(&desc.model_dir);
+    std::fs::create_dir_all(&model_dir)?;
+    set_status(state, "Downloading Nemotron 3.5 ASR Streaming Q8_0 (716MB)…".into());
+    let dest = model_dir.join("nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf");
+    if dest.exists() && std::fs::metadata(&dest).map(|m| m.len() > 700_000_000).unwrap_or(false) {
+        return Ok(());
+    }
+    let mut last = 255u8;
+    download_file(NEMOTRON_Q8_URL, &dest, &mut |p| {
+        if p != last && p % 5 == 0 {
+            last = p;
+            set_status(state, format!("Downloading Nemotron… {}%", p));
+        }
+    })?;
+    Ok(())
 }

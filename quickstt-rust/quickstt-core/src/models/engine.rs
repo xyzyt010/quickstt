@@ -64,11 +64,14 @@ impl SttEngineConfig {
             models_root.join(format!("runtimes/vosk/vosk_transcriber{}", exe_ext)),
             models_root.join(format!("vosk/small_en_us_0.15{}", "")),
         ];
-        // Nemotron streaming GGUF engine — built from tools/nemotron
+        // Nemotron streaming GGUF engine — transcribe.cpp CLI (Linux CI build)
+        // or the legacy Handy helper binary (Windows).
         let nemotron_candidates = [
+            exe_dir.join(format!("tools/nemotron/transcribe-cli{}", exe_ext)),
             exe_dir.join(format!("tools/nemotron/nemotron_engine{}", exe_ext)),
             exe_dir.join(format!("tools/nemotron/transcribe{}", exe_ext)),
-            models_root.join(format!("runtimes/nemotron/nemotron_engine{}", exe_ext)),
+            models_root.join(format!("runtimes/nemotron/transcribe-cli{}", exe_ext)),
+            PathBuf::from("/usr/lib/quickstt/tools/nemotron/transcribe-cli"),
             PathBuf::from(format!("/usr/lib/quickstt/tools/nemotron/nemotron_engine{}", exe_ext)),
             exe_dir.join(format!("nemotron_engine{}", exe_ext)),
         ];
@@ -740,13 +743,33 @@ fn transcribe_nemotron(
     model_dir: &Path,
     wav_path: &Path,
 ) -> Result<String> {
-    // Nemotron 3.5 ASR Streaming 0.6B GGUF — uses Handy transcribe library (GGML) + VAD.
-    // On Linux the engine is tools/nemotron/nemotron_engine or transcribe binary.
-    let cli = config.nemotron_path.as_ref().context("nemotron_engine not found. Build tools/nemotron on Linux (cmake -DGGML_BACKEND=ON) to produce nemotron_engine")?;
-    // Nemotron expects: nemotron_engine --model <gguf> --audio <wav> --vad
-    // Find GGUF file in model_dir
+    let cli = config.nemotron_path.as_ref().context(
+        "Nemotron engine not found — install the Nemotron 3.5 ASR Streaming 0.6B model \
+         from Settings → Models (the transcribe.cpp CLI ships with the app)",
+    )?;
     let gguf = find_gguf_file(model_dir)?;
-    info!("Nemotron: {:?} model: {:?} wav: {:?}", cli, gguf, wav_path);
+    let is_tcpp_cli = cli.file_name().and_then(|f| f.to_str()) == Some("transcribe-cli");
+
+    if is_tcpp_cli {
+        // upstream transcribe.cpp CLI: requires an explicit language locale
+        info!("Nemotron via transcribe-cli {:?} gguf={:?}", cli, gguf);
+        let output = Command::new(cli)
+            .arg("-m").arg(&gguf)
+            .arg("--language").arg("en-US")
+            .arg(wav_path)
+            .output()
+            .context("Failed to run transcribe-cli")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("transcribe-cli error: {}", stderr);
+            anyhow::bail!("transcribe-cli failed: {}", stderr);
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok(text);
+    }
+
+    // Legacy Handy helper binary (Windows): --model/--audio/--vad
+    info!("Nemotron legacy engine {:?} model={:?} wav={:?}", cli, gguf, wav_path);
     let output = Command::new(cli)
         .arg("--model").arg(&gguf)
         .arg("--audio").arg(wav_path)
