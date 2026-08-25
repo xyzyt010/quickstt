@@ -35,7 +35,7 @@ jobs:
             libasound2-dev libpulse-dev portaudio19-dev \
             libx11-dev libxi-dev libxtst-dev libxdo-dev libssl-dev \
             libopenblas-dev \
-            qt6-base-dev qt6-svg-dev qt6-multimedia-dev \
+            qt6-base-dev libqt6svg6-dev qt6-multimedia-dev \
             libgl1-mesa-dev \
             file patchelf zsync desktop-file-utils
           cargo install cargo-deb --locked || true
