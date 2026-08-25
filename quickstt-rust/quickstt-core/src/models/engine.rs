@@ -361,10 +361,48 @@ fn transcribe_parakeet_rust(
     Ok(text.unwrap_or_default())
 }
 
+/// Locate a bundled onnxruntime shared library for ort/load-dynamic.
+fn locate_onnxruntime_dylib(engine_dir: &Path) -> Option<PathBuf> {
+    let models_root = crate::models::catalog::models_root();
+    let names: &[&str] = if cfg!(target_os = "windows") {
+        &["onnxruntime.dll"]
+    } else {
+        &["libonnxruntime.so", "libonnxruntime.so.1.19.2"]
+    };
+    let mut dirs = vec![
+        engine_dir.to_path_buf(),
+        engine_dir.join("../lib"),
+        PathBuf::from("/usr/lib/quickstt/tools/parakeet"),
+        models_root.join("runtimes/parakeet"),
+    ];
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+    {
+        dirs.push(exe_dir.join("tools/parakeet"));
+        dirs.push(exe_dir);
+    }
+    for dir in dirs {
+        for name in names {
+            let p = dir.join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 fn spawn_parakeet_session(exe: &Path) -> Result<ParakeetSession> {
     let workdir = exe.parent().unwrap_or(Path::new("."));
     info!("Starting Parakeet Rust engine: {:?}", exe);
-    let mut child = Command::new(exe)
+    let mut cmd = Command::new(exe);
+    // ort/load-dynamic: point the engine at our bundled onnxruntime when present.
+    if let Some(dylib) = locate_onnxruntime_dylib(workdir) {
+        info!("ORT_DYLIB_PATH={:?}", dylib);
+        cmd.env("ORT_DYLIB_PATH", &dylib);
+    }
+    let mut child = cmd
         .current_dir(workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

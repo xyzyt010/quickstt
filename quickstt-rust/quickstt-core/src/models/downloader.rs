@@ -215,6 +215,12 @@ fn install_parakeet(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Resu
     let model_dir = models_root.join(&desc.model_dir);
     std::fs::create_dir_all(&model_dir)?;
 
+    // 0. ONNX Runtime shared library (official MS release built on Ubuntu
+    //    20.04 → glibc 2.31, works on Mint 21/22). parakeet_engine uses
+    //    ort/load-dynamic and is pointed at it via ORT_DYLIB_PATH.
+    #[cfg(target_os = "linux")]
+    install_onnxruntime_linux(state)?;
+
     for (i, fname) in PARAKEET_FILES.iter().enumerate() {
         set_status(
             state,
@@ -233,6 +239,49 @@ fn install_parakeet(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Resu
             }
         })?;
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_onnxruntime_linux(state: &SharedState) -> anyhow::Result<()> {
+    const ORT_URL: &str =
+        "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-1.19.2.tgz";
+    let rt_dir = catalog::models_root().join("runtimes/parakeet");
+    let dest_so = rt_dir.join("libonnxruntime.so");
+    if dest_so.exists() {
+        return Ok(());
+    }
+    set_status(state, "Downloading ONNX Runtime…".into());
+    let tgz = tmp_zip("onnxruntime-linux-x64-1.19.2.tgz");
+    download_file(ORT_URL, &tgz, &mut |_| {})?;
+    set_status(state, "Extracting ONNX Runtime…".into());
+    let unpack = tmp_zip("ort-unpack");
+    let _ = std::fs::remove_dir_all(&unpack);
+    std::fs::create_dir_all(&unpack)?;
+    let f = std::fs::File::open(&tgz)?;
+    let gz = flate2::read::GzDecoder::new(std::io::BufReader::new(f));
+    let mut archive = tar::Archive::new(gz);
+    archive.unpack(&unpack)?;
+    // locate lib/libonnxruntime.so.1.19.2 inside the extracted tree
+    let src = find_file(&unpack, "libonnxruntime.so.1.19.2")
+        .or_else(|| find_file(&unpack, "libonnxruntime.so"));
+    if let Some(src) = src {
+        std::fs::create_dir_all(&rt_dir)?;
+        std::fs::copy(&src, &dest_so)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&dest_so) {
+                let mut perm = meta.permissions();
+                perm.set_mode(perm.mode() | 0o755);
+                let _ = std::fs::set_permissions(&dest_so, perm);
+            }
+        }
+    } else {
+        anyhow::bail!("onnxruntime archive did not contain libonnxruntime.so");
+    }
+    let _ = std::fs::remove_file(&tgz);
+    let _ = std::fs::remove_dir_all(&unpack);
     Ok(())
 }
 
