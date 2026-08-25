@@ -74,25 +74,32 @@ jobs:
           mkdir -p dist
           BIN="target/release/QuickSTT"
           STT="target/release/stt_service"
+          # linuxdeploy requires the icon basename to match desktop Icon= entry
+          cp -f assets/icon_app.png assets/quickstt.png
           EXTRA=""
           [[ -f "$STT" ]] && EXTRA="-e $STT"
-          linuxdeploy --appdir dist/AppDir -e "$BIN" $EXTRA -d assets/quickstt.desktop -i assets/icon_app.png --plugin gtk --output appimage 2>&1 | tail -n 40 || true
+          linuxdeploy --appdir dist/AppDir -e "$BIN" $EXTRA -d assets/quickstt.desktop -i assets/quickstt.png --plugin gtk --output appimage 2>&1 | tail -n 40 || true
           if ! ls dist/*.AppImage 1>/dev/null 2>&1; then
-            FILES=(QuickSTT)
-            [[ -f target/release/stt_service ]] && FILES+=(stt_service)
-            [[ -d target/release/tools ]] && FILES+=(tools)
-            [[ -d target/release/wakeword_models ]] && FILES+=(wakeword_models)
-            echo "Packing: ${FILES[*]}"
-            tar czf "dist/quickstt-${GITHUB_REF_NAME:-local}-x86_64.tar.gz" \
-              -C target/release "${FILES[@]}" \
-              -C ../assets quickstt.desktop icon_app.png
+            echo "AppImage failed — building plain tarball payload"
+            rm -rf dist/payload && mkdir -p dist/payload
+            cp -f "$BIN" dist/payload/QuickSTT
+            cp -f "$STT" dist/payload/stt_service 2>/dev/null || true
+            cp -r target/release/tools dist/payload/tools 2>/dev/null || true
+            cp -r target/release/wakeword_models dist/payload/wakeword_models 2>/dev/null || true
+            mkdir -p dist/payload/assets
+            cp -f assets/quickstt.desktop assets/icon_app.png dist/payload/assets/
+            tar czf "dist/quickstt-${GITHUB_REF_NAME:-local}-x86_64.tar.gz" -C dist/payload .
+            tar tzf "dist/quickstt-${GITHUB_REF_NAME:-local}-x86_64.tar.gz" | head -20
           fi
           ls -lh dist/*
       - name: SHA256SUMS
         working-directory: quickstt-rust
         run: |
           cd dist
-          sha256sum *.deb *.AppImage *.tar.gz 2>/dev/null | tee SHA256SUMS
+          rm -f SHA256SUMS
+          sha256sum *.deb 2>/dev/null >> SHA256SUMS || true
+          sha256sum *.AppImage 2>/dev/null >> SHA256SUMS || true
+          sha256sum *.tar.gz 2>/dev/null >> SHA256SUMS || true
           cat SHA256SUMS
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -170,38 +177,32 @@ jobs:
           (cd release && sha256sum * | tee SHA256SUMS; cat SHA256SUMS)
       - name: Release notes
         run: |
-          cat > /tmp/notes.md <<'NOTES'
-          ## QuickSTT ${{ github.ref_name }} — Windows & Ubuntu/Debian amd64
+          VER="${{ github.ref_name }}"
+          DEB_NAME="quickstt_2.0.0.alpha.2-1_amd64.deb"
+          cat > /tmp/notes.md <<NOTES
+          ## QuickSTT ${VER} — Ubuntu/Debian amd64 (Mint 21/22)
 
-          Floating offline voice typing, wakeword, and automation. Pill 360×50, <5 MB idle.
+          Floating offline voice typing pill — wakeword, VAD, tray, global hotkeys.
+          Models download in-app: Vosk small EN 50M · Parakeet TDT 0.6B v3 INT8.
 
-          ### Linux Mint / Ubuntu / Debian — one-liner (amd64)
-          ```bash
-          wget -O /tmp/quickstt.deb https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/quickstt_2.0.0-alpha.1_amd64.deb
+          ### Linux Mint / Ubuntu / Debian — one-liner
+          \`\`\`bash
+          wget -O /tmp/quickstt.deb https://github.com/${{ github.repository }}/releases/download/${VER}/${DEB_NAME}
           sudo apt install -y /tmp/quickstt.deb && quickstt &
-          ```
-          Or AppImage (no sudo):
-          ```bash
-          wget -O /tmp/QuickSTT.AppImage https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/QuickSTT-2.0.0-alpha.1-x86_64.AppImage
-          chmod +x /tmp/QuickSTT.AppImage && /tmp/QuickSTT.AppImage &
-          ```
-          Or installer script:
-          ```bash
-          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
-          ```
+          \`\`\`
+          Or tarball (no sudo):
+          \`\`\`bash
+          wget -O /tmp/quickstt.tar.gz https://github.com/${{ github.repository }}/releases/download/${VER}/quickstt-${VER}-x86_64.tar.gz
+          mkdir -p ~/quickstt && tar xzf /tmp/quickstt.tar.gz -C ~/quickstt && ~/quickstt/QuickSTT &
+          \`\`\`
 
-          ### Windows — portable
-          Download `QuickSTT_Portable.exe` below and double-click. It bootstraps `QuickSTT_App.exe` + `stt_service.exe`.
-
-          ### Models
-          - Vosk small EN 0.15 (50M) · Parakeet TDT 0.6B v3 INT8 (640M) · Nemotron 3.5 Q8_0 (716M)
-          - Path Linux: `~/.local/share/QuickSTT/models/`  Windows: `%APPDATA%\QuickSTT\models\`
-          - Download via app Dashboard → Models or `tools/nemotron/fetch_and_convert.py`
+          ### First-run setup
+          1. Pill appears bottom-center. Right-click it → Dashboard → Models → **Download** next to *Vosk Small EN (50M)* and *Parakeet TDT 0.6B v3*.
+          2. Tray icon in panel: left-click toggles pill, menu has Show / Hide / Dashboard / Quit.
+          3. Hotkeys: **Super+Space** or Ctrl+Shift+Space toggle listening · Ctrl+Shift+H show/hide pill · hold Ctrl+Space = on-command transcription (enable in Dashboard → Wakeword).
 
           ### Checksums
-          See `SHA256SUMS` in assets.
-
-          Full docs: README → docs/BUILDING.md, docs/PACKAGING.md.
+          See \`SHA256SUMS\`.
           NOTES
           cat /tmp/notes.md
       - name: Create Release
