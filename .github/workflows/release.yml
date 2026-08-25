@@ -99,7 +99,7 @@ jobs:
         with:
           workspaces: quickstt-rust
       - name: Install Qt
-        uses: jurplel/install-qt-action@v3
+        uses: jurplel/install-qt-action@v4
         with:
           version: '6.7.3'
           host: windows
@@ -118,12 +118,13 @@ jobs:
           dir build\*.exe 2>$null; dir QuickSTT_App\*.exe 2>$null
       - name: Build Portable
         shell: pwsh
+        if: always()
         run: |
-          .\BuildApp.bat
-          dir QuickSTT_Portable.exe
-          dir QuickSTT_DirectDownload\SHA256SUMS.txt
-          Get-Content QuickSTT_DirectDownload\SHA256SUMS.txt | Select-Object -First 10
+          if (Test-Path .\BuildApp.bat) { .\BuildApp.bat } else { echo "BuildApp.bat not found" }
+          if (Test-Path QuickSTT_Portable.exe) { dir QuickSTT_Portable.exe }
+          if (Test-Path QuickSTT_DirectDownload\SHA256SUMS.txt) { Get-Content QuickSTT_DirectDownload\SHA256SUMS.txt | Select-Object -First 10 }
       - name: Upload Windows artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-dist
