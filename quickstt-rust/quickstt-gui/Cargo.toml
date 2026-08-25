@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+description = "QuickSTT — floating offline voice typing pill with wakeword for Linux and Windows"
 
 [[bin]]
 name = "QuickSTT"
@@ -50,7 +51,6 @@ winresource = "0.1.17"
 name = "quickstt"
 maintainer = "QuickSTT Team <support@quickstt.com>"
 copyright = "2024-2026, QuickSTT Team <support@quickstt.com>"
-license-file = ["../LICENSE", "0"]
 extended-description = """\
 Floating voice typing widget for Linux — X11 & Wayland, transparent always-on-top.
  Includes integrated STT backends: Vosk small EN, Parakeet TDT 0.6B, Nemotron 3.5 streaming."""

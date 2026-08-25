@@ -101,10 +101,10 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v3
         with:
-          version: '6.8.0'
+          version: '6.7.3'
           host: windows
           target: desktop
-          arch: win64_msvc2022_64
+          arch: win64_msvc2019_64
           modules: qtsvg qtmultimedia
       - name: Cargo build (Rust GUI)
         working-directory: quickstt-rust
