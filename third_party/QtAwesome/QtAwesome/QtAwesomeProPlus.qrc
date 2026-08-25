@@ -1,0 +1,32 @@
+<RCC>
+    <qresource prefix="/">
+        <file>fonts/Font Awesome 7 Brands-Regular-400.otf</file>
+        <file>fonts/pro/Font Awesome 7 Chisel-Regular-400.otf</file>
+        <file>fonts/pro/Font Awesome 7 Duotone-Light-300.otf</file>
+        <file>fonts/pro/Font Awesome 7 Duotone-Regular-400.otf</file>
+        <file>fonts/pro/Font Awesome 7 Duotone-Solid-900.otf</file>
+        <file>fonts/pro/Font Awesome 7 Duotone-Thin-100.otf</file>
+        <file>fonts/pro/Font Awesome 7 Etch-Solid-900.otf</file>
+        <file>fonts/pro/Font Awesome 7 Jelly Duo-Regular-400.otf</file>
+        <file>fonts/pro/Font Awesome 7 Jelly Fill-Regular-400.otf</file>
+        <file>fonts/pro/Font Awesome 7 Jelly-Regular-400.otf</file>
+        <file>fonts/pro/Font Awesome 7 Notdog Duo-Solid-900.otf</file>
+        <file>fonts/pro/Font Awesome 7 Notdog-Solid-900.otf</file>
+        <file>fonts/pro/Font Awesome 7 Pro-Light-300.otf</file>
+        <file>fonts/pro/Font Awesome 7 Pro-Regular-400.otf</file>
+        <file>fonts/pro/Font Awesome 7 Pro-Solid-900.otf</file>
+        <file>fonts/pro/Font Awesome 7 Pro-Thin-100.otf</file>
+        <file>fonts/pro/Font Awesome 7 Sharp Duotone-Light-300.otf</file>
+        <file>fonts/pro/Font Awesome 7 Sharp Duotone-Regular-400.otf</file>
+        <file>fonts/pro/Font Awesome 7 Sharp Duotone-Solid-900.otf</file>
+        <file>fonts/pro/Font Awesome 7 Sharp Duotone-Thin-100.otf</file>
+        <file>fonts/pro/Font Awesome 7 Sharp-Light-300.otf</file>
+        <file>fonts/pro/Font Awesome 7 Sharp-Regular-400.otf</file>
+        <file>fonts/pro/Font Awesome 7 Sharp-Solid-900.otf</file>
+        <file>fonts/pro/Font Awesome 7 Sharp-Thin-100.otf</file>
+        <file>fonts/pro/Font Awesome 7 Slab Press-Regular-400.otf</file>
+        <file>fonts/pro/Font Awesome 7 Slab-Regular-400.otf</file>
+        <file>fonts/pro/Font Awesome 7 Thumbprint-Light-300.otf</file>
+        <file>fonts/pro/Font Awesome 7 Whiteboard-Semibold-600.otf</file>
+    </qresource>
+</RCC>

@@ -5,6 +5,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QFileIconProvider>
 #include <QFileSystemWatcher>
 #include <QFont>
 #include <QHBoxLayout>
@@ -16,6 +17,8 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QListWidget>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QMainWindow>
 #include <QMenu>
 #include <QNetworkDatagram>
@@ -33,8 +36,58 @@
 #include <QUdpSocket>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <windows.h>
 
 static QString getAppPath() { return QCoreApplication::applicationDirPath(); }
+constexpr auto kServerSingleInstanceKey = "QuickSTT_Server_SingleInstance_v1";
+constexpr auto kServerActivationServerName = "QuickSTT_Server_Activation_v1";
+using SetAppUserModelIdFn = HRESULT(WINAPI *)(PCWSTR);
+
+static void setExplicitAppUserModelId(const wchar_t *appId) {
+  HMODULE shell32 = LoadLibraryW(L"shell32.dll");
+  if (!shell32)
+    return;
+  const auto fn = reinterpret_cast<SetAppUserModelIdFn>(
+      GetProcAddress(shell32, "SetCurrentProcessExplicitAppUserModelID"));
+  if (fn)
+    fn(appId);
+  FreeLibrary(shell32);
+}
+
+static QIcon loadPackagedServerIcon() {
+  const QString icoPath = getAppPath() + "/icon_server.ico";
+  if (QFileInfo::exists(icoPath))
+    return QIcon(icoPath);
+
+  const QString pngPath = getAppPath() + "/server_icon.png";
+  if (QFileInfo::exists(pngPath))
+    return QIcon(pngPath);
+
+  return QIcon();
+}
+
+static bool notifyRunningInstance() {
+  QLocalSocket socket;
+  socket.connectToServer(QString::fromLatin1(kServerActivationServerName),
+                         QIODevice::WriteOnly);
+  if (!socket.waitForConnected(800))
+    return false;
+  socket.write("SHOW\n");
+  socket.flush();
+  socket.waitForBytesWritten(800);
+  socket.disconnectFromServer();
+  return true;
+}
+
+static void appendBootTrace(const QString &message) {
+  QFile f(getAppPath() + "/server_boot_trace.txt");
+  if (f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+    QTextStream out(&f);
+    out << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+        << " " << message << "\n";
+    f.close();
+  }
+}
 
 // --- Portable JSON config helpers ---
 static QString configFilePath() { return getAppPath() + "/server_config.json"; }
@@ -206,9 +259,12 @@ class ServerWindow : public QMainWindow {
   QTimer *autoRetryTimer;
   QUdpSocket *discoverySocketV4 = nullptr;
   QUdpSocket *discoverySocketV6 = nullptr;
+  HICON m_smallWinIcon = nullptr;
+  HICON m_bigWinIcon = nullptr;
 
 public:
   ServerWindow() {
+    appendBootTrace("ServerWindow ctor begin");
     autoRetryTimer = new QTimer(this);
     connect(autoRetryTimer, &QTimer::timeout, this,
             &ServerWindow::retryFailedInterfaces);
@@ -319,18 +375,35 @@ public:
 
     // Set window/taskbar icon from SVG
     loadAndSetIcon();
+    applyNativeWindowIcons();
     setupDiscoverySockets();
+    appendBootTrace("ServerWindow ctor after sockets");
 
     setupTray();
     setupFileWatcher();
 
-    // Auto-start broadcast with saved settings on launch
-    QTimer::singleShot(500, this, &ServerWindow::toggleServer);
-    QTimer::singleShot(2000, this, &ServerWindow::hide);
-
     // Make all static labels selectable
     for (QLabel *lbl : findChildren<QLabel *>()) {
       lbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    }
+    appendBootTrace("ServerWindow ctor end");
+  }
+
+  void restoreFromExternalTrigger() {
+    applyNativeWindowIcons();
+    showNormal();
+    raise();
+    activateWindow();
+  }
+
+  ~ServerWindow() override {
+    if (m_smallWinIcon) {
+      DestroyIcon(m_smallWinIcon);
+      m_smallWinIcon = nullptr;
+    }
+    if (m_bigWinIcon) {
+      DestroyIcon(m_bigWinIcon);
+      m_bigWinIcon = nullptr;
     }
   }
 
@@ -485,28 +558,82 @@ public:
   }
 
   void loadAndSetIcon() {
-    int s = 256;
-    QPixmap pix(s, s);
-    pix.fill(Qt::transparent);
-    QPainter p(&pix);
-    p.setRenderHint(QPainter::Antialiasing);
-    p.setRenderHint(QPainter::SmoothPixmapTransform);
-    QSvgRenderer ren(getAppPath() + "/the-server-4.svg");
-    if (ren.isValid()) {
-      QRectF view = ren.viewBoxF();
-      double pad = s * 0.04;
-      double inner = s - (2.0 * pad);
-      QSizeF scaled = view.size().scaled(inner, inner, Qt::KeepAspectRatio);
-      double x = pad + (inner - scaled.width()) / 2.0;
-      double y = pad + (inner - scaled.height()) / 2.0;
-      ren.render(&p, QRectF(x, y, scaled.width(), scaled.height()));
-    } else {
-      p.setBrush(QColor("#0284c7"));
-      p.drawEllipse(0, 0, s, s);
+    QIcon icon;
+
+    const QString icoPath = getAppPath() + "/icon_server.ico";
+    if (QFileInfo::exists(icoPath))
+      icon = QIcon(icoPath);
+
+    const QString pngPath = getAppPath() + "/server_icon.png";
+    if (icon.isNull() && QFileInfo::exists(pngPath))
+      icon = QIcon(pngPath);
+
+    if (icon.isNull()) {
+      const QString svgPath = getAppPath() + "/Untitled-1.svg";
+      if (QFileInfo::exists(svgPath))
+        icon = QIcon(svgPath);
     }
-    p.end();
-    m_appIcon = QIcon(pix);
+
+    if (icon.isNull()) {
+      QFileIconProvider iconProvider;
+      icon =
+          iconProvider.icon(QFileInfo(QCoreApplication::applicationFilePath()));
+    }
+
+    if (icon.isNull()) {
+      const int s = 256;
+      QPixmap pix(s, s);
+      pix.fill(Qt::transparent);
+      QPainter p(&pix);
+      p.setRenderHint(QPainter::Antialiasing);
+      p.setRenderHint(QPainter::SmoothPixmapTransform);
+      p.setBrush(QColor("#0284c7"));
+      p.setPen(Qt::NoPen);
+      p.drawEllipse(0, 0, s, s);
+      p.end();
+      icon = QIcon(pix);
+    }
+
+    m_appIcon = icon;
+    qApp->setWindowIcon(m_appIcon);
     setWindowIcon(m_appIcon);
+  }
+
+  void applyNativeWindowIcons() {
+    const QString icoPath = getAppPath() + "/icon_server.ico";
+    if (!QFileInfo::exists(icoPath))
+      return;
+
+    createWinId();
+    const std::wstring nativePath = QDir::toNativeSeparators(icoPath).toStdWString();
+    if (nativePath.empty())
+      return;
+
+    if (m_smallWinIcon) {
+      DestroyIcon(m_smallWinIcon);
+      m_smallWinIcon = nullptr;
+    }
+    if (m_bigWinIcon) {
+      DestroyIcon(m_bigWinIcon);
+      m_bigWinIcon = nullptr;
+    }
+
+    m_smallWinIcon = static_cast<HICON>(
+        LoadImageW(nullptr, nativePath.c_str(), IMAGE_ICON, 16, 16,
+                   LR_LOADFROMFILE | LR_DEFAULTCOLOR));
+    m_bigWinIcon = static_cast<HICON>(
+        LoadImageW(nullptr, nativePath.c_str(), IMAGE_ICON, 256, 256,
+                   LR_LOADFROMFILE | LR_DEFAULTCOLOR));
+
+    HWND hwnd = reinterpret_cast<HWND>(winId());
+    if (hwnd) {
+      if (m_smallWinIcon)
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL,
+                     reinterpret_cast<LPARAM>(m_smallWinIcon));
+      if (m_bigWinIcon)
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG,
+                     reinterpret_cast<LPARAM>(m_bigWinIcon));
+    }
   }
 
   void setupTray() {
@@ -578,6 +705,7 @@ protected:
 
 public:
   void toggleServer() {
+    appendBootTrace("toggleServer begin");
     // Save current picker selections to portable JSON config
     QJsonObject cfg = loadConfig();
     for (int i = 0; i < 4; i++) {
@@ -604,6 +732,9 @@ public:
       }
 
       if (servers[i]->listen(addr, 5000)) {
+        appendBootTrace(QString("interface %1 listen ok on %2")
+                            .arg(i + 1)
+                            .arg(servers[i]->serverAddress().toString()));
         log(QString("\u2705 Interface %1: Listening on %2:5000")
                 .arg(i + 1)
                 .arg(servers[i]->serverAddress().toString()));
@@ -612,6 +743,9 @@ public:
         somethingStarted = true;
         retryStartTimes[i] = QDateTime(); // Success, clear tracking
       } else {
+        appendBootTrace(QString("interface %1 listen failed for %2")
+                            .arg(i + 1)
+                            .arg(ipPickers[i]->currentText()));
         log(QString("\u274c Interface %1: Failed to start server").arg(i + 1));
         if (idx > 1) {
           if (!retryStartTimes[i].isValid()) {
@@ -625,6 +759,7 @@ public:
     }
 
     updateToggleBtnState();
+    appendBootTrace("toggleServer end");
   }
 
   void retryFailedInterfaces() {
@@ -765,12 +900,44 @@ public:
 
 int main(int argc, char *argv[]) {
   QApplication a(argc, argv);
+  setExplicitAppUserModelId(L"QuickSTT.Server");
+  const QIcon serverIcon = loadPackagedServerIcon();
+  if (!serverIcon.isNull())
+    a.setWindowIcon(serverIcon);
+  appendBootTrace("main after QApplication");
   a.setQuitOnLastWindowClosed(false); // Never quit when window is closed
+
+  HANDLE singleInstanceMutex = CreateMutexW(
+      nullptr, FALSE, L"QuickSTT_Server_SingleInstance_v1");
+  if (!singleInstanceMutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+    appendBootTrace("server single-instance guard hit");
+    notifyRunningInstance();
+    return 0;
+  }
 
   // Registration for Windows auto-startup is handled exclusively
   // by QuickSTT_App settings (PillWidget::toggleStartup).
 
   ServerWindow w;
+  appendBootTrace("main after ServerWindow");
+  QLocalServer activationServer;
+  QLocalServer::removeServer(QString::fromLatin1(kServerActivationServerName));
+  if (activationServer.listen(QString::fromLatin1(kServerActivationServerName))) {
+    QObject::connect(&activationServer, &QLocalServer::newConnection, &a, [&]() {
+      while (activationServer.hasPendingConnections()) {
+        QLocalSocket *socket = activationServer.nextPendingConnection();
+        if (!socket)
+          continue;
+        socket->readAll();
+        socket->disconnectFromServer();
+        socket->deleteLater();
+        appendBootTrace("server restore trigger received");
+        w.restoreFromExternalTrigger();
+      }
+    });
+  } else {
+    appendBootTrace("server activation server listen failed");
+  }
 
   bool background = false;
   for (int i = 1; i < argc; ++i) {
@@ -782,10 +949,20 @@ int main(int argc, char *argv[]) {
 
   if (!background) {
     w.show();
+    appendBootTrace("main show window");
+  }
+  w.toggleServer();
+  appendBootTrace("main after toggleServer");
+  if (background) {
+    w.hide();
+    appendBootTrace("main hide for background");
   }
   // The server always binds TCP, window just hides/shows.
 
-  return a.exec();
+  const int exitCode = a.exec();
+  if (singleInstanceMutex)
+    CloseHandle(singleInstanceMutex);
+  return exitCode;
 }
 
 #include "qt_server_app.moc"

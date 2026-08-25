@@ -2,16 +2,19 @@
 $WshShell = New-Object -ComObject WScript.Shell
 $startMenu = [System.Environment]::GetFolderPath("StartMenu") + "\Programs"
 $desktop = [System.Environment]::GetFolderPath("Desktop")
+$startFolder = Join-Path $startMenu "QuickSTT"
 
 $appExe = (Resolve-Path "QuickSTT_App\QuickSTT_App.exe").Path
 $appDir = Split-Path $appExe
-$appIco = (Resolve-Path "QuickSTT_App\app.ico").Path
+$appIco = (Resolve-Path "QuickSTT_App\icon_app.ico").Path
 
 $srvExe = (Resolve-Path "QuickSTT_Server\QuickSTT_Server_App.exe").Path
 $srvDir = Split-Path $srvExe
-$srvIco = (Resolve-Path "QuickSTT_Server\server.ico").Path
+$srvIco = (Resolve-Path "QuickSTT_Server\icon_server.ico").Path
 
-foreach ($loc in @($startMenu, $desktop)) {
+New-Item -ItemType Directory -Force -Path $startFolder | Out-Null
+
+foreach ($loc in @($startMenu, $desktop, $startFolder)) {
     $s = $WshShell.CreateShortcut("$loc\QuickSTT.lnk")
     $s.TargetPath = $appExe
     $s.WorkingDirectory = $appDir

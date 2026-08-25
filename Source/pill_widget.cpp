@@ -1,7 +1,9 @@
 #include "pill_widget.h"
 #include "ahk_bridge.h"
 #include "local_model_support.h"
+#include "optional_service_support.h"
 #include "startup_utils.h"
+#include "windows_secret_store.h"
 #include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
@@ -16,6 +18,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHideEvent>
+#include <QHostAddress>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -35,9 +40,9 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <cmath>
+#include <memory>
 #include <vector>
-#include <windows.h> // SendInput
-#include <windows.h> // For SendInput native typing
+#include <windows.h> // SendInput / native window icons
 
 namespace {
 constexpr int kMinWaveformBarCount = 24;
@@ -214,10 +219,12 @@ bool tryResolveFunctionKeyCommand(const QString &normalized, WORD *vkey,
 }
 
 bool tryResolveSpecialCommand(const QString &spokenText, WORD *vkey,
-                              QString *commandName) {
+                              WORD *modifierVkey, QString *commandName) {
   const QString norm = normalizeSpecialCommandText(spokenText);
   if (norm.isEmpty())
     return false;
+
+  *modifierVkey = 0;
 
   if (norm == "space" || norm == "spacebar" || norm == "space bar") {
     *vkey = VK_SPACE;
@@ -229,7 +236,8 @@ bool tryResolveSpecialCommand(const QString &spokenText, WORD *vkey,
     *commandName = "Backspace";
     return true;
   }
-  if (norm == "enter" || norm == "return" || norm == "new line") {
+  if (norm == "enter" || norm == "return" || norm == "new line" ||
+      norm == "press enter" || norm == "hit enter") {
     *vkey = VK_RETURN;
     *commandName = "Enter";
     return true;
@@ -265,6 +273,133 @@ bool tryResolveSpecialCommand(const QString &spokenText, WORD *vkey,
     *commandName = "Shift";
     return true;
   }
+  if (norm == "delete" || norm == "del") {
+    *vkey = VK_DELETE;
+    *commandName = "Delete";
+    return true;
+  }
+  if (norm == "home") {
+    *vkey = VK_HOME;
+    *commandName = "Home";
+    return true;
+  }
+  if (norm == "end") {
+    *vkey = VK_END;
+    *commandName = "End";
+    return true;
+  }
+  if (norm == "page up") {
+    *vkey = VK_PRIOR;
+    *commandName = "Page Up";
+    return true;
+  }
+  if (norm == "page down") {
+    *vkey = VK_NEXT;
+    *commandName = "Page Down";
+    return true;
+  }
+  if (norm == "up" || norm == "up arrow" || norm == "arrow up") {
+    *vkey = VK_UP;
+    *commandName = "Up";
+    return true;
+  }
+  if (norm == "down" || norm == "down arrow" || norm == "arrow down") {
+    *vkey = VK_DOWN;
+    *commandName = "Down";
+    return true;
+  }
+  if (norm == "left" || norm == "left arrow" || norm == "arrow left") {
+    *vkey = VK_LEFT;
+    *commandName = "Left";
+    return true;
+  }
+  if (norm == "right" || norm == "right arrow" || norm == "arrow right") {
+    *vkey = VK_RIGHT;
+    *commandName = "Right";
+    return true;
+  }
+  if (norm == "caps lock" || norm == "capslock" || norm == "caps") {
+    *vkey = VK_CAPITAL;
+    *commandName = "Caps Lock";
+    return true;
+  }
+  if (norm == "print screen" || norm == "screenshot" || norm == "print") {
+    *vkey = VK_SNAPSHOT;
+    *commandName = "Print Screen";
+    return true;
+  }
+  if (norm == "insert") {
+    *vkey = VK_INSERT;
+    *commandName = "Insert";
+    return true;
+  }
+
+  if (norm == "copy" || norm == "press copy") {
+    *modifierVkey = VK_CONTROL;
+    *vkey = 'C';
+    *commandName = "Copy";
+    return true;
+  }
+  if (norm == "paste" || norm == "press paste") {
+    *modifierVkey = VK_CONTROL;
+    *vkey = 'V';
+    *commandName = "Paste";
+    return true;
+  }
+  if (norm == "cut" || norm == "press cut") {
+    *modifierVkey = VK_CONTROL;
+    *vkey = 'X';
+    *commandName = "Cut";
+    return true;
+  }
+  if (norm == "undo") {
+    *modifierVkey = VK_CONTROL;
+    *vkey = 'Z';
+    *commandName = "Undo";
+    return true;
+  }
+  if (norm == "redo") {
+    *modifierVkey = VK_CONTROL;
+    *vkey = 'Y';
+    *commandName = "Redo";
+    return true;
+  }
+  if (norm == "select all") {
+    *modifierVkey = VK_CONTROL;
+    *vkey = 'A';
+    *commandName = "Select All";
+    return true;
+  }
+  if (norm == "save") {
+    *modifierVkey = VK_CONTROL;
+    *vkey = 'S';
+    *commandName = "Save";
+    return true;
+  }
+  if (norm == "find" || norm == "search") {
+    *modifierVkey = VK_CONTROL;
+    *vkey = 'F';
+    *commandName = "Find";
+    return true;
+  }
+  if (norm == "close tab" || norm == "close window") {
+    *modifierVkey = VK_CONTROL;
+    *vkey = 'W';
+    *commandName = "Close Tab";
+    return true;
+  }
+  if (norm == "new tab") {
+    *modifierVkey = VK_CONTROL;
+    *vkey = 'T';
+    *commandName = "New Tab";
+    return true;
+  }
+  if (norm == "refresh" || norm == "reload") {
+    *vkey = VK_F5;
+    *commandName = "Refresh";
+    return true;
+  }
+
   return tryResolveFunctionKeyCommand(norm, vkey, commandName);
 }
 
@@ -273,15 +408,21 @@ QString normalizeModelName(const QString &text) {
   const QString trimmed =
       suffixPos > 0 ? text.left(suffixPos).trimmed() : text.trimmed();
   const QString cloudModel = normalizeCloudModelSelection(trimmed);
-  return isCloudModel(cloudModel) ? cloudModel : trimmed;
-}
-
-bool isWhisperModel(const QString &modelName) {
-  return isWhisperLocalModel(modelName);
+  return isCloudModel(cloudModel) ? cloudModel : canonicalLocalModelName(trimmed);
 }
 
 bool supportsRuntimeModel(const QString &modelName) {
   return localModelSupportsRuntimeNow(modelName);
+}
+
+bool usesFrontendManagedModel(const QString &modelName) {
+  return isCloudModel(modelName) || localModelUsesFrontendTranscriber(modelName);
+}
+
+bool usesNativeParakeetPipeline(const QString &modelName) {
+  // Framework-driven: any catalog model with direct-PCM persistent worker
+  // (Parakeet today, Nemotron streaming when packaged).
+  return localModelUsesNativeDirectPipeline(modelName);
 }
 
 bool supportsDirectDownload(const QString &modelName) {
@@ -370,6 +511,11 @@ void repairLegacyWakewordState(QSettings &settings) {
     touched = true;
   }
 
+  // Force default wakeword mode to "Off" and disable acoustic triggers
+  settings.setValue("wakeWordMode", "Off");
+  settings.setValue("clapAction", "disabled");
+  settings.setValue("snapAction", "disabled");
+
   QStringList closeWords =
       normalizedWordList(settings.value("closeWords").toStringList());
   const QStringList changedCloseWords =
@@ -439,7 +585,6 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   waveformAnimationTimer->setInterval(24);
   connect(waveformAnimationTimer, &QTimer::timeout, this,
           &PillWidget::updateWaveformFrame);
-  waveformAnimationTimer->start();
 
   m_transientStatusTimer = new QTimer(this);
   m_transientStatusTimer->setSingleShot(true);
@@ -551,9 +696,7 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   connect(m_cloudSttManager, &CloudSttManager::statusChanged, this,
           [this](const QString &statusText) {
             qDebug() << "[CLOUD-STATUS]" << statusText;
-            currentStatusText = statusText;
-            statusLabel->show();
-            statusLabel->setText(statusText);
+            setWidgetStatusText(statusText);
             if (dashboard) {
               QMetaObject::invokeMethod(dashboard, "onRefreshModels",
                                         Qt::QueuedConnection);
@@ -573,6 +716,44 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   connect(m_cloudSttManager, &CloudSttManager::transcriptionFailed, this,
           [this](const QString &errorText) {
             qDebug() << "[CLOUD-ERROR]" << errorText;
+            currentStatusText = errorText;
+            statusLabel->show();
+            statusLabel->setText(errorText);
+            showTransientStatus(errorText, 6000);
+            if (dashboard) {
+              QMetaObject::invokeMethod(dashboard, "onRefreshModels",
+                                        Qt::QueuedConnection);
+            }
+            sendBackendCommand("CLOUD_DONE\n");
+            update();
+          });
+
+  m_localFrontendSttManager = new LocalFrontendSttManager(this);
+  connect(m_localFrontendSttManager, &LocalFrontendSttManager::statusChanged,
+          this, [this](const QString &statusText) {
+            qDebug() << "[LOCAL-FRONTEND-STATUS]" << statusText;
+            setWidgetStatusText(statusText);
+            if (dashboard) {
+              QMetaObject::invokeMethod(dashboard, "onRefreshModels",
+                                        Qt::QueuedConnection);
+            }
+            update();
+          });
+  connect(m_localFrontendSttManager,
+          &LocalFrontendSttManager::transcriptionReady, this,
+          [this](const QString &text) {
+            qDebug() << "[LOCAL-FRONTEND-RESULT]" << text.left(160);
+            if (dashboard) {
+              QMetaObject::invokeMethod(dashboard, "onRefreshModels",
+                                        Qt::QueuedConnection);
+            }
+            sendBackendCommand("CLOUD_DONE\n");
+            processRecognizedText(text, true);
+          });
+  connect(m_localFrontendSttManager,
+          &LocalFrontendSttManager::transcriptionFailed, this,
+          [this](const QString &errorText) {
+            qDebug() << "[LOCAL-FRONTEND-ERROR]" << errorText;
             currentStatusText = errorText;
             statusLabel->show();
             statusLabel->setText(errorText);
@@ -617,32 +798,6 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
             }
           });
 
-  m_localTranscriptionManager = new LocalTranscriptionManager(this);
-  connect(m_localTranscriptionManager, &LocalTranscriptionManager::statusChanged,
-          this, [this](const QString &statusText) {
-            currentStatusText = statusText;
-            statusLabel->show();
-            statusLabel->setText(statusText);
-            update();
-          });
-  connect(m_localTranscriptionManager,
-          &LocalTranscriptionManager::transcriptionReady, this,
-          [this](const QString &text) {
-            qDebug() << "[LOCAL-FRONTEND-RESULT]" << text.left(160);
-            sendBackendCommand("CLOUD_DONE\n");
-            processRecognizedText(text, false);
-          });
-  connect(m_localTranscriptionManager,
-          &LocalTranscriptionManager::transcriptionFailed, this,
-          [this](const QString &errorText) {
-            qDebug() << "[LOCAL-FRONTEND-ERROR]" << errorText;
-            currentStatusText = errorText;
-            statusLabel->show();
-            statusLabel->setText(errorText);
-            showTransientStatus(errorText, 6000);
-            sendBackendCommand("CLOUD_DONE\n");
-            update();
-          });
   connect(m_localModelManager, &LocalModelManager::modelUninstalled, this,
           [this](const QString &) {
             isDownloading = false;
@@ -669,29 +824,38 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
             updateModelDownloadButton();
           });
 
-  m_smartLifeManager = new SmartLifeManager(this);
-  connect(m_smartLifeManager, &SmartLifeManager::statusChanged, this,
+  m_optionalServiceManager = new OptionalServiceManager(this);
+  connect(m_optionalServiceManager, &OptionalServiceManager::statusMessage, this,
           [this](const QString &statusText) {
             if (statusText.trimmed().isEmpty())
               return;
             currentStatusText = statusText;
             statusLabel->show();
             statusLabel->setText(statusText);
+            if (dashboard) {
+              QMetaObject::invokeMethod(dashboard, "onRefreshModels",
+                                        Qt::QueuedConnection);
+            }
           });
-  connect(m_smartLifeManager, &SmartLifeManager::controlFinished, this,
-          [this](const QString &statusText) {
-            currentStatusText = statusText;
+  connect(m_optionalServiceManager, &OptionalServiceManager::operationFailed, this,
+          [this](const QString &, const QString &errorText) {
+            if (errorText.trimmed().isEmpty())
+              return;
+            currentStatusText = errorText;
             statusLabel->show();
-            statusLabel->setText(statusText);
-            showTransientStatus(statusText, 4500);
+            statusLabel->setText(errorText);
+            showTransientStatus(errorText, 5000);
           });
-  connect(m_smartLifeManager, &SmartLifeManager::controlFailed, this,
-          [this](const QString &statusText) {
-            currentStatusText = statusText;
-            statusLabel->show();
-            statusLabel->setText(statusText);
-            showTransientStatus(statusText, 6000);
-          });
+
+  // Smart Home features disabled (removed from UI)
+  m_smartLifeManager = new SmartLifeManager(this);
+  m_androidTvManager = new AndroidTvManager(this);
+  m_homeAssistantManager = new HomeAssistantManager(this);
+  // No signal connections — smart home status won't appear in widget
+
+  // Smart Home auto-reconnect disabled (feature removed from UI)
+  // attemptAutoReconnectSmartHome();
+  // attemptAutoReconnectAndroidTv();
 
   refreshModelCombo();
   customResize(pillWidth, pillHeight, pillRadius);
@@ -721,7 +885,6 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
             statusLabel->show();
             statusLabel->setText(currentStatusText);
           });
-  m_ahkBridge->start();
 
   qDebug() << "Setup Backend...";
   backendProcess = new QProcess(this);
@@ -742,6 +905,9 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
           &PillWidget::ensureBackendRunning);
   backendHealthTimer->start();
 
+  // Ctrl+Space popup TCP bridge
+  initPopupServer();
+
   blinkTimer = new QTimer(this);
   connect(blinkTimer, &QTimer::timeout, this, &PillWidget::updateBlink);
 
@@ -749,36 +915,54 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   {
     QSettings os("QuickSTT", "Config");
     m_autoOffload = os.value("autoOffload", true).toBool();
-    m_offloadMinutes = os.value("offloadMinutes", 3).toInt();
+    if (os.contains("offloadSeconds")) {
+      m_offloadSeconds = os.value("offloadSeconds", 15).toInt();
+    } else {
+      m_offloadSeconds = os.value("offloadMinutes", 3).toInt() * 60;
+    }
   }
   m_offloadTimer = new QTimer(this);
   m_offloadTimer->setSingleShot(true);
   connect(m_offloadTimer, &QTimer::timeout, this, [this]() {
+    // Never unload while the main pill is listening or Ctrl+Space is held —
+    // that was killing Nemotron mid-utterance (empty finals / stale "Okay").
+    if (isListening || m_popupActive) {
+      qDebug() << "Auto-offload skipped: session still active"
+               << "listening=" << isListening << "popup=" << m_popupActive;
+      evaluateAutoOffload(); // reschedule after the active turn
+      return;
+    }
     qDebug() << "Auto-offload: unloading model to save RAM";
     sendBackendCommand("OFFLOAD\n");
     m_modelOffloaded = true;
   });
 
-  qDebug() << "Setup Dashboard...";
-  try {
-    dashboard = new MainWindow();
-    qDebug() << "Dashboard created OK";
-  } catch (const std::exception &e) {
-    qDebug() << "Dashboard CRASH (std): " << e.what();
-    dashboard = nullptr;
-  } catch (...) {
-    qDebug() << "Dashboard CRASH (unknown)";
-    dashboard = nullptr;
-  }
-  if (dashboard) {
-    dashboard->setBackend(backendProcess);
-    dashboard->setLocalModelManager(m_localModelManager);
-    dashboard->setSmartLifeManager(m_smartLifeManager);
-    qDebug() << "Dashboard backend set OK";
-    connect(dashboard, &MainWindow::settingChanged, this,
-            &PillWidget::onSettingChanged);
-    qDebug() << "Dashboard signal connected OK";
-  }
+  m_ramCompactTimer = new QTimer(this);
+  m_ramCompactTimer->setInterval(60000);
+  connect(m_ramCompactTimer, &QTimer::timeout, this, [this]() {
+    if (!isListening)
+      compactWorkingSet();
+  });
+  m_ramCompactTimer->start();
+  QTimer::singleShot(8000, this, &PillWidget::compactWorkingSet);
+
+  // 20-second model load timeout: if model hasn't loaded after wakeword
+  // trigger, show "Inefficient model" status to the user
+  m_modelLoadTimeoutTimer = new QTimer(this);
+  m_modelLoadTimeoutTimer->setSingleShot(true);
+  m_modelLoadTimeoutTimer->setInterval(20000);
+  connect(m_modelLoadTimeoutTimer, &QTimer::timeout, this, [this]() {
+    if (!isListening && !isRecording) {
+      statusLabel->show();
+      statusLabel->setText("Inefficient model");
+      currentStatusText = "Inefficient model";
+      if (m_popupClient) {
+        forwardEventToPopup("STATE", "3,Inefficient model");
+      }
+    }
+  });
+
+  qDebug() << "Dashboard deferred until requested.";
   if (trayMenu) {
     qDebug() << "Dashboard tray action added OK";
   } else {
@@ -790,6 +974,7 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   for (QLabel *lbl : findChildren<QLabel *>()) {
     lbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
   }
+  centerOnScreen();
 }
 
 void PillWidget::startBackend() {
@@ -834,8 +1019,9 @@ void PillWidget::startBackend() {
 
   const QString selectedModel = currentComboModelName();
   const bool cloudSelected = isCloudModel(selectedModel);
+  const bool frontendManagedModel = usesFrontendManagedModel(selectedModel);
   const QString backendModel =
-      cloudSelected ? baseBackendModelName() : selectedModel;
+      frontendManagedModel ? baseBackendModelName() : selectedModel;
 
   if (backendModel == "Vosk Small En") {
     for (int i = m_pendingBackendCommands.size() - 1; i >= 0; --i) {
@@ -852,14 +1038,34 @@ void PillWidget::startBackend() {
     }
   }
 
-  backendProcess->write(cloudSelected ? "TRANSCRIBE_MODE:CLOUD\n"
-                                      : "TRANSCRIBE_MODE:LOCAL\n");
+  // Native direct path (Parakeet / future Nemotron worker): main pill + popup
+  // share the same JSON-line engine. Streaming models also advertise MODEL_CAP
+  // so the Ctrl+Space overlay can open the Handy Live panel.
+  if (usesNativeParakeetPipeline(selectedModel)) {
+    backendProcess->write(
+        localModelSupportsStreaming(selectedModel)
+            ? "TRANSCRIBE_MODE:STREAMING\n"
+            : "TRANSCRIBE_MODE:PARAKEET\n");
+    backendProcess->write(
+        localModelSupportsStreaming(selectedModel)
+            ? "MODEL_CAP:streaming=1\n"
+            : "MODEL_CAP:streaming=0\n");
+  } else if (frontendManagedModel) {
+    backendProcess->write("TRANSCRIBE_MODE:CLOUD\n");
+    backendProcess->write("MODEL_CAP:streaming=0\n");
+  } else {
+    backendProcess->write("TRANSCRIBE_MODE:LOCAL\n");
+    backendProcess->write("MODEL_CAP:streaming=0\n");
+  }
+  backendProcess->write(frontendSegmentationCommandForModel(selectedModel));
+  
+  evaluateAutoOffload();
 
   if (!hasQueuedModelCommand && !backendModel.isEmpty() &&
       backendModel != "Vosk Small En" && supportsRuntimeModel(backendModel) &&
       isModelInstalled(backendModel)) {
     backendProcess->write(("MODEL:" + backendModel + "\n").toUtf8());
-  } else if (cloudSelected && isModelInstalled(baseBackendModelName())) {
+  } else if (frontendManagedModel && isModelInstalled(baseBackendModelName())) {
     backendProcess->write(("MODEL:" + baseBackendModelName() + "\n").toUtf8());
   }
 
@@ -868,6 +1074,26 @@ void PillWidget::startBackend() {
   for (const QByteArray &cmd : pendingCommands) {
     backendProcess->write(cmd);
   }
+  // ── Sync hybrid acoustic & inactivity settings to backend on startup ──
+  {
+    QSettings ss("QuickSTT", "Config");
+    QString clapAct = ss.value("clapAction", "disabled").toString();
+    QString snapAct = ss.value("snapAction", "disabled").toString();
+    double sens = ss.value("acousticSensitivity", 1.0).toDouble();
+
+    sendBackendCommand(("CLAP_ACTION:" + clapAct + "\n").toUtf8());
+    sendBackendCommand(("SNAP_ACTION:" + snapAct + "\n").toUtf8());
+    sendBackendCommand(("ACOUSTIC_SENSITIVITY:" + QString::number(sens, 'f', 2) + "\n").toUtf8());
+
+    bool inactEnabled = ss.value("autoStopInactivity", false).toBool();
+    int inactSec = inactEnabled ? ss.value("inactivityStopSeconds", 15).toInt() : 0;
+    sendBackendCommand(("INACTIVITY_STOP:" + QString::number(inactSec) + "\n").toUtf8());
+
+    // Sync wakeword activation mode (Off by default)
+    QString wakeWordMode = ss.value("wakeWordMode", "Off").toString();
+    sendBackendCommand(("WAKEWORDMODE:" + wakeWordMode + "\n").toUtf8());
+  }
+
 }
 
 void PillWidget::onBackendFinished(int exitCode,
@@ -903,18 +1129,38 @@ void PillWidget::ensureBackendRunning() {
   }
 }
 
-void PillWidget::enterEvent(QEnterEvent *event) { QWidget::enterEvent(event); }
+void PillWidget::enterEvent(QEnterEvent *event) {
+  // Do not poke RELOAD during an active dictation / Ctrl+Space hold.
+  // RELOAD previously forced a Vosk load on top of a live Nemotron stream,
+  // which produced multi-second stalls and empty/stale finals.
+  if (m_modelOffloaded && !m_temporarilySuppressAutoShow && !isListening &&
+      !m_popupActive) {
+    qDebug() << "Mouse entered widget — preemptively reloading offloaded model";
+    if (usesNativeParakeetPipeline(currentComboModelName())) {
+      // Direct workers (Parakeet/Nemotron): warm via PRELOAD, not Vosk RELOAD.
+      sendBackendCommand("PRELOAD:1\n");
+    } else {
+      sendBackendCommand("RELOAD\n");
+    }
+    m_modelOffloaded = false;
+  }
+  QWidget::enterEvent(event);
+}
 
 void PillWidget::leaveEvent(QEvent *event) { QWidget::leaveEvent(event); }
 
 void PillWidget::closeEvent(QCloseEvent *event) {
   if (trayIcon && trayIcon->isVisible()) {
-    suppressAutoShowBriefly(3000);
+    suppressAutoShowBriefly(12000);
     hide();
     trayIcon->showMessage("QuickSTT", "Minimized to Tray",
                           QSystemTrayIcon::Information, 1000);
     event->ignore();
   } else {
+    // Fully shut down all model processes before accepting close
+    if (m_localFrontendSttManager) {
+      m_localFrontendSttManager->shutdownAllModels();
+    }
     event->accept();
   }
 }
@@ -927,11 +1173,17 @@ PillWidget::~PillWidget() {
     waveformAnimationTimer->stop();
   if (m_ahkBridge)
     m_ahkBridge->stop();
+  
+  // Shut down all model processes (CrispASR, Parakeet, etc.)
+  if (m_localFrontendSttManager) {
+    m_localFrontendSttManager->shutdownAllModels();
+  }
+  
   delete dashboard;
   delete textBoardWindow;
   if (backendProcess->state() == QProcess::Running) {
     backendProcess->terminate();
-    backendProcess->waitForFinished();
+    backendProcess->waitForFinished(3000);
   }
 }
 
@@ -965,11 +1217,26 @@ void PillWidget::repositionTextBoard() {
   }
 }
 
+void PillWidget::centerOnScreen() {
+  if (QScreen *screen = QGuiApplication::primaryScreen()) {
+    QRect screenGeometry = screen->availableGeometry();
+    int x = (screenGeometry.width() - width()) / 2 + screenGeometry.x();
+    int y = screenGeometry.y() + 40;
+    move(x, y);
+  }
+}
+
 void PillWidget::restoreFromExternalTrigger() {
+  if (m_popupClient || m_popupActive || isAutoShowSuppressed()) {
+    qDebug() << "[PILL] Suppressing external restore trigger (popup active / auto-show suppressed)";
+    return;
+  }
   suppressAutoShowBriefly(1200);
   ensureBackendRunning();
-  if (!isVisible())
-    show();
+  centerOnScreen();
+  if (isMinimized())
+    showNormal();
+  show();
   raise();
   activateWindow();
   if (textBoardWindow && textBoardOpen)
@@ -978,10 +1245,38 @@ void PillWidget::restoreFromExternalTrigger() {
 
   if (currentStatusText.compare(QStringLiteral("Hidden"), Qt::CaseInsensitive) ==
       0) {
-    currentStatusText = QStringLiteral("Waking...");
+    currentStatusText = QStringLiteral("Ready");
     statusLabel->show();
     statusLabel->setText(currentStatusText);
-    sendBackendCommand("TOGGLE\n");
+    isListening = false;
+    isRecording = false;
+    updateCachedIcons();
+    update();
+  }
+}
+
+void PillWidget::showMainWidgetExplicitly() {
+  qDebug() << "[PILL] Explicitly showing main widget from user tray interaction";
+  ensureBackendRunning();
+  centerOnScreen();
+  if (isMinimized())
+    showNormal();
+  show();
+  raise();
+  activateWindow();
+  if (textBoardWindow && textBoardOpen)
+    textBoardWindow->show();
+  repositionTextBoard();
+
+  if (currentStatusText.compare(QStringLiteral("Hidden"), Qt::CaseInsensitive) ==
+      0) {
+    currentStatusText = QStringLiteral("Ready");
+    statusLabel->show();
+    statusLabel->setText(currentStatusText);
+    isListening = false;
+    isRecording = false;
+    updateCachedIcons();
+    update();
   }
 }
 
@@ -995,10 +1290,24 @@ void PillWidget::resizeEvent(QResizeEvent *event) {
   repositionTextBoard();
 }
 
+void PillWidget::compactWorkingSet() {
+  SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+  qDebug() << "Working set compacted";
+}
+
 void PillWidget::hideEvent(QHideEvent *event) {
   if (textBoardWindow)
     textBoardWindow->hide();
   QWidget::hideEvent(event);
+  evaluateAutoOffload();
+  QTimer::singleShot(500, this, &PillWidget::compactWorkingSet);
+}
+
+bool PillWidget::eventFilter(QObject *obj, QEvent *event) {
+  if (obj == dashboard && event->type() == QEvent::Close) {
+    QTimer::singleShot(800, this, &PillWidget::compactWorkingSet);
+  }
+  return QWidget::eventFilter(obj, event);
 }
 
 void PillWidget::showEvent(QShowEvent *event) {
@@ -1078,34 +1387,100 @@ void PillWidget::updateTrayIcon() {
   if (!trayIcon)
     return;
 
-  // Always use Untitled-1.svg for the app/tray/dashboard icon
-  int renderSize = 256;
-  QPixmap iconPix(renderSize, renderSize);
-  iconPix.fill(Qt::transparent);
+  QIcon appIcon;
+  const QString icoPath = QCoreApplication::applicationDirPath() + "/icon_app.ico";
+  if (QFileInfo::exists(icoPath))
+    appIcon = QIcon(icoPath);
 
-  QPainter p(&iconPix);
-  p.setRenderHint(QPainter::Antialiasing);
-  p.setRenderHint(QPainter::SmoothPixmapTransform);
+  const QString svgPath = QCoreApplication::applicationDirPath() + "/Untitled-1.svg";
+  if (appIcon.isNull() && m_svgRenApp->isValid()) {
+    const int renderSize = 256;
+    QPixmap iconPix(renderSize, renderSize);
+    iconPix.fill(Qt::transparent);
 
-  if (m_svgRenApp->isValid()) {
+    QPainter p(&iconPix);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
     drawSvg(p, *m_svgRenApp, renderSize, renderSize);
-  } else {
-    // Fallback: a clean circular icon
+    p.end();
+    appIcon = QIcon(iconPix);
+  }
+
+  if (appIcon.isNull()) {
+    const int renderSize = 256;
+    QPixmap iconPix(renderSize, renderSize);
+    iconPix.fill(Qt::transparent);
+    QPainter p(&iconPix);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
     p.setBrush(QColor("#1A1A1A"));
     p.setPen(QPen(QColor("#00AAFF"), 8));
     p.drawEllipse(16, 16, renderSize - 32, renderSize - 32);
+    p.end();
+    appIcon = QIcon(iconPix);
   }
-  p.end();
 
-  QIcon appIcon(iconPix);
   trayIcon->setIcon(appIcon);
   setWindowIcon(appIcon);
+  applyNativeWindowIcons();
 
   if (!trayIcon->isVisible())
     trayIcon->show();
 
-  if (dashboard)
+  if (dashboard) {
     dashboard->setWindowIcon(appIcon);
+  }
+}
+
+void PillWidget::applyNativeWindowIcons() {
+  const QString icoPath = QCoreApplication::applicationDirPath() + "/icon_app.ico";
+  if (!QFileInfo::exists(icoPath))
+    return;
+
+  createWinId();
+  const std::wstring nativePath =
+      QDir::toNativeSeparators(icoPath).toStdWString();
+  if (nativePath.empty())
+    return;
+
+  if (m_smallWinIcon) {
+    DestroyIcon(m_smallWinIcon);
+    m_smallWinIcon = nullptr;
+  }
+  if (m_bigWinIcon) {
+    DestroyIcon(m_bigWinIcon);
+    m_bigWinIcon = nullptr;
+  }
+
+  m_smallWinIcon = static_cast<HICON>(
+      LoadImageW(nullptr, nativePath.c_str(), IMAGE_ICON, 16, 16,
+                 LR_LOADFROMFILE | LR_DEFAULTCOLOR));
+  m_bigWinIcon = static_cast<HICON>(
+      LoadImageW(nullptr, nativePath.c_str(), IMAGE_ICON, 256, 256,
+                 LR_LOADFROMFILE | LR_DEFAULTCOLOR));
+
+  HWND hwnd = reinterpret_cast<HWND>(winId());
+  if (hwnd) {
+    if (m_smallWinIcon)
+      SendMessageW(hwnd, WM_SETICON, ICON_SMALL,
+                   reinterpret_cast<LPARAM>(m_smallWinIcon));
+    if (m_bigWinIcon)
+      SendMessageW(hwnd, WM_SETICON, ICON_BIG,
+                   reinterpret_cast<LPARAM>(m_bigWinIcon));
+  }
+
+  if (dashboard) {
+    dashboard->createWinId();
+    HWND dashHwnd = reinterpret_cast<HWND>(dashboard->winId());
+    if (dashHwnd) {
+      if (m_smallWinIcon)
+        SendMessageW(dashHwnd, WM_SETICON, ICON_SMALL,
+                     reinterpret_cast<LPARAM>(m_smallWinIcon));
+      if (m_bigWinIcon)
+        SendMessageW(dashHwnd, WM_SETICON, ICON_BIG,
+                     reinterpret_cast<LPARAM>(m_bigWinIcon));
+    }
+  }
 }
 
 void PillWidget::toggleStartup(bool e) { applyStartupSetting(e); }
@@ -1196,9 +1571,9 @@ void PillWidget::paintEvent(QPaintEvent *) {
   //  - Bright blinking red = actively recording MP3
   QColor dotColor;
   if (m_mp3Recording) {
-    dotColor = blinkState ? QColor("#FF2222") : QColor("#880000");
+    dotColor = blinkState ? QColor("#3898FF") : QColor("#1A5090");
   } else if (isListening) {
-    dotColor = QColor("#550000"); // steady dark red during transcription
+    dotColor = QColor("#2060AA"); // steady blue during transcription
   } else {
     dotColor = QColor("#444444"); // grey when idle
   }
@@ -1225,13 +1600,13 @@ void PillWidget::paintEvent(QPaintEvent *) {
   // Color matches status text: grey #888888. Red during MP3 recording.
   if (isListening && showWaveform && canShowWaveform &&
       !waveformDisplayLevels.isEmpty()) {
-    QColor waveColor = m_mp3Recording ? QColor("#FF2222") : QColor("#888888");
+    QColor waveColor = m_mp3Recording ? QColor("#3898FF") : QColor("#5AACFF");
     QRectF sr = QRectF(waveRect).adjusted(0.0, 0.5, 0.0, -0.5);
     const qreal centerY = sr.center().y();
     const qreal heightScale = waveformHeightScale(int(sr.height()));
     const WaveformLayout layout = buildWaveformLayout(sr);
     const qreal visualCurve =
-        qBound<qreal>(0.60, 0.72 - ((heightScale - 1.0) * 0.045), 0.74);
+        qBound<qreal>(0.45, 0.55 - ((heightScale - 1.0) * 0.045), 0.60);
 
     p.setPen(Qt::NoPen);
     p.setBrush(waveColor);
@@ -1320,9 +1695,12 @@ void PillWidget::onSettingChanged(QString key, QVariant val) {
     refreshModelCombo();
   } else if (key.startsWith("cloud/")) {
     refreshModelCombo();
-  } else if (key == "wakeWordsChanged") {
+  } else if (key == "wakeWords" || key == "wakeWordsChanged") {
     QStringList words = val.toStringList();
     sendBackendCommand(("WAKEWORDS:" + words.join(",") + "\n").toUtf8());
+  } else if (key == "wakeWordMode") {
+    QString mode = val.toString();
+    sendBackendCommand(("WAKEWORDMODE:" + mode + "\n").toUtf8());
   } else if (key == "closeWordsChanged") {
     QStringList words = val.toStringList();
     sendBackendCommand(("CLOSEWORDS:" + words.join(",") + "\n").toUtf8());
@@ -1338,10 +1716,73 @@ void PillWidget::onSettingChanged(QString key, QVariant val) {
     sendBackendCommand(("SET_REC_DIR:" + val.toString() + "\n").toUtf8());
   } else if (key == "autoOffload") {
     m_autoOffload = val.toBool();
-    if (!m_autoOffload && m_offloadTimer)
-      m_offloadTimer->stop();
+    sendBackendCommand(("OFFLOAD:" + QString(m_autoOffload ? "true" : "false") + "\n").toUtf8());
+    evaluateAutoOffload();
   } else if (key == "offloadMinutes") {
-    m_offloadMinutes = val.toInt();
+    m_offloadSeconds = val.toInt() * 60;
+    sendBackendCommand(("OFFLOADDELAY:" + QString::number(m_offloadSeconds) + "\n").toUtf8());
+    evaluateAutoOffload();
+  } else if (key == "offloadSeconds") {
+    m_offloadSeconds = val.toInt();
+    sendBackendCommand(("OFFLOADDELAY:" + QString::number(m_offloadSeconds) + "\n").toUtf8());
+    evaluateAutoOffload();
+  } else if (key == "autoStopInactivity" || key == "inactivityStopSeconds") {
+    bool enable = s.value("autoStopInactivity", false).toBool();
+    int sec = enable ? s.value("inactivityStopSeconds", 15).toInt() : 0;
+    sendBackendCommand(("INACTIVITY_STOP:" + QString::number(sec) + "\n").toUtf8());
+  } else if (key == "clapAction") {
+    sendBackendCommand(("CLAP_ACTION:" + val.toString() + "\n").toUtf8());
+  } else if (key == "snapAction") {
+    sendBackendCommand(("SNAP_ACTION:" + val.toString() + "\n").toUtf8());
+  } else if (key == "acousticSensitivity") {
+    sendBackendCommand(("ACOUSTIC_SENSITIVITY:" + QString::number(val.toDouble(), 'f', 2) + "\n").toUtf8());
+  } else if (key == "ctrlSpaceEnabled") {
+    bool enabled = val.toBool();
+    if (enabled) {
+      // Use the same initialization path as startup; the former duplicate
+      // setup could create competing servers/processes after a settings toggle.
+      initPopupServer();
+      qDebug() << "[POPUP] Ctrl+Space enabled";
+    } else {
+      sendBackendCommand("PRELOAD:0\n");
+      // Kill popup process
+      if (m_popupProcess) {
+        QProcess *process = m_popupProcess;
+        m_popupProcess = nullptr;
+        process->disconnect(this);
+        if (process->state() == QProcess::Running) {
+          process->kill();
+          process->waitForFinished(2000);
+        }
+        process->deleteLater();
+      }
+      m_popupActive = false;
+      m_popupFinalDelivered = false;
+      m_popupStopRequested = false;
+      if (m_popupClient) {
+        m_popupClient->abort();
+        m_popupClient->deleteLater();
+        m_popupClient = nullptr;
+      }
+      if (m_popupServer) {
+        m_popupServer->close();
+        m_popupServer->deleteLater();
+        m_popupServer = nullptr;
+      }
+      qDebug() << "[POPUP] Ctrl+Space disabled";
+    }
+  } else if (key == "ctrlSpaceMode" || key == "ctrlSpaceOutput") {
+    // Forward updated config to popup in real-time
+    if (m_popupClient) {
+      QSettings s("QuickSTT", "Config");
+      int mode = s.value("ctrlSpaceMode", 0).toInt();
+      int output = s.value("ctrlSpaceOutput", 0).toInt();
+      bool alwaysOn = s.value("alwaysOnPill", true).toBool();
+      QString cfg = QString("{\"event\":\"CONFIG\",\"mode\":%1,\"output\":%2,\"always_on_pill\":%3}\n")
+                        .arg(mode).arg(output).arg(alwaysOn ? "true" : "false");
+      m_popupClient->write(cfg.toUtf8());
+      m_popupClient->flush();
+    }
   }
   setCustomOpacity(activeOpacity);
   customResize(pillWidth, pillHeight, pillRadius);
@@ -1379,6 +1820,31 @@ void PillWidget::onProcessOutput() {
     QString eventType = p[0];
     QString payload = p.mid(1).join("|");
 
+    // Forward relevant events to Ctrl+Space popup if connected
+    if (m_popupClient && m_popupActive) {
+      if (eventType == "AUDIO_LEVEL" || eventType == "FINAL_TEXT" ||
+          eventType == "PARTIAL_TEXT" || eventType == "STATE" ||
+          eventType == "STREAM_TEXT" || eventType == "MODEL_CAP") {
+        forwardEventToPopup(eventType, payload);
+      }
+      // Keep popup ownership until the backend reaches its terminal state.
+      // A final transcript is often followed by a late STATE event; releasing
+      // ownership here lets that event reopen the main pill unexpectedly.
+      if (eventType == "FINAL_TEXT") {
+        m_popupFinalDelivered = true;
+        if (textBoardWindow && !payload.trimmed().isEmpty())
+          textBoardWindow->appendText(payload.trimmed());
+        // Ensure pill widget is hidden after popup use
+        if (isVisible() && !m_temporarilySuppressAutoShow)
+          hide();
+        // End session warm-hold so the backend can auto-offload the model
+        // (Handy-like: load on press, unload after stop + idle delay).
+        sendBackendCommand("PRELOAD:0\n");
+        evaluateAutoOffload();
+        continue;  // Suppress pill widget text processing
+      }
+    }
+
     if (eventType == "STATE") {
       int commaPos = payload.indexOf(',');
       int c = commaPos >= 0 ? payload.left(commaPos).toInt() : payload.toInt();
@@ -1387,33 +1853,39 @@ void PillWidget::onProcessOutput() {
       qDebug() << "[STATE] code=" << c << " text=" << stateText;
 
       if (c == 1 || c == 2) {
+        if (waveformAnimationTimer && !waveformAnimationTimer->isActive())
+          waveformAnimationTimer->start();
         currentStatusText = stateText;
-        if (m_transientStatusTimer && m_transientStatusTimer->isActive() &&
-            !m_transientStatusText.isEmpty()) {
-          statusLabel->show();
-          statusLabel->setText(m_transientStatusText);
-        } else {
-          statusLabel->hide();
-        }
+        statusLabel->hide();
 
         if (!isListening) {
+          // New listening turn — reset streaming paste cursor.
+          m_streamTypedPrefix.clear();
           canShowWaveform = false;
           waveformDelayTimer->start(45);
 
-          if (isHidden() && !m_temporarilySuppressAutoShow) {
+          if (isHidden() && !m_temporarilySuppressAutoShow && !m_popupActive && !m_popupClient && !isAutoShowSuppressed()) {
             show();
             raise();
           }
         }
 
         isListening = true;
-        if (!isVisible() && !m_temporarilySuppressAutoShow)
+        // Keep the selected model warm for the whole turn.
+        if (m_offloadTimer && m_offloadTimer->isActive())
+          m_offloadTimer->stop();
+        // Cancel model load timeout — model loaded successfully
+        if (m_modelLoadTimeoutTimer && m_modelLoadTimeoutTimer->isActive())
+          m_modelLoadTimeoutTimer->stop();
+        if (!isVisible() && !m_temporarilySuppressAutoShow && !m_popupActive && !m_popupClient && !isAutoShowSuppressed())
           show();
         isRecording = (c == 2);
 
         updateCachedIcons();
         update();
       } else if (c == 0) {
+        if (waveformAnimationTimer)
+          waveformAnimationTimer->stop();
         isListening = false;
         isRecording = false;
         canShowWaveform = false;
@@ -1422,6 +1894,26 @@ void PillWidget::onProcessOutput() {
         waveformTargetLevels.clear();
         waveformDisplayLevels.clear();
         currentStatusText = stateText.isEmpty() ? "Ready" : stateText;
+        if (currentStatusText.startsWith("Switched to ") ||
+            currentStatusText == "Ready") {
+          const QString sel = currentComboModelName();
+          if (!sel.isEmpty() && usesFrontendManagedModel(sel)) {
+            if (!isModelInstalled(sel)) {
+              currentStatusText = supportsDirectDownload(sel)
+                                      ? "Model not installed - click DL"
+                                      : "Add model files manually first";
+            } else {
+              currentStatusText =
+                  currentStatusText.startsWith("Switched to ")
+                      ? ("Switched to " + sel)
+                      : (sel + " ready");
+            }
+          } else if (!sel.isEmpty() && !isModelInstalled(sel)) {
+            currentStatusText = supportsDirectDownload(sel)
+                                    ? "Model not installed - click DL"
+                                    : "Model not installed";
+          }
+        }
         statusLabel->show();
         statusLabel->setText(currentStatusText);
         if (m_mp3Recording) {
@@ -1439,6 +1931,8 @@ void PillWidget::onProcessOutput() {
         updateCachedIcons();
         update();
       } else if (c == -1) {
+        if (waveformAnimationTimer)
+          waveformAnimationTimer->stop();
         isListening = false;
         isRecording = false;
         canShowWaveform = false;
@@ -1457,6 +1951,18 @@ void PillWidget::onProcessOutput() {
         if (!stateText.isEmpty())
           statusLabel->setText(stateText);
         updateCachedIcons();
+      }
+      if (m_popupActive && (m_popupFinalDelivered || m_popupStopRequested) &&
+          (c == 0 || c == -1)) {
+        m_popupActive = false;
+        m_popupFinalDelivered = false;
+        m_popupStopRequested = false;
+        // Clear warm-hold if FINAL_TEXT never arrived (empty utterance / cancel).
+        sendBackendCommand("PRELOAD:0\n");
+        evaluateAutoOffload();
+        if (isVisible() && !m_temporarilySuppressAutoShow)
+          hide();
+        qDebug() << "[POPUP] Released terminal backend state" << c;
       }
       update();
     } else if (eventType == "DL_PROGRESS" || eventType == "DL_STATS") {
@@ -1523,38 +2029,119 @@ void PillWidget::onProcessOutput() {
           payload.isEmpty() ? "Model removed" : ("Removed " + payload);
       statusLabel->setText(currentStatusText);
       update();
+    } else if (eventType == "STREAM_TEXT") {
+      // payload: committed|tentative (popup already forwarded when active).
+      // Main pill: paste stable committed text as it grows (Nemotron Live).
+      if (!m_popupActive) {
+        const int bar = payload.indexOf('|');
+        const QString committed =
+            (bar >= 0 ? payload.left(bar) : payload).trimmed();
+        if (!committed.isEmpty()) {
+          QString delta;
+          if (m_streamTypedPrefix.isEmpty()) {
+            delta = committed;
+            m_streamTypedPrefix = committed;
+          } else if (committed.startsWith(m_streamTypedPrefix)) {
+            delta = committed.mid(m_streamTypedPrefix.size());
+            m_streamTypedPrefix = committed;
+          } else {
+            // Check for longest common prefix to avoid repeating words
+            int commonLen = 0;
+            while (commonLen < m_streamTypedPrefix.size() &&
+                   commonLen < committed.size() &&
+                   m_streamTypedPrefix[commonLen] == committed[commonLen]) {
+              commonLen++;
+            }
+            if (commonLen == m_streamTypedPrefix.size()) {
+              delta = committed.mid(commonLen);
+              m_streamTypedPrefix = committed;
+            } else {
+              delta.clear(); // Wait for FINAL_TEXT to commit clean transcript
+            }
+          }
+          if (!delta.isEmpty()) {
+            const bool appHasFocus = (QApplication::activeWindow() != nullptr);
+            if (!appHasFocus)
+              nativeSendText(delta);
+            m_lastHandledTranscript = committed;
+            m_lastHandledTranscriptMs = QDateTime::currentMSecsSinceEpoch();
+            qDebug() << "[STREAM-TYPED]" << delta;
+          }
+        }
+      }
     } else if (eventType == "PARTIAL_TEXT") {
-      // Partials are for engine diagnostics only — no native typing
-      // This avoids doubled text, command flicker, and scroll glitches
       qDebug() << "[PARTIAL]" << payload.trimmed();
+      // Tentative only — main pill types committed STREAM_TEXT + FINAL residual.
 
     } else if (eventType == "CLOUD_AUDIO") {
       const QString audioPath = payload.trimmed();
+      qDebug() << "[CLOUD_AUDIO] path=" << audioPath
+               << "model=" << currentComboModelName();
       if (audioPath.isEmpty()) {
         update();
         continue;
       }
       const QString activeModel = currentComboModelName();
       if (isCloudModel(activeModel)) {
+        qDebug() << "[CLOUD_AUDIO] -> cloud provider path";
         if (m_cloudSttManager)
           m_cloudSttManager->transcribeFile(activeModel, audioPath);
         else
           sendBackendCommand("CLOUD_DONE\n");
-      } else if (localModelRequiresFrontendTranscription(activeModel)) {
-        if (m_localTranscriptionManager)
-          m_localTranscriptionManager->transcribeFile(activeModel, audioPath);
-        else
+      } else if (localModelUsesFrontendTranscriber(activeModel)) {
+        if (!isModelInstalled(activeModel)) {
+          qDebug() << "[CLOUD_AUDIO] -> model NOT installed:" << activeModel;
+          currentStatusText = supportsDirectDownload(activeModel)
+                                  ? ("Model not installed - click DL for " +
+                                     activeModel)
+                                  : ("Install " + activeModel + " first");
+          statusLabel->show();
+          statusLabel->setText(currentStatusText);
+          updateModelDownloadButton();
           sendBackendCommand("CLOUD_DONE\n");
+        } else if (m_localFrontendSttManager) {
+          qDebug() << "[CLOUD_AUDIO] -> calling transcribeFile("
+                   << activeModel << "," << audioPath << ")";
+          m_localFrontendSttManager->transcribeFile(activeModel, audioPath);
+        } else {
+          qDebug() << "[CLOUD_AUDIO] -> m_localFrontendSttManager is NULL";
+          sendBackendCommand("CLOUD_DONE\n");
+        }
       } else {
+        qDebug() << "[CLOUD_AUDIO] -> not frontend transcriber, sending CLOUD_DONE";
         sendBackendCommand("CLOUD_DONE\n");
       }
 
     } else if (eventType == "FINAL_TEXT") {
       const QString trimmed = payload.trimmed();
       if (trimmed.isEmpty()) {
+        m_streamTypedPrefix.clear();
         update();
         continue;
       }
+
+      // If streaming already pasted a committed prefix, only type the residual
+      // so Nemotron does not double-paste the whole utterance on finalize.
+      if (!m_popupActive && !m_streamTypedPrefix.isEmpty()) {
+        QString residual;
+        if (trimmed.startsWith(m_streamTypedPrefix)) {
+          residual = trimmed.mid(m_streamTypedPrefix.size()).trimmed();
+        } else if (trimmed != m_streamTypedPrefix) {
+          // Final diverged from live commit — type full final as new segment.
+          residual = trimmed;
+        }
+        m_streamTypedPrefix.clear();
+        if (residual.isEmpty()) {
+          qDebug() << "[FINAL] fully covered by stream prefix:" << trimmed;
+          update();
+          continue;
+        }
+        // residual path still goes through command/routing via processRecognizedText
+        processRecognizedText(residual, false);
+        update();
+        continue;
+      }
+      m_streamTypedPrefix.clear();
 
       // Dedup guard: skip if same text received within 800ms
       static QString s_lastTypedText;
@@ -1616,6 +2203,29 @@ void PillWidget::onProcessOutput() {
       waveformTargetLevels.append(shaped);
       while (waveformTargetLevels.size() > m_waveformHistoryLimit)
         waveformTargetLevels.removeFirst();
+    } else if (eventType == "OFFLOADED") {
+      m_modelOffloaded = true;
+      qDebug() << "Model offload confirmed by backend";
+    } else if (eventType == "WAKEWORD_DETECTED") {
+      // Ignore wakeword if the user recently closed the widget
+      if (m_temporarilySuppressAutoShow) {
+        qDebug() << "WAKEWORD_DETECTED ignored — auto-show suppressed";
+      } else {
+        QSettings s("QuickSTT", "Config");
+        QString mode = s.value("wakeWordMode", "Off").toString();
+        if (mode != "Off") {
+          if (mode == "Always On" || isVisible()) {
+            restoreFromExternalTrigger();
+            isListening = true;
+            isRecording = true;
+            if (m_modelLoadTimeoutTimer)
+              m_modelLoadTimeoutTimer->start();
+            show();
+            updateCachedIcons();
+            update();
+          }
+        }
+      }
     }
   }
 }
@@ -1629,9 +2239,9 @@ void PillWidget::setupTray() {
   trayMenu = new QMenu(this);
   trayMenu->addAction("Dashboard", this, &PillWidget::openDashboard);
   trayMenu->addAction("Show Widget", this,
-                      &PillWidget::restoreFromExternalTrigger);
+                      &PillWidget::showMainWidgetExplicitly);
   trayMenu->addAction("Hide Widget", this, [this]() {
-    suppressAutoShowBriefly(3000);
+    suppressAutoShowBriefly(12000);
     hide();
   });
   trayMenu->addAction("Quit App", this, [this]() {
@@ -1648,23 +2258,147 @@ void PillWidget::setupTray() {
   trayIcon->setContextMenu(trayMenu);
   trayIcon->show();
   connect(trayIcon, &QSystemTrayIcon::activated,
-          [=](QSystemTrayIcon::ActivationReason r) {
-            if (r == QSystemTrayIcon::Trigger) {
+          [this](QSystemTrayIcon::ActivationReason r) {
+            if (r == QSystemTrayIcon::Trigger || r == QSystemTrayIcon::DoubleClick) {
               if (isVisible()) {
-                suppressAutoShowBriefly(3000);
+                suppressAutoShowBriefly(12000);
                 hide();
               } else {
-                restoreFromExternalTrigger();
+                showMainWidgetExplicitly();
               }
             }
           });
 }
 void PillWidget::openDashboard() {
+  ensureDashboardCreated();
   if (!dashboard)
     return;
+  if (dashboard->isMinimized())
+    dashboard->showNormal();
   dashboard->show();
   dashboard->raise();
   dashboard->activateWindow();
+}
+
+void PillWidget::ensureDashboardCreated() {
+  if (dashboard)
+    return;
+
+  qDebug() << "Setup Dashboard...";
+  try {
+    dashboard = new MainWindow();
+    qDebug() << "Dashboard created OK";
+  } catch (const std::exception &e) {
+    qDebug() << "Dashboard CRASH (std): " << e.what();
+    dashboard = nullptr;
+  } catch (...) {
+    qDebug() << "Dashboard CRASH (unknown)";
+    dashboard = nullptr;
+  }
+  if (!dashboard)
+    return;
+
+  dashboard->setBackend(backendProcess);
+  dashboard->setLocalModelManager(m_localModelManager);
+  dashboard->setOptionalServiceManager(m_optionalServiceManager);
+  // Smart Home managers not passed to dashboard (feature removed)
+  // dashboard->setSmartLifeManager(m_smartLifeManager);
+  // dashboard->setAndroidTvManager(m_androidTvManager);
+  dashboard->setHomeAssistantManager(m_homeAssistantManager);
+  connect(dashboard, &MainWindow::settingChanged, this,
+          &PillWidget::onSettingChanged);
+  dashboard->installEventFilter(this);
+  qDebug() << "Dashboard backend set OK";
+  qDebug() << "Dashboard signal connected OK";
+
+  updateTrayIcon();
+  applyNativeWindowIcons();
+}
+
+void PillWidget::attemptAutoReconnectSmartHome() {
+  if (m_smartLifeAutoRestoreAttempted || !m_smartLifeManager ||
+      !m_optionalServiceManager ||
+      !isOptionalServiceInstalled(QStringLiteral("smart_life"))) {
+    return;
+  }
+
+  QSettings settings(QStringLiteral("QuickSTT"), QStringLiteral("Config"));
+  const QString accessId =
+      settings.value(QStringLiteral("smartLife/accessId")).toString().trimmed();
+  const QString accessKey =
+      loadProtectedSetting(settings, QStringLiteral("smartLife/accessKey"))
+          .trimmed();
+  const QString mode = settings.value(QStringLiteral("smartLife/accountMode"),
+                                      QStringLiteral("smartlife"))
+                           .toString()
+                           .trimmed();
+  if (accessId.isEmpty() || accessKey.isEmpty())
+    return;
+
+  if (mode == QLatin1String("smartlife")) {
+    const QString username =
+        settings.value(QStringLiteral("smartLife/username")).toString().trimmed();
+    const QString password =
+        loadProtectedSetting(settings, QStringLiteral("smartLife/password"))
+            .trimmed();
+    if (username.isEmpty() || password.isEmpty())
+      return;
+  } else {
+    const QString uid =
+        settings.value(QStringLiteral("smartLife/developerUid")).toString().trimmed();
+    const QString homeIds =
+        settings.value(QStringLiteral("smartLife/developerHomeIds"))
+            .toString()
+            .trimmed();
+    if (uid.isEmpty() && homeIds.isEmpty())
+      return;
+  }
+
+  m_smartLifeAutoRestoreAttempted = true;
+  qInfo() << "[SMARTHOME]" << "Auto reconnect armed (widget)";
+  auto reconnectAttempt = std::make_shared<std::function<void(int)>>();
+  *reconnectAttempt = [this, reconnectAttempt](int remaining) {
+    if (!m_smartLifeManager || m_smartLifeManager->isConnected())
+      return;
+    const QString status = m_smartLifeManager->statusText().toLower();
+    if (status.contains(QStringLiteral("[28841107]")) ||
+        status.contains(QStringLiteral("data center is suspended")) ||
+        status.contains(QStringLiteral("[1004]")) ||
+        status.contains(QStringLiteral("sign invalid")) ||
+        status.contains(QStringLiteral("[1106] permission deny"))) {
+      qInfo() << "[SMARTHOME]"
+              << "Auto reconnect stopped because the current SmartHome error needs user action:"
+              << m_smartLifeManager->statusText();
+      return;
+    }
+    qInfo() << "[SMARTHOME]" << "Auto reconnect attempt" << (4 - remaining)
+            << "remaining" << remaining;
+    m_smartLifeManager->connectAndSync();
+    if (remaining > 1) {
+      QTimer::singleShot(6500, this, [reconnectAttempt, remaining]() {
+        (*reconnectAttempt)(remaining - 1);
+      });
+    }
+  };
+  QTimer::singleShot(1200, this,
+                     [reconnectAttempt]() { (*reconnectAttempt)(3); });
+}
+
+void PillWidget::attemptAutoReconnectAndroidTv() {
+  if (m_androidTvAutoRestoreAttempted || !m_androidTvManager ||
+      !m_optionalServiceManager || m_optionalServiceManager->isBusy() ||
+      !isOptionalServiceInstalled(QStringLiteral("android_tv_remote")) ||
+      !m_androidTvManager->isConfigured() ||
+      !m_androidTvManager->currentConfigHasPairedCredentials()) {
+    return;
+  }
+
+  m_androidTvAutoRestoreAttempted = true;
+  qInfo() << "[ANDROID-TV]" << "Auto reconnect armed (widget)";
+  QTimer::singleShot(1500, this, [this]() {
+    if (m_androidTvManager && m_androidTvManager->isConfigured())
+      m_androidTvManager->connectDevice();
+  });
 }
 void PillWidget::onMicClicked() {
   // Stopping mic also stops any MP3 recording in progress
@@ -1678,6 +2412,7 @@ void PillWidget::onMicClicked() {
     }
     update();
   }
+  evaluateAutoOffload();
   sendBackendCommand("TOGGLE\n");
 }
 
@@ -1707,7 +2442,15 @@ void PillWidget::onRedDotClicked() {
   }
 }
 void PillWidget::onCloseClicked() {
-  suppressAutoShowBriefly(3200);
+  if (waveformAnimationTimer)
+    waveformAnimationTimer->stop();
+  suppressAutoShowBriefly(12000);  // Match backend 10s SLEEP + 2s margin
+  
+  // Stop CrispASR server when widget is closed/hidden to free memory
+  if (m_localFrontendSttManager) {
+    m_localFrontendSttManager->stopCrispAsrServer();
+  }
+  
   sendBackendCommand("SLEEP\n");
   isListening = false;
   isRecording = false;
@@ -1730,34 +2473,24 @@ void PillWidget::onCloseClicked() {
                           QSystemTrayIcon::Information, 1000);
   // Start auto-offload timer ONLY if wakeword engine doesn't need the model
   // C++ wakeword detection (Vosk keyword) needs the model to keep running
-  QSettings offloadSettings("QuickSTT", "Config");
-  QString wakeEng = canonicalWakeEngineLabel(
-      offloadSettings.value("wakeEngine", "OpenWakeWord (TFLite)").toString());
-  bool wakeNeedsModel = wakeEng.contains("Vosk", Qt::CaseInsensitive);
-  if (m_autoOffload && m_offloadTimer && !wakeNeedsModel) {
-    int ms = m_offloadMinutes * 60 * 1000;
-    if (ms <= 0)
-      ms = 500; // "Instant" = 500ms grace period
-    m_offloadTimer->start(ms);
-    qDebug() << "Auto-offload timer started:" << m_offloadMinutes << "min";
-  } else if (wakeNeedsModel) {
-    qDebug() << "Auto-offload skipped: wakeword engine needs model active";
-  }
+  evaluateAutoOffload();
 }
 void PillWidget::onModelChanged(const QString &text) {
   Q_UNUSED(text);
   QString modelName = currentComboModelName();
   if (modelName.isEmpty())
     return;
+  
+
   m_currentModelName = modelName;
   QSettings("QuickSTT", "Config").setValue("selectedModel", modelName);
   modelCombo->setToolTip(
       buildModelTooltip(modelName, isModelInstalled(modelName)));
   updateModelDownloadButton();
 
-  if (isCloudModel(modelName)) {
+  if (usesFrontendManagedModel(modelName)) {
     statusLabel->show();
-    if (!isCloudModelConfigured(modelName)) {
+    if (isCloudModel(modelName) && !isCloudModelConfigured(modelName)) {
       currentStatusText = "Configure cloud provider credentials in Dashboard";
       statusLabel->setText(currentStatusText);
       update();
@@ -1770,21 +2503,26 @@ void PillWidget::onModelChanged(const QString &text) {
       return;
     }
     currentStatusText = "Switching to " + modelName + "...";
-    statusLabel->setText(currentStatusText);
-    sendBackendCommand("TRANSCRIBE_MODE:CLOUD\n");
-    sendBackendCommand(("MODEL:" + baseBackendModelName() + "\n").toUtf8());
-    update();
-    return;
-  }
-
-  if (localModelRequiresFrontendTranscription(modelName)) {
-    statusLabel->show();
-    if (!isModelInstalled(baseBackendModelName())) {
-      currentStatusText = "Vosk Small En is required as the local wake base";
-      statusLabel->setText(currentStatusText);
-      update();
-      return;
+    if (usesNativeParakeetPipeline(modelName)) {
+      // Nemotron (and other streaming workers) must use STREAMING so the
+      // backend launches nemotron_engine + stream_feed, not Parakeet batch.
+      const bool streaming = localModelSupportsStreaming(modelName);
+      sendBackendCommand(streaming ? "TRANSCRIBE_MODE:STREAMING\n"
+                                   : "TRANSCRIBE_MODE:PARAKEET\n");
+      sendBackendCommand(streaming ? "MODEL_CAP:streaming=1\n"
+                                   : "MODEL_CAP:streaming=0\n");
+      sendBackendCommand("PRELOAD:1\n");
+      // Keep the Ctrl+Space overlay Live panel in sync with the selected model.
+      forwardEventToPopup(QStringLiteral("MODEL_CAP"),
+                          streaming ? QStringLiteral("streaming=1")
+                                    : QStringLiteral("streaming=0"));
+    } else {
+      sendBackendCommand("TRANSCRIBE_MODE:CLOUD\n");
+      sendBackendCommand("MODEL_CAP:streaming=0\n");
+      forwardEventToPopup(QStringLiteral("MODEL_CAP"),
+                          QStringLiteral("streaming=0"));
     }
+    sendBackendCommand(frontendSegmentationCommandForModel(modelName));
     if (!isModelInstalled(modelName)) {
       currentStatusText = supportsDirectDownload(modelName)
                               ? "Model not installed - click DL"
@@ -1793,15 +2531,13 @@ void PillWidget::onModelChanged(const QString &text) {
       update();
       return;
     }
-    currentStatusText = "Switching to " + modelName + "...";
-    statusLabel->setText(currentStatusText);
-    sendBackendCommand("TRANSCRIBE_MODE:CLOUD\n");
     sendBackendCommand(("MODEL:" + baseBackendModelName() + "\n").toUtf8());
     update();
     return;
   }
 
   sendBackendCommand("TRANSCRIBE_MODE:LOCAL\n");
+  sendBackendCommand(frontendSegmentationCommandForModel(modelName));
 
   if (!supportsRuntimeModel(modelName)) {
     statusLabel->show();
@@ -2007,6 +2743,30 @@ void PillWidget::updateWaveformFrame() {
     update();
 }
 
+void PillWidget::evaluateAutoOffload() {
+  QSettings offloadSettings("QuickSTT", "Config");
+  bool wakeNeedsModel = usesFrontendManagedModel(
+      offloadSettings.value("wakeEngine", "OpenWakeWord (TFLite)").toString());
+
+  // Hold model in RAM while the main pill is listening OR the Rust popup owns
+  // the mic. Offloading mid-hold was the main source of Nemotron delay + empty
+  // / repeated finals.
+  if (m_autoOffload && !isListening && !m_popupActive && !wakeNeedsModel &&
+      !m_modelOffloaded) {
+    if (!m_offloadTimer) return;
+    int ms = m_offloadSeconds * 1000;
+    if (ms <= 0) ms = 500;
+    if (!m_offloadTimer->isActive() || m_offloadTimer->interval() != ms) {
+      m_offloadTimer->start(ms);
+      qDebug() << "Auto-offload timer evaluated/started:" << m_offloadSeconds << "sec";
+    }
+  } else if (m_offloadTimer && m_offloadTimer->isActive() &&
+             (!m_autoOffload || isListening || m_popupActive)) {
+    m_offloadTimer->stop();
+    qDebug() << "Auto-offload timer stopped (disabled or session active)";
+  }
+}
+
 void PillWidget::sendBackendCommand(const QByteArray &command) {
   if (!backendProcess)
     return;
@@ -2018,7 +2778,8 @@ void PillWidget::sendBackendCommand(const QByteArray &command) {
   static const QList<QByteArray> replacePrefixes = {
       "MODEL:",      "DOWNLOAD:", "WAKEWORDS:",
       "CLOSEWORDS:", "WAKEMODE:", "SET_REC_DIR:",
-      "TRANSCRIBE_MODE:"};
+      "TRANSCRIBE_MODE:", "FRONTEND_SEGMENTATION:",
+      "OFFLOAD:", "OFFLOADDELAY:"};
 
   for (const QByteArray &prefix : replacePrefixes) {
     if (normalized.startsWith(prefix)) {
@@ -2081,7 +2842,6 @@ void PillWidget::refreshModelCombo() {
 
   int preferredIndex = -1;
   int firstInstalledIndex = -1;
-  bool preferredInstalled = false;
   for (const QString &modelName : favs) {
     bool installed = isModelInstalled(modelName);
     int index = modelCombo->count();
@@ -2090,13 +2850,11 @@ void PillWidget::refreshModelCombo() {
                             Qt::ToolTipRole);
     if (firstInstalledIndex < 0 && installed)
       firstInstalledIndex = index;
-    if (modelName == preferredModel) {
+    if (modelName == preferredModel)
       preferredIndex = index;
-      preferredInstalled = installed;
-    }
   }
 
-  if (preferredIndex >= 0 && (preferredInstalled || firstInstalledIndex < 0)) {
+  if (preferredIndex >= 0) {
     modelCombo->setCurrentIndex(preferredIndex);
   } else if (firstInstalledIndex >= 0) {
     modelCombo->setCurrentIndex(firstInstalledIndex);
@@ -2151,6 +2909,18 @@ QString PillWidget::baseBackendModelName() const {
   return QStringLiteral("Vosk Small En");
 }
 
+QByteArray
+PillWidget::frontendSegmentationCommandForModel(const QString &modelName) const {
+  const LocalModelDescriptor descriptor = localModelDescriptor(modelName);
+  if (descriptor.engineFamily == QStringLiteral("nemo_transducer"))
+    return QByteArray("FRONTEND_SEGMENTATION:BALANCED\n");
+  if (descriptor.engineFamily == QStringLiteral("whisper_cpp"))
+    return QByteArray("FRONTEND_SEGMENTATION:ACCURATE\n");
+  if (localModelUsesFrontendTranscriber(modelName))
+    return QByteArray("FRONTEND_SEGMENTATION:BALANCED\n");
+  return QByteArray("FRONTEND_SEGMENTATION:NORMAL\n");
+}
+
 bool PillWidget::containsConfiguredCloseWord(const QString &text) const {
   const QString lowered = text.trimmed().toLower();
   if (lowered.isEmpty())
@@ -2174,6 +2944,11 @@ void PillWidget::processRecognizedText(const QString &text, bool fromCloud) {
   if (trimmed.isEmpty())
     return;
 
+  if (isIgnorableRecognitionText(trimmed)) {
+    qDebug() << "[IGNORED-TRANSCRIPT]" << trimmed;
+    return;
+  }
+
   const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
   if (trimmed == m_lastHandledTranscript &&
       (nowMs - m_lastHandledTranscriptMs) < 800) {
@@ -2186,15 +2961,50 @@ void PillWidget::processRecognizedText(const QString &text, bool fromCloud) {
   if (containsConfiguredCloseWord(trimmed)) {
     if (textBoardWindow)
       textBoardWindow->appendText(trimmed);
+    if (waveformAnimationTimer)
+      waveformAnimationTimer->stop();
     sendBackendCommand("SLEEP\n");
+    isListening = false;
+    isRecording = false;
+    canShowWaveform = false;
+    audioWaveform.clear();
+    waveformTargetLevels.clear();
+    waveformDisplayLevels.clear();
+    blinkTimer->stop();
+    blinkState = false;
     currentStatusText = "Hidden";
     statusLabel->show();
     statusLabel->setText(currentStatusText);
+    updateCachedIcons();
     update();
+    suppressAutoShowBriefly(3200);
+    hide();
+    if (textBoardWindow)
+      textBoardWindow->hide();
+
+    evaluateAutoOffload();
     return;
   }
 
-  if (m_smartLifeManager) {
+  const QSettings routeSettings("QuickSTT", "Config");
+  const QString voiceSource =
+      routeSettings.value("smartHome/voiceSource", "all").toString();
+  const bool routeNative = (voiceSource == "native" || voiceSource == "all");
+  const bool routeHa = (voiceSource == "ha" || voiceSource == "all");
+
+  if (routeNative && m_androidTvManager && m_androidTvManager->isInstalled()) {
+    QString tvFeedback;
+    if (m_androidTvManager->handleVoiceCommand(trimmed, &tvFeedback)) {
+      if (textBoardWindow)
+        textBoardWindow->appendText("TV: " + trimmed);
+      if (!tvFeedback.trimmed().isEmpty())
+        showTransientStatus(tvFeedback, 4500);
+      return;
+    }
+  }
+
+  if (routeNative && m_smartLifeManager &&
+      isOptionalServiceInstalled(QStringLiteral("smart_life"))) {
     QString smartFeedback;
     if (m_smartLifeManager->handleVoiceCommand(trimmed, &smartFeedback)) {
       if (textBoardWindow)
@@ -2205,21 +3015,48 @@ void PillWidget::processRecognizedText(const QString &text, bool fromCloud) {
     }
   }
 
+  if (routeHa && m_homeAssistantManager && m_homeAssistantManager->isConnected()) {
+    QString haFeedback;
+    if (m_homeAssistantManager->handleVoiceCommand(trimmed, &haFeedback)) {
+      if (textBoardWindow)
+        textBoardWindow->appendText("HA: " + trimmed);
+      if (!haFeedback.trimmed().isEmpty())
+        showTransientStatus(haFeedback, 4500);
+      return;
+    }
+  }
+
   const bool appHasFocus = (QApplication::activeWindow() != nullptr);
   bool isCommand = false;
   QString commandName;
   if (specialCommandsEnabled) {
     WORD vkey = 0;
-    if (tryResolveSpecialCommand(trimmed, &vkey, &commandName)) {
+    WORD modifierVkey = 0;
+    if (tryResolveSpecialCommand(trimmed, &vkey, &modifierVkey, &commandName)) {
       isCommand = true;
       if (!appHasFocus) {
-        INPUT down = {};
-        down.type = INPUT_KEYBOARD;
-        down.ki.wVk = vkey;
-        SendInput(1, &down, sizeof(INPUT));
-        INPUT up = down;
-        up.ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(1, &up, sizeof(INPUT));
+        if (modifierVkey != 0) {
+          INPUT inputs[4] = {};
+          inputs[0].type = INPUT_KEYBOARD;
+          inputs[0].ki.wVk = modifierVkey;
+          inputs[1].type = INPUT_KEYBOARD;
+          inputs[1].ki.wVk = vkey;
+          inputs[2].type = INPUT_KEYBOARD;
+          inputs[2].ki.wVk = vkey;
+          inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
+          inputs[3].type = INPUT_KEYBOARD;
+          inputs[3].ki.wVk = modifierVkey;
+          inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
+          SendInput(4, inputs, sizeof(INPUT));
+        } else {
+          INPUT down = {};
+          down.type = INPUT_KEYBOARD;
+          down.ki.wVk = vkey;
+          SendInput(1, &down, sizeof(INPUT));
+          INPUT up = down;
+          up.ki.dwFlags = KEYEVENTF_KEYUP;
+          SendInput(1, &up, sizeof(INPUT));
+        }
         qDebug() << "[COMMAND]" << commandName;
       } else {
         qDebug() << "[COMMAND-SUPPRESSED]" << commandName;
@@ -2243,6 +3080,66 @@ void PillWidget::processRecognizedText(const QString &text, bool fromCloud) {
   }
 }
 
+void PillWidget::setWidgetStatusText(const QString &text,
+                                     bool allowWhileListening) {
+  const QString trimmed = text.trimmed();
+  currentStatusText = trimmed;
+  if (!statusLabel)
+    return;
+
+  if (trimmed.isEmpty()) {
+    statusLabel->clear();
+    if (!isListening || allowWhileListening)
+      statusLabel->show();
+    else
+      statusLabel->hide();
+    return;
+  }
+
+  statusLabel->setText(trimmed);
+  if (isListening && !allowWhileListening) {
+    statusLabel->hide();
+  } else {
+    statusLabel->show();
+  }
+}
+
+bool PillWidget::isIgnorableRecognitionText(const QString &text) const {
+  const QString trimmed = text.trimmed();
+  if (trimmed.isEmpty())
+    return true;
+
+  const QString lowered = trimmed.toLower();
+  if ((trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+      (trimmed.startsWith('(') && trimmed.endsWith(')'))) {
+    return true;
+  }
+
+  static const QStringList ignoredPhrases = {
+      QStringLiteral("blank_audio"), QStringLiteral("blank audio"),
+      QStringLiteral("keyboard clicking"), QStringLiteral("typing sounds"),
+      QStringLiteral("mouse clicking"), QStringLiteral("background noise"),
+      QStringLiteral("music"), QStringLiteral("applause"),
+      QStringLiteral("parse-options.cc:read:"), QStringLiteral("sherpa-onnx-offline.exe"),
+      QStringLiteral("--moonshine-encoder"), QStringLiteral("--moonshine-merged-decoder"),
+      QStringLiteral("tokens.txt"), QStringLiteral("encoder_model.ort"),
+      QStringLiteral("decoder_model_merged.ort"), QStringLiteral(".onnx")};
+
+  for (const QString &phrase : ignoredPhrases) {
+    if (lowered.contains(phrase))
+      return true;
+  }
+
+  if (trimmed.contains(QStringLiteral(":\\")) ||
+      trimmed.contains(QStringLiteral("/Users/")) ||
+      trimmed.contains(QStringLiteral("/project/")) ||
+      trimmed.contains(QStringLiteral("/workspace/"))) {
+    return true;
+  }
+
+  return false;
+}
+
 void PillWidget::suppressAutoShowBriefly(int durationMs) {
   m_temporarilySuppressAutoShow = true;
   if (autoShowSuppressTimer) {
@@ -2256,9 +3153,228 @@ void PillWidget::showTransientStatus(const QString &text, int durationMs) {
   if (trimmed.isEmpty() || !statusLabel || !m_transientStatusTimer)
     return;
   m_transientStatusText = trimmed;
-  statusLabel->show();
   statusLabel->setText(trimmed);
+  if (isListening) {
+    statusLabel->hide();
+  } else {
+    statusLabel->show();
+  }
   m_transientStatusTimer->stop();
   m_transientStatusTimer->start(qMax(1200, durationMs));
   update();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Ctrl+Space Popup TCP Bridge
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void PillWidget::initPopupServer() {
+  // Check if Ctrl+Space feature is enabled in settings (default true)
+  QSettings os("QuickSTT", "Config");
+  bool ctrlSpaceEnabled = os.value("ctrlSpaceEnabled", true).toBool();
+  if (!ctrlSpaceEnabled) {
+    qDebug() << "[POPUP] Ctrl+Space feature disabled in settings";
+    return;
+  }
+
+  if (m_popupServer && m_popupServer->isListening()) {
+    launchPopupProcess();
+    return;
+  }
+
+  m_popupServer = new QTcpServer(this);
+  if (!m_popupServer->listen(QHostAddress::LocalHost, 19876)) {
+    qDebug() << "[POPUP] Failed to start TCP server on port 19876";
+    m_popupServer->deleteLater();
+    m_popupServer = nullptr;
+    return;
+  }
+  connect(m_popupServer, &QTcpServer::newConnection, this,
+          &PillWidget::onPopupConnected);
+  qDebug() << "[POPUP] TCP server listening on port 19876";
+
+  // Launch the popup process
+  launchPopupProcess();
+}
+
+void PillWidget::launchPopupProcess() {
+  QString appDir = QCoreApplication::applicationDirPath();
+  QString popupPath = QDir(appDir).filePath("quickstt_popup.exe");
+  if (!QFile::exists(popupPath)) {
+    qDebug() << "[POPUP] quickstt_popup.exe not found at" << popupPath;
+    return;
+  }
+  if (m_popupProcess && m_popupProcess->state() == QProcess::Running) {
+    return; // Already running
+  }
+  m_popupProcess = new QProcess(this);
+  m_popupProcess->setWorkingDirectory(appDir);
+  // Log popup stderr for debugging
+  QString logPath = QDir(appDir).filePath("popup_log.txt");
+  m_popupProcess->setStandardErrorFile(logPath, QIODevice::Truncate);
+  m_popupProcess->start(popupPath);
+  QProcess *process = m_popupProcess;
+  connect(process, &QProcess::finished, this,
+          [this, process](int exitCode, QProcess::ExitStatus exitStatus) {
+            qWarning() << "[POPUP] Process exited" << exitCode << exitStatus;
+            if (m_popupProcess != process)
+              return;
+            m_popupProcess = nullptr;
+            process->deleteLater();
+
+            QSettings settings("QuickSTT", "Config");
+            if (!m_isQuitting && settings.value("ctrlSpaceEnabled", true).toBool()) {
+              QTimer::singleShot(1000, this, [this]() { launchPopupProcess(); });
+            }
+          });
+  connect(process, &QProcess::errorOccurred, this,
+          [process](QProcess::ProcessError error) {
+            qWarning() << "[POPUP] Process error" << error << process->errorString();
+          });
+  qDebug() << "[POPUP] Launched quickstt_popup.exe";
+}
+
+void PillWidget::onPopupConnected() {
+  // Only allow one popup client at a time
+  if (m_popupClient) {
+    // Disconnect signals first to prevent double-delete from abort()
+    m_popupClient->disconnect(this);
+    m_popupClient->abort();
+    m_popupClient->deleteLater();
+    m_popupClient = nullptr;
+  }
+  m_popupClient = m_popupServer->nextPendingConnection();
+  if (!m_popupClient) return;
+  connect(m_popupClient, &QTcpSocket::readyRead, this, &PillWidget::onPopupData);
+  QTcpSocket *sock = m_popupClient;
+  connect(m_popupClient, &QTcpSocket::disconnected, this, [this, sock]() {
+    qDebug() << "[POPUP] Client disconnected";
+    m_popupActive = false;
+    m_popupFinalDelivered = false;
+    m_popupStopRequested = false;
+    if (m_popupClient == sock) {
+      m_popupClient = nullptr;
+    }
+    sock->deleteLater();
+  });
+  qDebug() << "[POPUP] Client connected";
+  // Send current settings to popup
+  {
+    QSettings s("QuickSTT", "Config");
+    int mode = s.value("ctrlSpaceMode", 0).toInt();  // 0=push-to-talk, 1=toggle
+    int output = s.value("ctrlSpaceOutput", 0).toInt();  // 0=type, 1=clipboard, 2=none
+    bool alwaysOn = s.value("alwaysOnPill", true).toBool();
+    QString cfg = QString("{\"event\":\"CONFIG\",\"mode\":%1,\"output\":%2,\"always_on_pill\":%3}\n")
+                      .arg(mode).arg(output).arg(alwaysOn ? "true" : "false");
+    m_popupClient->write(cfg.toUtf8());
+    m_popupClient->flush();
+  }
+  // Do NOT permanently warm-load on connect. Permanent PRELOAD previously
+  // froze the model in RAM (popupPreloadActive disabled auto-offload).
+  // Load happens lazily on the first popup_start / mic activation instead
+  // (Handy-like). Optional keep-warm can be reintroduced as a setting later.
+  qDebug() << "[POPUP] Client ready — lazy model load on first session";
+
+  // Tell the overlay whether the selected model can stream Live partials
+  // (Nemotron etc.). Compact pill stays default for batch models like Parakeet.
+  {
+    const QString model = currentComboModelName();
+    const bool streaming = localModelSupportsStreaming(model);
+    forwardEventToPopup(QStringLiteral("MODEL_CAP"),
+                        streaming ? QStringLiteral("streaming=1")
+                                  : QStringLiteral("streaming=0"));
+  }
+}
+
+void PillWidget::onPopupData() {
+  if (!m_popupClient)
+    return;
+  while (m_popupClient->canReadLine()) {
+    QString line = QString::fromUtf8(m_popupClient->readLine()).trimmed();
+    if (line.isEmpty())
+      continue;
+    qDebug() << "[POPUP] Received:" << line;
+
+    // Parse JSON command
+    QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8());
+    if (!doc.isObject())
+      continue;
+    QString cmd = doc.object().value("cmd").toString();
+
+    if (cmd == "popup_start") {
+      // Activate STT in popup mode (explicit START, idempotent)
+      m_popupActive = true;
+      m_popupFinalDelivered = false;
+      m_popupStopRequested = false;
+      m_streamTypedPrefix.clear();
+      // Cancel any pending auto-offload so we do not unload mid-hold.
+      if (m_offloadTimer && m_offloadTimer->isActive())
+        m_offloadTimer->stop();
+      // Hide pill widget immediately so only the small overlay is visible
+      if (isVisible())
+        hide();
+      // Session-scoped warm hold only while recording; cleared on stop/FINAL.
+      // Also ensures a killed parakeet_engine.exe is relaunched on next press.
+      if (usesNativeParakeetPipeline(currentComboModelName()))
+        sendBackendCommand("PRELOAD:1\n");
+      sendBackendCommand("POPUP_START\n");
+      qDebug() << "[POPUP] POPUP_START sent to backend";
+    } else if (cmd == "popup_stop") {
+      // Keep m_popupActive=true until FINAL_TEXT is forwarded!
+      m_popupStopRequested = true;
+      sendBackendCommand("POPUP_STOP\n");
+      qDebug() << "[POPUP] POPUP_STOP sent, waiting for FINAL_TEXT";
+    } else if (cmd == "popup_sleep") {
+      m_popupActive = false;
+      m_popupFinalDelivered = false;
+      m_popupStopRequested = false;
+      m_streamTypedPrefix.clear();
+      sendBackendCommand("PRELOAD:0\n");
+      sendBackendCommand("SLEEP\n");
+      evaluateAutoOffload();
+    }
+  }
+}
+
+void PillWidget::forwardEventToPopup(const QString &event,
+                                     const QString &payload) {
+  if (!m_popupClient ||
+      m_popupClient->state() != QAbstractSocket::ConnectedState)
+    return;
+
+  // Build JSON: {"event":"AUDIO_LEVEL","text":"...","level":75}
+  QJsonObject obj;
+  obj["event"] = event;
+
+  if (event == "AUDIO_LEVEL") {
+    obj["level"] = payload.toDouble();
+  } else if (event == "FINAL_TEXT" || event == "PARTIAL_TEXT") {
+    obj["text"] = payload;
+  } else if (event == "STREAM_TEXT") {
+    // payload: committed|tentative   (pipe-separated, mirrors Handy Live)
+    const int bar = payload.indexOf('|');
+    if (bar >= 0) {
+      obj["committed"] = payload.left(bar);
+      obj["tentative"] = payload.mid(bar + 1);
+    } else {
+      obj["committed"] = payload;
+      obj["tentative"] = QString();
+    }
+  } else if (event == "MODEL_CAP") {
+    // payload: streaming=1  or plain "1"/"0"
+    const bool streaming =
+        payload.contains(QStringLiteral("streaming=1")) ||
+        payload == QStringLiteral("1") ||
+        payload.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+    obj["streaming"] = streaming;
+  } else if (event == "STATE") {
+    int commaPos = payload.indexOf(',');
+    QString stateText =
+        commaPos >= 0 ? payload.mid(commaPos + 1).trimmed() : payload;
+    obj["text"] = stateText;
+  }
+
+  QByteArray json = QJsonDocument(obj).toJson(QJsonDocument::Compact) + "\n";
+  m_popupClient->write(json);
+  m_popupClient->flush();
 }

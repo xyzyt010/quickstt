@@ -1,9 +1,17 @@
 #ifndef SMART_LIFE_MANAGER_H
 #define SMART_LIFE_MANAGER_H
 
+#include <QColor>
 #include <QObject>
+#include <QHash>
 #include <QStringList>
 #include <QVector>
+
+enum class SmartLifeColorCapability {
+  None = 0,
+  Preset,
+  Rgb,
+};
 
 struct SmartLifeHomeInfo {
   QString id;
@@ -33,6 +41,23 @@ struct SmartLifeDeviceInfo {
   QString primaryPowerCode;
   QStringList powerCodes;
   QStringList functionCodes;
+  bool supportsBrightness = false;
+  QString brightnessCode;
+  int brightnessMin = 10;
+  int brightnessMax = 1000;
+  int brightness = 1000;
+  bool hasBrightness = false;
+  SmartLifeColorCapability colorCapability = SmartLifeColorCapability::None;
+  QString colorCode;
+  QString colorValueType;
+  QString workModeCode;
+  QString workModeWhiteValue = QStringLiteral("white");
+  QString workModeColourValue = QStringLiteral("colour");
+  QStringList presetColorLabels;
+  QStringList presetColorCommandValues;
+  int presetColorIndex = -1;
+  QColor rgbColor = Qt::white;
+  bool hasRgbColor = false;
 };
 
 class QNetworkAccessManager;
@@ -56,12 +81,21 @@ public:
   QVector<SmartLifeRoomInfo> rooms() const { return m_rooms; }
   QVector<SmartLifeDeviceInfo> devices() const { return m_devices; }
   SmartLifeDeviceInfo deviceById(const QString &deviceId) const;
+  QString deviceAlias(const QString &deviceId) const;
+  QString deviceDisplayName(const QString &deviceId) const;
   QString deviceDetailText(const QString &deviceId) const;
+  bool deviceExposesLightingControls(const SmartLifeDeviceInfo &device) const;
+  bool deviceHasVerifiedBrightnessControl(const SmartLifeDeviceInfo &device) const;
+  bool deviceHasVerifiedColorControl(const SmartLifeDeviceInfo &device) const;
+  void setDeviceAlias(const QString &deviceId, const QString &alias);
 
   void connectAndSync();
   void syncDevices();
   void disconnectSession(bool clearSavedTokens = false);
   void controlDevices(const QStringList &deviceIds, bool turnOn);
+  void setDeviceBrightness(const QString &deviceId, int brightness);
+  void setDevicePresetColor(const QString &deviceId, int presetIndex);
+  void setDeviceRgbColor(const QString &deviceId, const QColor &color);
   bool handleVoiceCommand(const QString &spokenText,
                           QString *feedback = nullptr);
 
@@ -83,6 +117,7 @@ signals:
   void statusChanged(const QString &statusText);
   void connectionChanged(bool connected);
   void devicesChanged();
+  void deviceStateChanged(const QString &deviceId);
   void controlFinished(const QString &message);
   void controlFailed(const QString &message);
 
@@ -112,6 +147,15 @@ private:
                                  QString *errorText);
   bool sendPowerCommand(const Config &config, SmartLifeDeviceInfo *device,
                         bool turnOn, QString *errorText);
+  bool sendDeviceCommands(const Config &config, SmartLifeDeviceInfo *device,
+                          const QJsonArray &commands, QString *errorText);
+  bool sendCommandsWithFallback(const Config &config, SmartLifeDeviceInfo *device,
+                                const QJsonArray &commands, QString *errorText);
+  void applyLightingFunctions(const QJsonArray &functions,
+                              SmartLifeDeviceInfo *device);
+  void applyLightingStatus(const QJsonArray &status, SmartLifeDeviceInfo *device);
+  void inferLightingCapabilitiesFromKnownCodes(SmartLifeDeviceInfo *device,
+                                               const QJsonArray &status);
 
   struct VoiceMatchResult {
     bool recognizedIntent = false;
@@ -125,6 +169,9 @@ private:
   VoiceMatchResult matchVoiceCommand(const QString &spokenText) const;
   QStringList normalizeConfiguredHomeIds(const QString &rawIds) const;
   QString configFingerprint(const Config &config) const;
+  void loadDeviceAliases();
+  void saveDeviceAliases() const;
+  QString deviceDisplayName(const SmartLifeDeviceInfo &device) const;
   void setStatus(const QString &statusText);
   void setConnected(bool connected);
   void clearCache();
@@ -142,6 +189,7 @@ private:
   QVector<SmartLifeHomeInfo> m_homes;
   QVector<SmartLifeRoomInfo> m_rooms;
   QVector<SmartLifeDeviceInfo> m_devices;
+  QHash<QString, QString> m_deviceAliases;
 };
 
 #endif // SMART_LIFE_MANAGER_H

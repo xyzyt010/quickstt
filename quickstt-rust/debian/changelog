@@ -1,0 +1,8 @@
+quickstt (2.0.0-alpha.1-1) unstable; urgency=medium
+
+  * Linux port Phase 3: Debian packaging for Ubuntu 22.04/24.04 + Debian 12 amd64
+    - Cargo deb (primary) and dpkg-buildpackage fallback
+    - Pill 360x50 r25, waveform 24/140, tray appindicator, hotkeys XGrabKey
+    - Backends: Vosk, Parakeet TDT 0.6B v3 INT8, Nemotron 3.5 Q8_0
+
+ -- QuickSTT Team <support@quickstt.com>  Tue, 26 Aug 2026 00:00:00 +0000

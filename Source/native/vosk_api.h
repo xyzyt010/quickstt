@@ -1,9 +1,8 @@
-// vosk_api.h — Dynamic loader for libvosk.dll (Vosk C API)
-// No import library (.lib) needed — loads via LoadLibrary/GetProcAddress
+// vosk_api.h — Dynamic loader for libvosk (Vosk C API) — Windows/Linux
 #pragma once
 #include <stdexcept>
 #include <string>
-#include <windows.h>
+#include "platform.h"
 
 
 // Opaque handles (same as Vosk C API)
@@ -25,7 +24,7 @@ typedef void (*fn_vosk_recognizer_reset)(VoskRecognizer *r);
 typedef void (*fn_vosk_set_log_level)(int log_level);
 
 struct VoskAPI {
-  HMODULE dll = nullptr;
+  platform_handle_t dll = nullptr;
 
   fn_vosk_model_new model_new = nullptr;
   fn_vosk_model_free model_free = nullptr;
@@ -39,12 +38,12 @@ struct VoskAPI {
   fn_vosk_set_log_level set_log_level = nullptr;
 
   bool load(const std::string &dll_path) {
-    dll = LoadLibraryA(dll_path.c_str());
+    dll = platform_load(dll_path.c_str());
     if (!dll)
       return false;
 
 #define LOAD(name)                                                             \
-  name = (fn_vosk_##name)GetProcAddress(dll, "vosk_" #name);                   \
+  name = (fn_vosk_##name)platform_symbol(dll, "vosk_" #name);                  \
   if (!name)                                                                   \
     return false;
     LOAD(model_new)
@@ -63,7 +62,7 @@ struct VoskAPI {
 
   void unload() {
     if (dll) {
-      FreeLibrary(dll);
+      platform_unload(dll);
       dll = nullptr;
     }
   }

@@ -1,0 +1,111 @@
+import { Button, StandardTableView, TabWidget, CheckBox, ComboBox, LineEdit, Slider } from "std-widgets.slint";
+
+export component DashboardWidget inherits Window {
+    title: "QuickSTT Dashboard";
+    width: 720px;
+    height: 540px;
+    background: #111418;
+
+    in-out property <int> active-tab: 0;
+    
+    // Some mock data properties that rust will fill
+    in property <[string]> models: ["base.en", "small", "medium"];
+    in property <int> selected-model: 0;
+    
+    callback select-model(string);
+    callback close-dashboard();
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+        
+        Text {
+            text: "QuickSTT Settings";
+            font-size: 20px;
+            font-weight: 700;
+            color: #E2E8F0;
+        }
+
+        TabWidget {
+            Tab {
+                title: "Models";
+                VerticalLayout {
+                    spacing: 16px;
+                    padding-top: 16px;
+                    Text { text: "Manage local and cloud STT models."; color: #94A3B8; }
+                    
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Selected Model:"; color: white; vertical-alignment: center; }
+                        ComboBox {
+                            model: root.models;
+                            current-index: root.selected-model;
+                            selected(val) => { root.select-model(val); }
+                        }
+                    }
+                    
+                    // placeholder list
+                    Rectangle {
+                        background: #1E293B;
+                        border-radius: 8px;
+                        VerticalLayout {
+                            padding: 8px;
+                            Text { text: "Installed Models List here..."; color: #94A3B8; }
+                        }
+                    }
+                }
+            }
+            Tab {
+                title: "GPU";
+                VerticalLayout {
+                    padding-top: 16px;
+                    Text { text: "Hardware Acceleration Settings"; color: white; }
+                }
+            }
+            Tab {
+                title: "SmartHome";
+                VerticalLayout {
+                    padding-top: 16px;
+                    Text { text: "Smart Home Integrations (Local/Tuya)"; color: white; }
+                }
+            }
+            Tab {
+                title: "Style";
+                VerticalLayout {
+                    spacing: 16px;
+                    padding-top: 16px;
+                    Text { text: "Appearance Settings"; color: white; }
+                    HorizontalLayout {
+                        Text { text: "Widget Opacity"; color: white; }
+                        Slider { minimum: 10; maximum: 100; value: 80; }
+                    }
+                    HorizontalLayout {
+                        Text { text: "Pill Radius"; color: white; }
+                        Slider { minimum: 0; maximum: 32; value: 16; }
+                    }
+                }
+            }
+            Tab {
+                title: "General";
+                VerticalLayout {
+                    padding-top: 16px;
+                    Text { text: "General App Settings"; color: white; }
+                    CheckBox { text: "Start with Windows"; }
+                }
+            }
+            Tab {
+                title: "Wakeword";
+                VerticalLayout {
+                    spacing: 16px;
+                    padding-top: 16px;
+                    Text { text: "Voice Activation (Wakeword)"; color: white; }
+                    CheckBox { text: "Enable Wakeword"; checked: true; }
+                    HorizontalLayout {
+                        Text { text: "Sensitivity"; color: white; }
+                        Slider { minimum: 0; maximum: 100; value: 50; }
+                    }
+                }
+            }
+        }
+    }
+}

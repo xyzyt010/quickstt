@@ -1,10 +1,13 @@
 #ifndef PILL_WIDGET_H
 #define PILL_WIDGET_H
 
+#include "android_tv_manager.h"
 #include "cloud_stt_manager.h"
+#include "home_assistant_manager.h"
+#include "local_frontend_stt_manager.h"
 #include "local_model_manager.h"
-#include "local_transcription_manager.h"
 #include "mainwindow.h"
+#include "optional_service_manager.h"
 #include "smart_life_manager.h"
 #include "text_board.h"
 #include <QAction>
@@ -28,10 +31,13 @@
 #include <QSettings>
 #include <QSvgRenderer>
 #include <QSystemTrayIcon>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTimer>
 #include <QWheelEvent>
 #include <QWidget>
 #include <functional>
+#include <windows.h>
 
 // Custom ComboBox to track Open/Close state for Arrow rotation
 class PillComboBox : public QComboBox {
@@ -214,6 +220,7 @@ class PillWidget : public QWidget {
 public:
   explicit PillWidget(QWidget *parent = nullptr);
   ~PillWidget();
+  bool isAutoShowSuppressed() const { return m_temporarilySuppressAutoShow; }
 
 protected:
   void paintEvent(QPaintEvent *event) override;
@@ -229,11 +236,17 @@ protected:
   void resizeEvent(QResizeEvent *event) override;
   void hideEvent(QHideEvent *event) override; // Sync textboard
   void showEvent(QShowEvent *event) override; // Sync textboard
+  bool eventFilter(QObject *obj, QEvent *event) override;
+
+public slots:
+  void centerOnScreen();
+  void openDashboard();
+  void restoreFromExternalTrigger();
+  void showMainWidgetExplicitly();
 
 private slots:
   void toggleTextBoard();
   void repositionTextBoard();
-  void restoreFromExternalTrigger();
   void onMicClicked();
   void onRedDotClicked();
   void onCloseClicked();
@@ -251,8 +264,7 @@ private slots:
 
   void onAhkResult(int reqId, bool commandExecuted, const QString &statusText);
 
-  // Dashboard Logic
-  void openDashboard();
+  // Dashboard Logic (openDashboard moved to public slots)
   void onSettingChanged(QString key, QVariant val);
 
   void toggleStartup(bool enable);
@@ -331,11 +343,12 @@ private:
   QList<QByteArray> m_pendingBackendCommands;
   bool m_temporarilySuppressAutoShow = false;
   QTimer *m_transientStatusTimer = nullptr;
+  QTimer *m_modelLoadTimeoutTimer = nullptr;
   QString m_transientStatusText;
 
   // Auto-offload state
   QTimer *m_offloadTimer = nullptr;
-  int m_offloadMinutes = 3;
+  int m_offloadSeconds = 15;
   bool m_autoOffload = true;
   bool m_modelOffloaded = false;
 
@@ -344,31 +357,67 @@ private:
 
   void setupTray();
   void updateTrayIcon();
+  void applyNativeWindowIcons();
   void checkStartup();
   void customResize(int w, int h, int r);
   void setCustomOpacity(int val);
+  void evaluateAutoOffload();
   void sendBackendCommand(const QByteArray &command);
   void refreshModelCombo();
   void updateModelDownloadButton();
   bool isModelInstalled(const QString &modelName) const;
   QString currentComboModelName() const;
+  void ensureDashboardCreated();
+  void attemptAutoReconnectSmartHome();
+  void attemptAutoReconnectAndroidTv();
   void suppressAutoShowBriefly(int durationMs = 2200);
   void showTransientStatus(const QString &text, int durationMs = 5000);
   void processRecognizedText(const QString &text, bool fromCloud);
+  void setWidgetStatusText(const QString &text,
+                           bool allowWhileListening = false);
+  bool isIgnorableRecognitionText(const QString &text) const;
   bool containsConfiguredCloseWord(const QString &text) const;
   QString baseBackendModelName() const;
+  QByteArray frontendSegmentationCommandForModel(const QString &modelName) const;
 
   // Cached SVG Renderers
   QSvgRenderer *m_svgRenMicActive = nullptr;
   QSvgRenderer *m_svgRenMicInactive = nullptr;
   QSvgRenderer *m_svgRenApp = nullptr;
+  HICON m_smallWinIcon = nullptr;
+  HICON m_bigWinIcon = nullptr;
   int m_waveformHistoryLimit = 64;
   CloudSttManager *m_cloudSttManager = nullptr;
+  LocalFrontendSttManager *m_localFrontendSttManager = nullptr;
   LocalModelManager *m_localModelManager = nullptr;
-  LocalTranscriptionManager *m_localTranscriptionManager = nullptr;
+  OptionalServiceManager *m_optionalServiceManager = nullptr;
   SmartLifeManager *m_smartLifeManager = nullptr;
+  AndroidTvManager *m_androidTvManager = nullptr;
+  HomeAssistantManager *m_homeAssistantManager = nullptr;
   QString m_lastHandledTranscript;
   qint64 m_lastHandledTranscriptMs = 0;
+  // Streaming (Nemotron) main-pill paste-as-you-speak: text already typed
+  // from committed STREAM_TEXT so FINAL only appends the remaining delta.
+  QString m_streamTypedPrefix;
+  bool m_smartLifeAutoRestoreAttempted = false;
+  bool m_androidTvAutoRestoreAttempted = false;
+  QTimer *m_ramCompactTimer = nullptr;
+  void compactWorkingSet();
+
+  // Ctrl+Space Popup TCP bridge
+  QTcpServer *m_popupServer = nullptr;
+  QTcpSocket *m_popupClient = nullptr;
+  bool m_popupActive = false;  // True when popup is controlling STT
+  // Keep native state events owned by the popup until its final idle event.
+  // Without this, a late STATE event reopens the main pill after Ctrl+Space.
+  bool m_popupFinalDelivered = false;
+  bool m_popupStopRequested = false;
+  void initPopupServer();
+  void onPopupConnected();
+  void onPopupData();
+  void forwardEventToPopup(const QString &event, const QString &payload);
+  void launchPopupProcess();
+  QProcess *m_popupProcess = nullptr;
 };
 
 #endif // PILL_WIDGET_H

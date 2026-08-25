@@ -1,0 +1,99 @@
+export component TextBoardWidget inherits Window {
+    width: 420px;
+    height: 180px;
+    background: transparent;
+
+    in property <string> text_content: "";
+    in property <string> header_text: "Idling...";
+    in property <bool> is_attached: true;
+    in property <int> text_size: 14;
+    in property <float> window_opacity: 0.87;
+
+    callback toggle_attach();
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        opacity: window_opacity;
+        border-radius: is_attached ? 0px : 6px;
+        clip: true;
+
+        VerticalLayout {
+            spacing: 0px;
+
+            // Title Bar
+            Rectangle {
+                height: 28px;
+                background: #1E1E1E;
+                
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 4px;
+                    alignment: space-between;
+                    spacing: 4px;
+
+                    Text {
+                        text: header_text;
+                        color: #CCCCCC;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+
+                    // Chain Button
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 26px;
+                            height: 26px;
+                            background: chain_touch.has-hover ? #444444 : transparent;
+                            border-radius: chain_touch.has-hover ? 4px : 0px;
+
+                            Text {
+                                // U+26D3 (⛓) if attached, U+1F517 (🔗) if detached
+                                text: is_attached ? "⛓" : "🔗"; 
+                                font-size: 13px;
+                                color: #FFFFFF;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+
+                            chain_touch := TouchArea {
+                                clicked => { toggle_attach(); }
+                                mouse-cursor: pointer;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Top Border 
+            Rectangle {
+                height: 1px;
+                background: #333333;
+            }
+
+            // Text Area
+            Rectangle {
+                background: rgba(20, 20, 20, 240);
+                
+                Flickable {
+                    viewport-height: ta_text.preferred-height;
+                    width: parent.width;
+                    height: parent.height;
+                    
+                    ta_text := Text {
+                        width: parent.width - 12px;
+                        x: 6px;
+                        y: 6px;
+                        text: text_content;
+                        color: #FFFFFF;
+                        font-family: "Consolas";
+                        font-size: text_size * 1px;
+                        wrap: word-wrap;
+                        vertical-alignment: top;
+                    }
+                }
+            }
+        }
+    }
+}

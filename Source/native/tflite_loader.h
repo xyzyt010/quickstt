@@ -1,12 +1,13 @@
-// tflite_loader.h — Dynamic loader for TensorFlow Lite C API (tensorflowlite_c.dll)
-// Loads all needed TFLite C API functions at runtime via LoadLibrary/GetProcAddress
+// tflite_loader.h — Dynamic loader for TensorFlow Lite C API (tensorflowlite_c.dll / libtensorflowlite_c.so)
+// Loads all needed TFLite C API functions at runtime via LoadLibrary/GetProcAddress (Win) or dlopen/dlsym (Linux)
 #pragma once
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#include <windows.h>
+#include "platform.h"
+#include <filesystem>
 
 // Forward-declare opaque TFLite types
 typedef struct TfLiteModel TfLiteModel;
@@ -26,7 +27,7 @@ typedef enum {
 } TfLiteType;
 
 struct TfLiteLoader {
-  HMODULE handle = nullptr;
+  platform_handle_t handle = nullptr;
 
   // Function pointers
   using FnVersion = const char *(*)();
@@ -81,25 +82,30 @@ struct TfLiteLoader {
   bool loaded() const { return handle != nullptr; }
 
   bool load(const std::string &dir) {
-    std::string dllPath = dir + "\\tensorflowlite_c.dll";
-    handle = LoadLibraryA(dllPath.c_str());
+#ifdef _WIN32
+    std::string dllPath = (std::filesystem::path(dir) / "tensorflowlite_c.dll").string();
+    handle = platform_load(dllPath.c_str());
+    if (!handle) handle = platform_load("tensorflowlite_c.dll");
+    const char* libLabel = "tensorflowlite_c.dll";
+#else
+    std::string dllPath = (std::filesystem::path(dir) / "libtensorflowlite_c.so").string();
+    handle = platform_load(dllPath.c_str());
+    if (!handle) handle = platform_load("libtensorflowlite_c.so");
+    const char* libLabel = "libtensorflowlite_c.so";
+#endif
     if (!handle) {
-      // Try current directory
-      handle = LoadLibraryA("tensorflowlite_c.dll");
-    }
-    if (!handle) {
-      fprintf(stderr, "[TFLITE] Failed to load tensorflowlite_c.dll\n");
+      fprintf(stderr, "[TFLITE] Failed to load %s\n", libLabel);
       return false;
     }
 
 #define LOAD_FN(name, sym)                                                     \
-  name = (decltype(name))GetProcAddress(handle, sym);                          \
+  name = (decltype(name))platform_symbol(handle, sym);                          \
   if (!name) {                                                                 \
     fprintf(stderr, "[TFLITE] Missing symbol: %s\n", sym);                     \
-    FreeLibrary(handle);                                                       \
+    platform_unload(handle);                                                   \
     handle = nullptr;                                                          \
     return false;                                                              \
-  }
+   }
 
     LOAD_FN(version, "TfLiteVersion");
     LOAD_FN(modelCreateFromFile, "TfLiteModelCreateFromFile");
@@ -127,14 +133,19 @@ struct TfLiteLoader {
 
 #undef LOAD_FN
 
-    fprintf(stderr, "[TFLITE] tensorflowlite_c.dll loaded OK (v%s)\n",
+    fprintf(stderr, "[TFLITE] %s loaded OK (v%s)\n",
+#ifdef _WIN32
+            "tensorflowlite_c.dll",
+#else
+            "libtensorflowlite_c.so",
+#endif
             version());
     return true;
   }
 
   void unload() {
     if (handle) {
-      FreeLibrary(handle);
+      platform_unload(handle);
       handle = nullptr;
     }
   }

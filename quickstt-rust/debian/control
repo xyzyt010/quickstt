@@ -1,0 +1,20 @@
+Source: quickstt
+Section: utils
+Priority: optional
+Maintainer: QuickSTT Team <support@quickstt.com>
+Build-Depends: debhelper (>= 12), cargo, rustc, pkg-config, libgtk-3-dev, libayatana-appindicator3-dev | libappindicator3-dev, librsvg2-dev, libasound2-dev, libpulse-dev, libx11-dev, libxi-dev, libxtst-dev, cmake, protobuf-compiler
+Standards-Version: 4.6.0
+Homepage: https://github.com/quickstt/quickstt
+Rules-Requires-Root: no
+
+Package: quickstt
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, libgtk-3-0, libayatana-appindicator3-1 | libappindicator3-1, librsvg2-2, libasound2, libpulse0, libx11-6, libxi6, libxtst6, libglib2.0-0
+Description: Floating voice typing widget for Linux
+ QuickSTT is a floating, transparent always-on-top voice typing widget for
+ X11 and Wayland. It integrates three STT backends out-of-the-box:
+  - Vosk small EN (50M)
+  - NVIDIA Parakeet TDT 0.6B v3 INT8 (ONNX/Rust)
+  - Nemotron 3.5 ASR streaming 0.6B Q8_0 (GGUF) with VAD
+ Wakeword detection via livekit-wakeword / OpenWakeWord.
+ Config: ~/.config/QuickSTT/config.toml  Models: ~/.local/share/QuickSTT/models

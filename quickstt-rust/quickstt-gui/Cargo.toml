@@ -1,0 +1,65 @@
+[package]
+name = "quickstt-gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "QuickSTT"
+path = "src/main.rs"
+
+[dependencies]
+quickstt-core = { path = "../quickstt-core" }
+quickstt-ipc = { path = "../quickstt-ipc" }
+dirs = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+# GUI Dependencies — cross-platform (egui/eframe glow works on Linux with gtk feature)
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.29"
+tray-icon = "0.17"
+global-hotkey = "0.6"
+muda = "0.14"
+raw-window-handle = { workspace = true }
+resvg = "0.44"
+usvg = "0.44"
+image = "0.25"
+hound = { workspace = true }
+
+[features]
+default = ["wakeword", "audio-capture"]
+wakeword = ["quickstt-core/wakeword"]
+audio-capture = ["quickstt-core/audio-capture"]
+native-ml = ["quickstt-core/native-ml"]
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+dirs = { workspace = true }
+
+[build-dependencies]
+winresource = "0.1.17"
+
+[package.metadata.deb]
+name = "quickstt"
+maintainer = "QuickSTT Team <support@quickstt.com>"
+copyright = "2024-2026, QuickSTT Team <support@quickstt.com>"
+license-file = ["../LICENSE", "0"]
+extended-description = """\
+Floating voice typing widget for Linux — X11 & Wayland, transparent always-on-top.
+ Includes integrated STT backends: Vosk small EN, Parakeet TDT 0.6B, Nemotron 3.5 streaming."""
+section = "utils"
+priority = "optional"
+depends = "libgtk-3-0, libayatana-appindicator3-1 | libappindicator3-1, librsvg2-2, libasound2, libpulse0, libx11-6, libxi6, libxtst6, libglib2.0-0"
+assets = [
+  ["target/release/QuickSTT", "usr/bin/quickstt", "755"],
+  ["assets/quickstt.desktop", "usr/share/applications/quickstt.desktop", "644"],
+  ["assets/icon_app.png", "usr/share/pixmaps/quickstt.png", "644"],
+  ["assets/icon_app.png", "usr/share/icons/hicolor/256x256/apps/quickstt.png", "644"],
+]

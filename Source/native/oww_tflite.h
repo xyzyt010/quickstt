@@ -43,7 +43,8 @@ static inline void tfl_log(const std::string &msg) {
 
 class TFLiteWakeWordDetector {
 public:
-  float threshold = 0.60f;
+  // 0.42 is wake-friendly at normal speaking volume; 0.60 forced shouting.
+  float threshold = 0.42f;
   bool active = false;
 
   struct WakeModel {
@@ -58,7 +59,7 @@ public:
   ~TFLiteWakeWordDetector() { cleanup(); }
 
   bool init(TfLiteLoader &tfl, const std::string &model_dir,
-            const std::vector<std::string> &wake_words, float thresh = 0.60f) {
+            const std::vector<std::string> &wake_words, float thresh = 0.42f) {
     threshold = thresh;
     tfl_ = &tfl;
     if (!tfl_->loaded())
@@ -70,13 +71,13 @@ public:
     tfl_->optionsSetNumThreads(opts_, 1);
 
     // Load melspectrogram model (requires fixed input shape [1, 1280])
-    std::string mel_path = model_dir + "\\melspectrogram.tflite";
+    std::string mel_path = (fs::path(model_dir) / "melspectrogram.tflite").string();
     if (!loadModel(mel_path, &mel_model_, &mel_interp_, {1, 1280}))
       return false;
     tfl_log("Loaded melspectrogram model");
 
     // Load embedding model (requires fixed input shape [1, 76, 32, 1])
-    std::string emb_path = model_dir + "\\embedding_model.tflite";
+    std::string emb_path = (fs::path(model_dir) / "embedding_model.tflite").string();
     if (!loadModel(emb_path, &emb_model_, &emb_interp_, {1, 76, 32, 1}))
       return false;
     tfl_log("Loaded embedding model");
@@ -96,7 +97,7 @@ public:
         continue;
       }
 
-      std::string fpath = model_dir + "\\" + it->second;
+      std::string fpath = (fs::path(model_dir) / it->second).string();
       if (!fs::exists(fpath)) {
         tfl_log("Model file not found: " + fpath + " — skipping");
         continue;
@@ -110,6 +111,16 @@ public:
       TfLiteTensor *inp = tfl_->getInputTensor(wm.interp, 0);
       if (inp && tfl_->tensorNumDims(inp) >= 2) {
         wm.n_features = tfl_->tensorDim(inp, 1);
+      }
+
+      // Pre-resize input tensor and allocate tensors once here to avoid costly per-frame allocations
+      int dims[] = {1, (int)wm.n_features, (int)EMB_DIM};
+      tfl_->resizeInputTensor(wm.interp, 0, dims, 3);
+      if (tfl_->allocateTensors(wm.interp) != kTfLiteOk) {
+        tfl_log("Failed to allocate tensors for wakeword: " + it->second);
+        tfl_->interpreterDelete(wm.interp);
+        tfl_->modelDelete(wm.model);
+        continue;
       }
 
       wm.name = it->second.substr(0, it->second.find(".tflite"));
@@ -230,39 +241,13 @@ private:
   }
 
   void initFeatureBuf() {
-    // Bootstrap: process enough random audio to fill initial embedding buffer
-    // Process in 1280-sample chunks matching the fixed TFLite mel model input
-    std::vector<int16_t> init(1280 * 50); // ~4 sec of random audio
-    for (auto &s : init)
-      s = (int16_t)((rand() % 2001) - 1000);
-    
-    // Process in 1280-sample chunks
-    for (size_t off = 0; off + 1280 <= init.size(); off += 1280) {
-      auto mel = getMelChunk(init.data() + off);
-      mel_buf_.insert(mel_buf_.end(), mel.begin(), mel.end());
-    }
-    
-    // Build initial embeddings from mel buffer
-    size_t mf = mel_buf_.size() / 32;
-    if (mf >= 76) {
-      size_t start = (mf - 76) * 32;
-      std::vector<float> win(mel_buf_.begin() + start, mel_buf_.end());
-      
-      TfLiteTensor *input = tfl_->getInputTensor(emb_interp_, 0);
-      tfl_->tensorCopyFromBuffer(input, win.data(), win.size() * sizeof(float));
-      
-      if (tfl_->invoke(emb_interp_) == kTfLiteOk) {
-        const TfLiteTensor *output = tfl_->getOutputTensor(emb_interp_, 0);
-        size_t out_bytes = tfl_->tensorByteSize(output);
-        size_t cnt = out_bytes / sizeof(float);
-        feat_buf_.resize(cnt);
-        tfl_->tensorCopyToBuffer(output, feat_buf_.data(), out_bytes);
-      } else {
-        feat_buf_.assign(EMB_DIM, 0.0f);
-      }
-    } else {
-      feat_buf_.assign(EMB_DIM, 0.0f);
-    }
+    // Do not seed a live detector with random audio.  The wake-word model is
+    // streaming, so synthetic features make its first real prediction depend
+    // on startup timing and can both mask short phrases and create false hits.
+    // streamFeatures() continuously fills this with real microphone audio;
+    // by the time a user speaks, the buffer contains recent silence plus the
+    // phrase context the model was trained to expect.
+    feat_buf_.clear();
   }
 
   // ── TFLite inference helpers ──────────────────────────────────────────
@@ -383,10 +368,6 @@ private:
 
   // Run wakeword model on features
   float runWakeModel(WakeModel &wm, const std::vector<float> &feats) {
-    int dims[] = {1, (int)wm.n_features, (int)EMB_DIM};
-    tfl_->resizeInputTensor(wm.interp, 0, dims, 3);
-    tfl_->allocateTensors(wm.interp);
-
     TfLiteTensor *input = tfl_->getInputTensor(wm.interp, 0);
     if (!input)
       return 0.0f;

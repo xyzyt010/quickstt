@@ -1,0 +1,13 @@
+[package]
+name = "parakeet_engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+transcribe-rs = { version = "0.3.3", features = ["onnx"] }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+hound = "3.5"
+base64 = "0.22"

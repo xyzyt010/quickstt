@@ -1,0 +1,7 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Source: https://github.com/quickstt/quickstt
+
+Files: *
+Copyright: 2024-2026 QuickSTT Team
+License: MIT
+ See /usr/share/common-licenses/MIT or LICENSE at repo root.

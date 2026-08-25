@@ -1,0 +1,18 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --offline || cargo build --release
+	# Optional native stt_service (needs portaudio + onnxruntime)
+	if [ -f "CMakeLists.txt" ]; then echo "skip cmake stt_service in deb build (use cargo stt_service)"; fi
+
+override_dh_auto_install:
+	mkdir -p debian/quickstt/usr/bin
+	mkdir -p debian/quickstt/usr/share/applications
+	mkdir -p debian/quickstt/usr/share/pixmaps
+	mkdir -p debian/quickstt/usr/share/icons/hicolor/256x256/apps
+	cp target/release/QuickSTT debian/quickstt/usr/bin/quickstt || cp quickstt-rust/target/release/QuickSTT debian/quickstt/usr/bin/quickstt || true
+	cp quickstt-rust/assets/quickstt.desktop debian/quickstt/usr/share/applications/quickstt.desktop || cp assets/quickstt.desktop debian/quickstt/usr/share/applications/quickstt.desktop || true
+	cp quickstt-rust/assets/icon_app.png debian/quickstt/usr/share/pixmaps/quickstt.png || cp assets/icon_app.png debian/quickstt/usr/share/pixmaps/quickstt.png || true
+	cp quickstt-rust/assets/icon_app.png debian/quickstt/usr/share/icons/hicolor/256x256/apps/quickstt.png || true

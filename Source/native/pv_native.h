@@ -1,9 +1,9 @@
-// pv_native.h
+// pv_native.h — Picovoice Porcupine (Windows/Linux)
 #pragma once
 
 #include <string>
 #include <vector>
-#include <windows.h>
+#include "platform.h"
 #include <cstdint>
 
 typedef int32_t pv_status_t;
@@ -38,22 +38,28 @@ public:
 
     bool load_dll(const std::string& dllPath) {
         if (hModule) return true;
-        // Use LoadLibraryExA with LOAD_WITH_ALTERED_SEARCH_PATH to ensure
-        // it resolves dependencies (like pv_ypu_impl_cuda_porcupine.dll) in the same directory.
+#ifdef _WIN32
         hModule = LoadLibraryExA(dllPath.c_str(), NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (!hModule) {
             fprintf(stderr, "[PICOVOICE] Failed to load DLL (%s). Error Code: %d\n", dllPath.c_str(), (int)GetLastError());
             return false;
         }
         fprintf(stderr, "[PICOVOICE] LoadLibraryExA Succeeded.\n");
-
-        pv_init = (pv_porcupine_init_func)GetProcAddress(hModule, "pv_porcupine_init");
-        pv_proc = (pv_porcupine_process_func)GetProcAddress(hModule, "pv_porcupine_process");
-        pv_del  = (pv_porcupine_delete_func)GetProcAddress(hModule, "pv_porcupine_delete");
-        pv_err  = (pv_status_to_string_func)GetProcAddress(hModule, "pv_status_to_string");
-        pv_len  = (pv_porcupine_frame_length_func)GetProcAddress(hModule, "pv_porcupine_frame_length");
-        pv_rate = (pv_sample_rate_func)GetProcAddress(hModule, "pv_sample_rate");
-        pv_sdk  = (pv_set_sdk_func)GetProcAddress(hModule, "pv_set_sdk");
+#else
+        hModule = platform_load(dllPath.c_str());
+        if (!hModule) {
+            fprintf(stderr, "[PICOVOICE] Failed to load %s: %s\n", dllPath.c_str(), dlerror());
+            return false;
+        }
+        fprintf(stderr, "[PICOVOICE] dlopen Succeeded.\n");
+#endif
+        pv_init = (pv_porcupine_init_func)platform_symbol(hModule, "pv_porcupine_init");
+        pv_proc = (pv_porcupine_process_func)platform_symbol(hModule, "pv_porcupine_process");
+        pv_del  = (pv_porcupine_delete_func)platform_symbol(hModule, "pv_porcupine_delete");
+        pv_err  = (pv_status_to_string_func)platform_symbol(hModule, "pv_status_to_string");
+        pv_len  = (pv_porcupine_frame_length_func)platform_symbol(hModule, "pv_porcupine_frame_length");
+        pv_rate = (pv_sample_rate_func)platform_symbol(hModule, "pv_sample_rate");
+        pv_sdk  = (pv_set_sdk_func)platform_symbol(hModule, "pv_set_sdk");
 
         return pv_init && pv_proc && pv_del && pv_err && pv_len;
     }
@@ -116,7 +122,7 @@ public:
     void cleanup() {
         cleanup_porcupine();
         if (hModule) {
-            FreeLibrary(hModule);
+            platform_unload(hModule);
             hModule = nullptr;
         }
     }
@@ -125,7 +131,7 @@ public:
     int32_t frame_length = 512;
 
 private:
-    HMODULE hModule = nullptr;
+    platform_handle_t hModule = nullptr;
     pv_porcupine_t* handle = nullptr;
 
     pv_porcupine_init_func pv_init = nullptr;

@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #SingleInstance Force
 #NoTrayIcon
 
@@ -87,13 +87,13 @@ Loop {
         continue
       }
     }
-    if (norm = "windows" || norm = "win") {
-      if (!IsTextInputFocused()) {
-        Send "{LWin down}{LWin up}"
-        WriteResp(id, "cmd", "Command: Windows")
-        continue
-      }
-    }
+;    if (norm = "windows" || norm = "win") {
+;      if (!IsTextInputFocused()) {
+;        Send "{LWin down}{LWin up}"
+;        WriteResp(id, "cmd", "Command: Windows")
+;        continue
+;      }
+;    }
     if (norm = "tab") {
       if (!IsTextInputFocused()) {
         Send "{Tab}"

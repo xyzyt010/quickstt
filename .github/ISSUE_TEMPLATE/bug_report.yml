@@ -1,40 +1,53 @@
-name: Bug Report
-description: Report a reproducible problem in QuickSTT
-title: "[Bug]: "
-labels:
-  - bug
+name: Bug report
+description: Report a reproducible bug in QuickSTT (Windows or Linux)
+title: "[Bug] "
+labels: ["bug"]
 body:
-  - type: textarea
-    id: summary
-    attributes:
-      label: Summary
-      description: What happened?
-    validations:
-      required: true
-  - type: textarea
-    id: steps
-    attributes:
-      label: Steps to Reproduce
-      description: Provide exact steps.
-    validations:
-      required: true
-  - type: textarea
-    id: expected
-    attributes:
-      label: Expected Behavior
-    validations:
-      required: true
   - type: input
     id: version
     attributes:
-      label: QuickSTT Version
-  - type: input
-    id: platform
+      label: Version
+      description: e.g. v2.0.0-alpha.1, commit hash, or “latest main”
+      placeholder: v2.0.0-alpha.1
+    validations: { required: true }
+  - type: dropdown
+    id: os
     attributes:
-      label: Platform
-      placeholder: Windows 11 / Intel / NVIDIA / etc.
+      label: OS
+      options: [Windows 10/11, "Linux Mint 21/22 (Ubuntu 22.04/24.04)", Ubuntu 22.04, Ubuntu 24.04, Debian 12, Other Linux]
+    validations: { required: true }
+  - type: input
+    id: arch
+    attributes:
+      label: Architecture
+      placeholder: amd64 (x86_64) / aarch64
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend / area
+      options: [Pill/widget, Tray, Hotkeys, TextBoard, Vosk, Parakeet, Nemotron, Wakeword/VAD, Audio, Packaging (.deb/AppImage), Windows C++ (Qt), Other]
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps including model selected
+      placeholder: |
+        1. quickstt &
+        2. Select Model: Vosk small EN
+        3. Press mic / say "hey jarvis"
+        4. See ...
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
   - type: textarea
     id: logs
     attributes:
-      label: Relevant Logs or Screenshots
-
+      label: Logs
+      description: Run with RUST_LOG=info quickstt  or attach QuickSTT logs
+      render: shell
+  - type: textarea
+    id: extra
+    attributes:
+      label: Extra context / screenshots

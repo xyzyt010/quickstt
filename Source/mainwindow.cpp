@@ -1,10 +1,16 @@
+#include "android_tv_manager.h"
+#include "home_assistant_manager.h"
 #include "mainwindow.h"
 #include "cloud_stt_manager.h"
 #include "local_model_manager.h"
 #include "local_model_support.h"
+#include "optional_service_manager.h"
+#include "optional_service_support.h"
 #include "setup_wizard.h"
 #include "smart_life_manager.h"
 #include "windows_secret_store.h"
+#include "QtAwesome.h"
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -15,6 +21,7 @@
 #include <QDir>
 #include <QEvent>
 #include <QFile>
+#include <QFileInfo>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QFrame>
@@ -22,30 +29,46 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QHideEvent>
+#include <QHostAddress>
+#include <QInputDialog>
 #include <QIntValidator>
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QMessageBox>
+#include <QConicalGradient>
 #include <QPainter>
+#include <QPainterPath>
 #include <QParallelAnimationGroup>
+#include <QPointer>
 #include <QPixmap>
 #include <QPropertyAnimation>
 #include <QScrollArea>
+#include <QDoubleSpinBox>
+#include <QSpinBox>
 #include <QSet>
 #include <QSettings>
 #include <QStringListModel>
 #include <QResizeEvent>
+#include <QSplitter>
+#include <QGridLayout>
+#include <QStackedWidget>
 #include <QShowEvent>
 #include <QSignalBlocker>
+#include <QtMath>
 #include <QStandardPaths>
+#include <QStyledItemDelegate>
 #include <QSvgRenderer>
 #include <QTabWidget>
 #include <QToolButton>
+#include <QUuid>
+#include <QVariantAnimation>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QWheelEvent>
 #include <QStyleOptionButton>
+#include <algorithm>
 #include <functional>
+#include <memory>
 
 namespace {
 
@@ -55,6 +78,155 @@ public:
   using QSlider::QSlider;
 protected:
   void wheelEvent(QWheelEvent *e) override { e->ignore(); }
+};
+
+class VolumeControlSlider : public NoScrollSlider {
+public:
+  explicit VolumeControlSlider(Qt::Orientation orientation,
+                               QWidget *parent = nullptr)
+      : NoScrollSlider(orientation, parent) {
+    setMouseTracking(true);
+    setAttribute(Qt::WA_Hover, true);
+    setFocusPolicy(Qt::StrongFocus);
+  }
+protected:
+  QRect grooveRect() const {
+    const int grooveWidth = 16;
+    const int sideInset = qMax(12, (width() - grooveWidth) / 2);
+    return rect().adjusted(sideInset, 12, -sideInset, -12);
+  }
+
+  int handleRadius() const {
+    if (isSliderDown())
+      return 16;
+    if (m_hovered)
+      return 14;
+    return 11;
+  }
+
+  int valueFromPosition(const QPoint &pos) const {
+    const QRect grooveRect = this->grooveRect();
+    const int top = grooveRect.top();
+    const int bottom = grooveRect.bottom();
+    const int y = qBound(top, pos.y(), bottom);
+    const qreal ratio =
+        1.0 - static_cast<qreal>(y - top) / qMax(1, bottom - top);
+    return minimum() + qRound(ratio * (maximum() - minimum()));
+  }
+
+  QPoint handleCenterForValue(int sliderValue) const {
+    const QRect groove = grooveRect();
+    const qreal span = qMax(1, maximum() - minimum());
+    const qreal ratio = static_cast<qreal>(sliderValue - minimum()) / span;
+    const int y = groove.bottom() -
+                  qRound(ratio * qMax(1, groove.height()));
+    return QPoint(rect().center().x(), y);
+  }
+
+  void sliderChange(SliderChange change) override {
+    NoScrollSlider::sliderChange(change);
+    if (change == SliderValueChange || change == SliderRangeChange ||
+        change == SliderStepsChange || change == SliderOrientationChange) {
+      update();
+    }
+  }
+
+  void paintEvent(QPaintEvent *event) override {
+    Q_UNUSED(event);
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    const QRect groove = grooveRect();
+    const int radius = handleRadius();
+    const QPoint handleCenter = handleCenterForValue(value());
+    const int fillTop = qBound(groove.top(), handleCenter.y(), groove.bottom());
+    const QRect fillRect(groove.left(), fillTop, groove.width(),
+                         groove.bottom() - fillTop + 1);
+
+    const QColor grooveBorder(QStringLiteral("#3A404C"));
+    const QColor grooveBackground(QStringLiteral("#151A22"));
+    const QColor fillColor(QStringLiteral("#F7F9FC"));
+    const QColor handleStroke(QStringLiteral("#E6EBF1"));
+    const QColor handleFill(QStringLiteral("#FFFFFF"));
+
+    painter.setPen(QPen(grooveBorder, 1.0));
+    painter.setBrush(grooveBackground);
+    painter.drawRoundedRect(groove, 7, 7);
+
+    if (fillRect.height() > 0) {
+      painter.setPen(Qt::NoPen);
+      painter.setBrush(fillColor);
+      painter.drawRoundedRect(fillRect, 7, 7);
+    }
+
+    painter.setPen(QPen(handleStroke, 1.2));
+    painter.setBrush(handleFill);
+    painter.drawEllipse(handleCenter, radius, radius);
+
+    if (m_hovered || isSliderDown()) {
+      painter.setPen(QPen(QColor(255, 255, 255, isSliderDown() ? 76 : 52), 2.0));
+      painter.setBrush(Qt::NoBrush);
+      painter.drawEllipse(handleCenter, radius + 4, radius + 4);
+    }
+  }
+
+  void mousePressEvent(QMouseEvent *event) override {
+    if (event->button() == Qt::LeftButton) {
+      grabMouse();
+      setSliderDown(true);
+      setValue(valueFromPosition(event->pos()));
+      update();
+      event->accept();
+      return;
+    }
+    NoScrollSlider::mousePressEvent(event);
+  }
+
+  void mouseMoveEvent(QMouseEvent *event) override {
+    if (isSliderDown()) {
+      setValue(valueFromPosition(event->pos()));
+      update();
+      event->accept();
+      return;
+    }
+    NoScrollSlider::mouseMoveEvent(event);
+  }
+
+  void mouseReleaseEvent(QMouseEvent *event) override {
+    if (event->button() == Qt::LeftButton && isSliderDown()) {
+      setValue(valueFromPosition(event->pos()));
+      setSliderDown(false);
+      releaseMouse();
+      update();
+      event->accept();
+      return;
+    }
+    NoScrollSlider::mouseReleaseEvent(event);
+  }
+
+  void enterEvent(QEnterEvent *event) override {
+    m_hovered = true;
+    update();
+    NoScrollSlider::enterEvent(event);
+  }
+
+  void leaveEvent(QEvent *event) override {
+    m_hovered = false;
+    update();
+    NoScrollSlider::leaveEvent(event);
+  }
+
+  bool event(QEvent *event) override {
+    if (event->type() == QEvent::NativeGesture ||
+        event->type() == QEvent::Gesture) {
+      event->ignore();
+      return true;
+    }
+    return NoScrollSlider::event(event);
+  }
+
+private:
+  bool m_hovered = false;
 };
 
 class SelectableTextLabel : public QLabel {
@@ -106,10 +278,803 @@ SelectableTextLabel *makeSelectableCaption(const QString &text,
   return label;
 }
 
+QColor blendColor(const QColor &from, const QColor &to, qreal progress) {
+  const qreal p = qBound(0.0, progress, 1.0);
+  return QColor::fromRgbF(from.redF() + (to.redF() - from.redF()) * p,
+                          from.greenF() + (to.greenF() - from.greenF()) * p,
+                          from.blueF() + (to.blueF() - from.blueF()) * p,
+                          from.alphaF() + (to.alphaF() - from.alphaF()) * p);
+}
+
+class AnimatedLightToggleButton : public QToolButton {
+public:
+  explicit AnimatedLightToggleButton(fa::QtAwesome *qtAwesome,
+                                     QWidget *parent = nullptr)
+      : QToolButton(parent), m_qtAwesome(qtAwesome) {
+    setCheckable(true);
+    setCursor(Qt::PointingHandCursor);
+    setFixedSize(122, 46);
+    setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    setIconSize(QSize(18, 18));
+
+    m_animation = new QVariantAnimation(this);
+    m_animation->setDuration(180);
+    m_animation->setEasingCurve(QEasingCurve::InOutCubic);
+    connect(m_animation, &QVariantAnimation::valueChanged, this,
+            [this](const QVariant &value) {
+              m_progress = value.toReal();
+              updateVisuals();
+            });
+  }
+
+  void setVisualState(bool on, bool online, bool animate) {
+    if (m_animation && m_animation->state() == QAbstractAnimation::Running)
+      m_animation->stop();
+    m_online = online;
+    setEnabled(online);
+    const qreal target = on ? 1.0 : 0.0;
+    {
+      QSignalBlocker blocker(this);
+      setChecked(on);
+    }
+    if (!online) {
+      m_animation->stop();
+      m_progress = 0.0;
+      updateVisuals();
+      return;
+    }
+    if (animate) {
+      m_animation->stop();
+      m_animation->setStartValue(m_progress);
+      m_animation->setEndValue(target);
+      m_animation->start();
+    } else {
+      m_progress = target;
+      updateVisuals();
+    }
+  }
+
+protected:
+  void nextCheckState() override {
+    if (!m_online)
+      return;
+    QToolButton::nextCheckState();
+    const qreal target = isChecked() ? 1.0 : 0.0;
+    m_animation->stop();
+    m_animation->setStartValue(m_progress);
+    m_animation->setEndValue(target);
+    m_animation->start();
+  }
+
+private:
+  void updateVisuals() {
+    const bool on = isChecked();
+    const QString text = !m_online ? QStringLiteral("Offline")
+                                   : (on ? QStringLiteral("On")
+                                         : QStringLiteral("Off"));
+    setText(text);
+
+    const QColor offBg(QStringLiteral("#141414"));
+    const QColor onBg(QStringLiteral("#231B08"));
+    const QColor offBorder(QStringLiteral("#30343A"));
+    const QColor onBorder(QStringLiteral("#E0B04A"));
+    const QColor offText(QStringLiteral("#9AA2AD"));
+    const QColor onText(QStringLiteral("#FFE29A"));
+    const QColor offIcon(QStringLiteral("#68717B"));
+    const QColor onIcon(QStringLiteral("#F4C24E"));
+    const QColor offlineBg(QStringLiteral("#101010"));
+    const QColor offlineBorder(QStringLiteral("#24272B"));
+    const QColor offlineText(QStringLiteral("#6E757E"));
+    const QColor offlineIcon(QStringLiteral("#50575F"));
+
+    const QColor bg = m_online ? blendColor(offBg, onBg, m_progress) : offlineBg;
+    const QColor border =
+        m_online ? blendColor(offBorder, onBorder, m_progress) : offlineBorder;
+    const QColor fg =
+        m_online ? blendColor(offText, onText, m_progress) : offlineText;
+    const QColor iconColor =
+        m_online ? blendColor(offIcon, onIcon, m_progress) : offlineIcon;
+
+    if (m_qtAwesome) {
+      QVariantMap options;
+      options.insert(QStringLiteral("color"), iconColor);
+      options.insert(QStringLiteral("color-disabled"), offlineIcon);
+      options.insert(QStringLiteral("scale-factor"), 0.92);
+      setIcon(m_qtAwesome->icon(QStringLiteral("solid lightbulb"), options));
+    }
+
+    setStyleSheet(
+        QStringLiteral(
+            "QToolButton { background: %1; color: %2; border: 1px solid %3; "
+            "border-radius: 15px; padding: 0 12px; font-size: 12px; font-weight: 700; }"
+            "QToolButton:hover { border-color: %4; }"
+            "QToolButton:pressed { background: %5; }"
+            "QToolButton:disabled { color: %6; border-color: %7; background: %8; }")
+            .arg(bg.name(QColor::HexArgb),
+                 fg.name(QColor::HexArgb),
+                 border.name(QColor::HexArgb),
+                 m_online ? blendColor(border, QColor(QStringLiteral("#FFF0C5")), 0.25)
+                              .name(QColor::HexArgb)
+                          : offlineBorder.name(QColor::HexArgb),
+                 m_online ? blendColor(bg, QColor(QStringLiteral("#0B0B0B")), 0.18)
+                              .name(QColor::HexArgb)
+                          : offlineBg.name(QColor::HexArgb),
+                 offlineText.name(QColor::HexArgb),
+                 offlineBorder.name(QColor::HexArgb),
+                 offlineBg.name(QColor::HexArgb)));
+  }
+
+  fa::QtAwesome *m_qtAwesome = nullptr;
+  QVariantAnimation *m_animation = nullptr;
+  qreal m_progress = 0.0;
+  bool m_online = true;
+};
+
+class SmartLifeDeviceTreeDelegate : public QStyledItemDelegate {
+public:
+  explicit SmartLifeDeviceTreeDelegate(QTreeWidget *tree, QObject *parent = nullptr)
+      : QStyledItemDelegate(parent), m_tree(tree) {}
+
+  QSize sizeHint(const QStyleOptionViewItem &option,
+                 const QModelIndex &index) const override {
+    if (m_tree) {
+      if (QTreeWidgetItem *item = m_tree->itemFromIndex(index)) {
+        if (QWidget *widget = m_tree->itemWidget(item, 0)) {
+          const int widgetHeight = qMax(
+              widget->minimumHeight(),
+              qMax(widget->height(), widget->sizeHint().height()));
+          const int width = option.rect.width() > 0 ? option.rect.width() : 320;
+          return QSize(width, widgetHeight + 10);
+        }
+        const QSize itemHint = item->sizeHint(0);
+        if (itemHint.height() > 1)
+          return itemHint;
+      }
+    }
+    return QStyledItemDelegate::sizeHint(option, index);
+  }
+
+private:
+  QTreeWidget *m_tree = nullptr;
+};
+
+int brightnessPercent(const SmartLifeDeviceInfo &device) {
+  const int span = device.brightnessMax - device.brightnessMin;
+  if (span <= 0)
+    return 100;
+  return qBound(0, qRound((device.brightness - device.brightnessMin) * 100.0 / span),
+               100);
+}
+
+int brightnessFromPercent(const SmartLifeDeviceInfo &device, int percent) {
+  const int span = device.brightnessMax - device.brightnessMin;
+  return device.brightnessMin + qRound(span * qBound(0, percent, 100) / 100.0);
+}
+
+QColor guessPresetColor(const QString &label) {
+  const QString normalized = label.trimmed().toLower();
+  struct NamedColor {
+    const char *name;
+    const char *hex;
+  };
+  static const NamedColor kExactColors[] = {
+      {"warm", "#FFD9A8"},        {"soft white", "#FFF1DC"},
+      {"white", "#FFFFFF"},       {"neutral", "#EDE6D6"},
+      {"cool", "#D6ECFF"},        {"daylight", "#F4F8FF"},
+      {"warm white", "#FFD9A8"},  {"cool white", "#D6ECFF"},
+  };
+  for (const NamedColor &entry : kExactColors) {
+    if (normalized == QLatin1String(entry.name))
+      return QColor(QString::fromLatin1(entry.hex));
+  }
+
+  static const NamedColor kNamedColors[] = {
+      {"warm white", "#FFD9A8"},  {"cool white", "#D6ECFF"},
+      {"soft white", "#FFF1DC"},  {"soft", "#FFF1DC"},
+      {"neutral", "#EDE6D6"},     {"daylight", "#F4F8FF"},
+      {"warm", "#FFD9A8"},        {"cool", "#D6ECFF"},
+      {"white", "#FFFFFF"},       {"red", "#FF3B30"},
+      {"green", "#34C759"},       {"blue", "#007AFF"},
+      {"yellow", "#FFCC00"},      {"cyan", "#32ADE6"},
+      {"magenta", "#FF2D55"},     {"purple", "#AF52DE"},
+      {"orange", "#FF9500"},      {"pink", "#FF6482"},
+      {"night", "#FFB347"},       {"sleep", "#FF8C69"},
+      {"reading", "#FFF1C1"},     {"relax", "#C9B6FF"},
+      {"party", "#FF5AF7"},       {"romantic", "#FF4F81"},
+  };
+  for (const NamedColor &entry : kNamedColors) {
+    if (normalized.contains(QLatin1String(entry.name)))
+      return QColor(QString::fromLatin1(entry.hex));
+  }
+  return QColor(QStringLiteral("#E8E2D8"));
+}
+
+QString formatPresetTileLabel(const QString &label) {
+  QString text = label.trimmed();
+  text.replace(QLatin1Char('_'), QLatin1Char(' '));
+  text = text.simplified();
+  if (text.isEmpty())
+    return QStringLiteral("Color");
+  return text.at(0).toUpper() + text.mid(1);
+}
+
+QString presetTileStyleSheet(const QColor &fillColor, bool checked) {
+  const QColor top = fillColor.lighter(112);
+  const QColor bottom = fillColor.darker(112);
+  return QStringLiteral(
+             "QToolButton#smartHomePresetTile {"
+             "color: #F8FAFC; font-size: 10px; font-weight: 700;"
+             "border-radius: 12px; border: 2px solid %1;"
+             "background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 %2, stop:1 %3);"
+             "padding: 4px 6px 6px 6px;"
+             "}"
+             "QToolButton#smartHomePresetTile:hover { border-color: #8D96A3; }"
+             "QToolButton#smartHomePresetTile:checked { border: 2px solid #E0B04A; }")
+      .arg(checked ? QStringLiteral("#E0B04A") : QStringLiteral("#3A3A3A"),
+           top.name(), bottom.name());
+}
+
+class SmartHomeRgbDial : public QWidget {
+public:
+  explicit SmartHomeRgbDial(QWidget *parent = nullptr) : QWidget(parent) {
+    setMinimumSize(184, 184);
+    setMaximumSize(184, 184);
+    setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    setCursor(Qt::PointingHandCursor);
+    setMouseTracking(true);
+  }
+
+  void setColor(const QColor &color) {
+    if (color.isValid())
+      m_color = color;
+    update();
+  }
+
+  QColor color() const { return m_color; }
+
+  std::function<void(const QColor &)> colorCommitted;
+
+protected:
+  void paintEvent(QPaintEvent *) override {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF bounds = rect().adjusted(8, 8, -8, -8);
+    const QPointF center = bounds.center();
+    const qreal radius = qMin(bounds.width(), bounds.height()) / 2.0;
+    const qreal ringWidth = 22.0;
+    const qreal innerRadius = radius - ringWidth;
+
+    QConicalGradient wheel(center, 90);
+    for (int hue = 0; hue <= 360; hue += 15) {
+      QColor ringColor;
+      ringColor.setHsv(hue % 360, 255, 255);
+      wheel.setColorAt(hue / 360.0, ringColor);
+    }
+    QPainterPath ringPath;
+    ringPath.addEllipse(center, radius, radius);
+    QPainterPath innerCut;
+    innerCut.addEllipse(center, innerRadius, innerRadius);
+    ringPath = ringPath.subtracted(innerCut);
+    painter.fillPath(ringPath, wheel);
+
+    painter.setBrush(m_color.isValid() ? m_color : QColor(QStringLiteral("#FFFFFF")));
+    painter.setPen(QPen(QColor(QStringLiteral("#666A73")), 2));
+    painter.drawEllipse(center, innerRadius - 4, innerRadius - 4);
+
+    int hue = 0;
+    int saturation = 0;
+    m_color.getHsv(&hue, &saturation, nullptr);
+    if (hue < 0)
+      hue = 0;
+    const qreal angle = qDegreesToRadians(static_cast<qreal>(hue - 90));
+    const qreal satRadius =
+        (innerRadius + radius) * 0.5 * qBound(0.12, saturation / 255.0, 1.0);
+    const QPointF handle(center.x() + std::cos(angle) * satRadius,
+                         center.y() + std::sin(angle) * satRadius);
+    painter.setBrush(Qt::white);
+    painter.setPen(QPen(Qt::black, 1));
+    painter.drawEllipse(handle, 9, 9);
+    painter.setBrush(m_color);
+    painter.setPen(Qt::NoPen);
+    painter.drawEllipse(handle, 6, 6);
+  }
+
+  void mousePressEvent(QMouseEvent *event) override {
+    updateColorFromPoint(event->pos(), false);
+  }
+
+  void mouseMoveEvent(QMouseEvent *event) override {
+    if (event->buttons().testFlag(Qt::LeftButton))
+      updateColorFromPoint(event->pos(), false);
+  }
+
+  void mouseReleaseEvent(QMouseEvent *event) override {
+    updateColorFromPoint(event->pos(), true);
+  }
+
+private:
+  void updateColorFromPoint(const QPoint &point, bool commit) {
+    const QRectF bounds = rect().adjusted(8, 8, -8, -8);
+    const QPointF center = bounds.center();
+    const qreal radius = qMin(bounds.width(), bounds.height()) / 2.0;
+    const qreal innerRadius = radius - 22.0;
+    const QPointF delta = point - center;
+    const qreal distance = std::sqrt(delta.x() * delta.x() + delta.y() * delta.y());
+    if (distance < innerRadius - 6.0)
+      return;
+
+    int hue = qRound((qRadiansToDegrees(std::atan2(delta.y(), delta.x())) + 450.0)) % 360;
+    const qreal ringSpan = qMax<qreal>(1.0, radius - innerRadius);
+    const qreal distanceInRing = distance - innerRadius;
+    const int saturation = qBound(
+        35, qRound(distanceInRing / ringSpan * 255.0), 255);
+    int value = 0;
+    m_color.getHsv(nullptr, nullptr, &value);
+    if (value < 120)
+      value = 230;
+    m_color.setHsv(hue, saturation, value);
+    update();
+    if (commit && colorCommitted)
+      colorCommitted(m_color);
+  }
+
+  QColor m_color = QColor(QStringLiteral("#FFE29A"));
+};
+
+class SmartHomeTreeDeviceRow : public QFrame {
+public:
+  explicit SmartHomeTreeDeviceRow(QWidget *parent = nullptr) : QFrame(parent) {
+    setObjectName(QStringLiteral("smartHomeTreeDeviceRow"));
+    setAttribute(Qt::WA_Hover, true);
+    setStyleSheet(
+        QStringLiteral(
+            "QFrame#smartHomeTreeDeviceRow { background: #1E1E1E; border: 1px solid #333; "
+            "border-radius: 14px; }"
+            "QFrame#smartHomeTreeDeviceRow:hover { background: #252525; border-color: #444; }"));
+
+    auto *outer = new QHBoxLayout(this);
+    outer->setContentsMargins(12, 6, 12, 6);
+    outer->setSpacing(10);
+
+    m_iconLabel = new QLabel(this);
+    m_iconLabel->setFixedSize(22, 22);
+    m_iconLabel->setAlignment(Qt::AlignCenter);
+    outer->addWidget(m_iconLabel, 0, Qt::AlignVCenter);
+
+    auto *textColumn = new QVBoxLayout();
+    textColumn->setContentsMargins(0, 0, 0, 0);
+    textColumn->setSpacing(1);
+
+    m_nameLabel = new SelectableTextLabel(QString(), this);
+    m_nameLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    m_nameLabel->setStyleSheet(
+        QStringLiteral("color: #F5F8FC; font-weight: 600; font-size: 12px;"));
+    textColumn->addWidget(m_nameLabel);
+
+    m_metaLabel = new SelectableTextLabel(QString(), this);
+    m_metaLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    m_metaLabel->setStyleSheet(
+        QStringLiteral("color: #8F98A3; font-size: 10px;"));
+    textColumn->addWidget(m_metaLabel);
+    outer->addLayout(textColumn, 1);
+
+    m_renameButton = new QToolButton(this);
+    m_renameButton->setCursor(Qt::PointingHandCursor);
+    m_renameButton->setAutoRaise(true);
+    m_renameButton->setToolTip(QStringLiteral("Rename for QuickSTT and voice control"));
+    outer->addWidget(m_renameButton, 0, Qt::AlignVCenter);
+
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    setMinimumHeight(58);
+    setMaximumHeight(58);
+  }
+
+  void refreshRowGeometry() {
+    setMinimumHeight(58);
+    setMaximumHeight(58);
+  }
+
+  void updateDevicePresentation(const SmartLifeDeviceInfo &device,
+                                const QString &displayName, const QString &metaText,
+                                bool hasLightingControls) {
+    m_nameLabel->setText(displayName);
+    QString meta = metaText;
+    if (hasLightingControls && device.controllable && device.online)
+      meta += QStringLiteral(" · Select for brightness & colour");
+    m_metaLabel->setText(meta);
+    if (m_toggleButton)
+      m_toggleButton->setVisualState(device.powerOn, device.online && device.controllable,
+                                     false);
+    refreshRowGeometry();
+  }
+
+  QLabel *iconLabel() const { return m_iconLabel; }
+  SelectableTextLabel *nameLabel() const { return m_nameLabel; }
+  SelectableTextLabel *metaLabel() const { return m_metaLabel; }
+  QToolButton *renameButton() const { return m_renameButton; }
+  AnimatedLightToggleButton *toggleButton() const { return m_toggleButton; }
+
+  void attachToggle(AnimatedLightToggleButton *toggle) {
+    if (!toggle || m_toggleButton == toggle)
+      return;
+    m_toggleButton = toggle;
+    if (auto *outer = qobject_cast<QHBoxLayout *>(layout()))
+      outer->addWidget(toggle, 0, Qt::AlignVCenter);
+    refreshRowGeometry();
+  }
+
+private:
+  QLabel *m_iconLabel = nullptr;
+  SelectableTextLabel *m_nameLabel = nullptr;
+  SelectableTextLabel *m_metaLabel = nullptr;
+  QToolButton *m_renameButton = nullptr;
+  AnimatedLightToggleButton *m_toggleButton = nullptr;
+};
+
+class SmartHomeDeviceInspector : public QWidget {
+public:
+  explicit SmartHomeDeviceInspector(QWidget *parent = nullptr) : QWidget(parent) {
+    setObjectName(QStringLiteral("smartHomeDeviceInspector"));
+    setStyleSheet(
+        QStringLiteral(
+            "QWidget#smartHomeDeviceInspector { background: #1A1A1A; }"
+            "QLabel#smartHomeInspectorTitle { color: #F5F8FC; font-size: 15px; font-weight: 700; }"
+            "QLabel#smartHomeInspectorMeta { color: #8F98A3; font-size: 11px; }"
+            "QLabel#smartHomeControlCaption { color: #AAB2BD; font-size: 11px; font-weight: 600; }"
+            "QSlider::groove:horizontal { height: 8px; background: #2A2A2A; border-radius: 4px; }"
+            "QSlider::sub-page:horizontal { background: #E0B04A; border-radius: 4px; }"
+            "QSlider::add-page:horizontal { background: #2A2A2A; border-radius: 4px; }"
+            "QSlider::handle:horizontal { width: 16px; margin: -5px 0; background: #F4F6FA; "
+            "border: 1px solid #C9D0DA; border-radius: 8px; }"));
+
+    auto *outer = new QVBoxLayout(this);
+    outer->setContentsMargins(14, 14, 14, 14);
+    outer->setSpacing(12);
+
+    m_titleLabel = new QLabel(QStringLiteral("Light controls"), this);
+    m_titleLabel->setObjectName(QStringLiteral("smartHomeInspectorTitle"));
+    m_titleLabel->setWordWrap(true);
+    outer->addWidget(m_titleLabel);
+
+    m_metaLabel = new QLabel(this);
+    m_metaLabel->setObjectName(QStringLiteral("smartHomeInspectorMeta"));
+    m_metaLabel->setWordWrap(true);
+    outer->addWidget(m_metaLabel);
+
+    m_powerRow = new QHBoxLayout();
+    m_powerRow->setSpacing(10);
+    auto *powerCaption = new QLabel(QStringLiteral("Power"), this);
+    powerCaption->setObjectName(QStringLiteral("smartHomeControlCaption"));
+    m_powerRow->addWidget(powerCaption);
+    m_powerRow->addStretch();
+    outer->addLayout(m_powerRow);
+
+    m_hintLabel = new QLabel(
+        QStringLiteral("Select a light in the list to adjust brightness and colour here."),
+        this);
+    m_hintLabel->setWordWrap(true);
+    m_hintLabel->setStyleSheet(QStringLiteral("color: #AAB2BD; font-size: 11px;"));
+    outer->addWidget(m_hintLabel);
+
+    m_controlsHost = new QWidget(this);
+    auto *controlsLayout = new QVBoxLayout(m_controlsHost);
+    controlsLayout->setContentsMargins(0, 0, 0, 0);
+    controlsLayout->setSpacing(12);
+
+    auto *brightnessRow = new QHBoxLayout();
+    brightnessRow->setSpacing(8);
+    auto *brightnessCaption = new QLabel(QStringLiteral("Brightness"), m_controlsHost);
+    brightnessCaption->setObjectName(QStringLiteral("smartHomeControlCaption"));
+    brightnessCaption->setFixedWidth(72);
+    m_brightnessSlider = new QSlider(Qt::Horizontal, m_controlsHost);
+    m_brightnessSlider->setRange(0, 100);
+    m_brightnessSlider->setCursor(Qt::PointingHandCursor);
+    m_brightnessValueLabel = new QLabel(m_controlsHost);
+    m_brightnessValueLabel->setFixedWidth(42);
+    m_brightnessValueLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_brightnessValueLabel->setStyleSheet(
+        QStringLiteral("color: #E0E0E0; font-size: 11px; font-weight: 700;"));
+    brightnessRow->addWidget(brightnessCaption);
+    brightnessRow->addWidget(m_brightnessSlider, 1);
+    brightnessRow->addWidget(m_brightnessValueLabel);
+    controlsLayout->addLayout(brightnessRow);
+
+    m_colorCaption = new QLabel(QStringLiteral("Colour"), m_controlsHost);
+    m_colorCaption->setObjectName(QStringLiteral("smartHomeControlCaption"));
+    controlsLayout->addWidget(m_colorCaption);
+
+    m_colorStack = new QStackedWidget(m_controlsHost);
+    m_presetPanel = new QWidget(m_colorStack);
+    auto *presetOuter = new QVBoxLayout(m_presetPanel);
+    presetOuter->setContentsMargins(0, 0, 0, 0);
+    presetOuter->setSpacing(6);
+    auto *presetHint = new QLabel(QStringLiteral("Tap a scene tile"), m_presetPanel);
+    presetHint->setObjectName(QStringLiteral("smartHomeControlCaption"));
+    presetOuter->addWidget(presetHint);
+    auto *presetGridHost = new QWidget(m_presetPanel);
+    m_presetGrid = new QGridLayout(presetGridHost);
+    m_presetGrid->setContentsMargins(0, 0, 0, 0);
+    m_presetGrid->setHorizontalSpacing(8);
+    m_presetGrid->setVerticalSpacing(8);
+    presetOuter->addWidget(presetGridHost);
+    m_rgbPanel = new QWidget(m_colorStack);
+    auto *rgbOuter = new QVBoxLayout(m_rgbPanel);
+    rgbOuter->setContentsMargins(0, 0, 0, 0);
+    rgbOuter->setSpacing(6);
+    auto *rgbHint = new QLabel(QStringLiteral("Drag around the colour ring"), m_rgbPanel);
+    rgbHint->setObjectName(QStringLiteral("smartHomeControlCaption"));
+    rgbHint->setAlignment(Qt::AlignHCenter);
+    rgbOuter->addWidget(rgbHint);
+    m_rgbDial = new SmartHomeRgbDial(m_rgbPanel);
+    auto *rgbDialWrap = new QHBoxLayout();
+    rgbDialWrap->addStretch();
+    rgbDialWrap->addWidget(m_rgbDial, 0, Qt::AlignHCenter);
+    rgbDialWrap->addStretch();
+    rgbOuter->addLayout(rgbDialWrap);
+    m_colorStack->addWidget(m_presetPanel);
+    m_colorStack->addWidget(m_rgbPanel);
+    controlsLayout->addWidget(m_colorStack);
+
+    m_controlsHost->setVisible(false);
+    outer->addWidget(m_controlsHost);
+    outer->addStretch();
+
+    m_brightnessCommitTimer = new QTimer(this);
+    m_brightnessCommitTimer->setSingleShot(true);
+    m_brightnessCommitTimer->setInterval(260);
+  }
+
+  void setContext(SmartLifeManager *manager, fa::QtAwesome *awesome, QObject *controlHost) {
+    m_manager = manager;
+    m_qtAwesome = awesome;
+    m_controlHost = controlHost;
+  }
+
+  void showDevice(const QString &deviceId) {
+    m_deviceId = deviceId.trimmed();
+    refresh();
+  }
+
+  void clearSelection() {
+    m_deviceId.clear();
+    if (m_toggleButton) {
+      m_toggleButton->deleteLater();
+      m_toggleButton = nullptr;
+    }
+    m_controlsHost->setVisible(false);
+    m_hintLabel->setVisible(true);
+    m_titleLabel->setText(QStringLiteral("Light controls"));
+    m_metaLabel->clear();
+  }
+
+  void refreshIfShowing(const QString &deviceId) {
+    if (!deviceId.isEmpty() && deviceId == m_deviceId)
+      refresh();
+  }
+
+  void showControlError(const QString &message) {
+    if (!m_metaLabel || message.trimmed().isEmpty())
+      return;
+    m_metaLabel->setStyleSheet(QStringLiteral("color: #FF8A80; font-size: 11px;"));
+    m_metaLabel->setText(message.trimmed());
+  }
+
+  void refresh() {
+    if (!m_manager || m_deviceId.isEmpty()) {
+      clearSelection();
+      return;
+    }
+
+    const SmartLifeDeviceInfo device = m_manager->deviceById(m_deviceId);
+    if (device.id.isEmpty()) {
+      clearSelection();
+      return;
+    }
+
+    const QString displayName = m_manager->deviceDisplayName(device.id);
+    m_titleLabel->setText(displayName);
+    m_metaLabel->setStyleSheet(QStringLiteral("color: #8F98A3; font-size: 11px;"));
+    m_metaLabel->setText(
+        device.online ? (device.powerOn ? QStringLiteral("Currently on")
+                                        : QStringLiteral("Currently off"))
+                      : QStringLiteral("Offline"));
+    m_hintLabel->setVisible(false);
+
+    ensureToggle(device, displayName);
+    applyLightingControls(device);
+  }
+
+private:
+  void ensureToggle(const SmartLifeDeviceInfo &device, const QString &displayName) {
+    if (!device.controllable) {
+      if (m_toggleButton) {
+        m_toggleButton->deleteLater();
+        m_toggleButton = nullptr;
+      }
+      return;
+    }
+
+    if (!m_toggleButton) {
+      m_toggleButton = new AnimatedLightToggleButton(m_qtAwesome, this);
+      if (m_powerRow)
+        m_powerRow->insertWidget(1, m_toggleButton, 0, Qt::AlignVCenter);
+      QObject::connect(m_toggleButton, &QToolButton::toggled, m_controlHost,
+                       [this](bool checked) {
+                         if (!m_manager || m_deviceId.isEmpty())
+                           return;
+                         m_manager->controlDevices({m_deviceId}, checked);
+                       });
+    }
+
+    m_toggleButton->setToolTip(
+        device.online ? QStringLiteral("Turn %1 %2")
+                            .arg(displayName.isEmpty() ? QStringLiteral("this light")
+                                                       : displayName,
+                                 device.powerOn ? QStringLiteral("off")
+                                                : QStringLiteral("on"))
+                      : QStringLiteral("This light is offline right now."));
+    QSignalBlocker blocker(m_toggleButton);
+    m_toggleButton->setVisualState(device.powerOn, device.online && device.controllable,
+                                   false);
+  }
+
+  void clearColorTiles() {
+    while (QLayoutItem *item = m_presetGrid->takeAt(0)) {
+      if (QWidget *widget = item->widget())
+        widget->deleteLater();
+      delete item;
+    }
+  }
+
+  void applyLightingControls(const SmartLifeDeviceInfo &device) {
+    const bool enabled = device.online && device.controllable;
+    const bool showBrightness =
+        m_manager && m_manager->deviceHasVerifiedBrightnessControl(device);
+    const bool showPreset =
+        m_manager && device.colorCapability == SmartLifeColorCapability::Preset &&
+        m_manager->deviceHasVerifiedColorControl(device);
+    const bool showRgb =
+        m_manager && device.colorCapability == SmartLifeColorCapability::Rgb &&
+        m_manager->deviceHasVerifiedColorControl(device);
+    const bool showLighting = showBrightness || showPreset || showRgb;
+
+    m_controlsHost->setVisible(showLighting);
+    m_controlsHost->setEnabled(enabled);
+    m_brightnessSlider->setVisible(showBrightness);
+    m_brightnessValueLabel->setVisible(showBrightness);
+    m_colorStack->setVisible(showPreset || showRgb);
+    m_colorCaption->setVisible(showPreset || showRgb);
+    if (!showPreset && !showRgb && device.controllable &&
+        device.colorCapability == SmartLifeColorCapability::None) {
+      m_colorCaption->setVisible(true);
+      m_colorCaption->setText(
+          QStringLiteral("No colour data point found yet. Press Sync Devices, then "
+                         "check device details for Colour API and function codes."));
+    } else if (showPreset || showRgb) {
+      m_colorCaption->setText(QStringLiteral("Colour"));
+    }
+
+    QObject::disconnect(m_brightnessCommitTimer, nullptr, this, nullptr);
+    QObject::disconnect(m_brightnessSlider, nullptr, this, nullptr);
+    m_rgbDial->colorCommitted = nullptr;
+
+    if (showBrightness) {
+      const int percent = brightnessPercent(device);
+      QSignalBlocker blocker(m_brightnessSlider);
+      m_brightnessSlider->setEnabled(enabled);
+      m_brightnessSlider->setValue(percent);
+      m_brightnessValueLabel->setText(QStringLiteral("%1%").arg(percent));
+      auto commitBrightness = [this]() {
+        if (!m_manager || m_deviceId.isEmpty())
+          return;
+        const SmartLifeDeviceInfo current = m_manager->deviceById(m_deviceId);
+        if (current.id.isEmpty())
+          return;
+        m_manager->setDeviceBrightness(
+            m_deviceId, brightnessFromPercent(current, m_brightnessSlider->value()));
+      };
+      QObject::connect(m_brightnessSlider, &QSlider::sliderReleased, this,
+                       commitBrightness);
+      QObject::connect(m_brightnessCommitTimer, &QTimer::timeout, this,
+                       commitBrightness);
+      QObject::connect(m_brightnessSlider, &QSlider::valueChanged, this,
+                       [this](int value) {
+                         m_brightnessValueLabel->setText(
+                             QStringLiteral("%1%").arg(value));
+                         m_brightnessCommitTimer->start();
+                       });
+    }
+
+    clearColorTiles();
+    if (showPreset) {
+      m_colorStack->setCurrentWidget(m_presetPanel);
+      auto *presetGroup = new QButtonGroup(m_presetPanel);
+      presetGroup->setExclusive(true);
+      const int tileCount = device.presetColorLabels.size();
+      const int columns = tileCount <= 2 ? tileCount : (tileCount <= 4 ? 2 : 3);
+      for (int index = 0; index < tileCount; ++index) {
+        const QString label = device.presetColorLabels.at(index);
+        const bool checked = index == device.presetColorIndex;
+        auto *tile = new QToolButton(m_presetPanel);
+        tile->setObjectName(QStringLiteral("smartHomePresetTile"));
+        tile->setCheckable(true);
+        tile->setCursor(Qt::PointingHandCursor);
+        tile->setFixedSize(92, 54);
+        tile->setText(formatPresetTileLabel(label));
+        tile->setToolTip(label);
+        tile->setProperty("presetLabel", label);
+        const QColor tileColor = guessPresetColor(label);
+        tile->setStyleSheet(presetTileStyleSheet(tileColor, checked));
+        tile->setChecked(checked);
+        presetGroup->addButton(tile, index);
+        m_presetGrid->addWidget(tile, index / columns, index % columns);
+      }
+
+      auto updatePresetTileStyles = [presetGroup](int selectedIndex) {
+        const QList<QAbstractButton *> buttons = presetGroup->buttons();
+        for (int index = 0; index < buttons.size(); ++index) {
+          auto *tile = qobject_cast<QToolButton *>(buttons.at(index));
+          if (!tile)
+            continue;
+          const QString rawLabel = tile->property("presetLabel").toString();
+          const bool selected = index == selectedIndex;
+          tile->setStyleSheet(
+              presetTileStyleSheet(guessPresetColor(rawLabel), selected));
+          QSignalBlocker blocker(tile);
+          tile->setChecked(selected);
+        }
+      };
+
+      if (device.presetColorIndex >= 0)
+        updatePresetTileStyles(device.presetColorIndex);
+
+      QObject::connect(presetGroup, &QButtonGroup::idClicked, this,
+                       [this, updatePresetTileStyles](int index) {
+                         updatePresetTileStyles(index);
+                         if (m_manager && !m_deviceId.isEmpty())
+                           m_manager->setDevicePresetColor(m_deviceId, index);
+                       });
+    } else if (showRgb) {
+      m_colorStack->setCurrentWidget(m_rgbPanel);
+      m_rgbDial->setEnabled(enabled);
+      if (device.hasRgbColor)
+        m_rgbDial->setColor(device.rgbColor);
+      m_rgbDial->colorCommitted = [this](const QColor &color) {
+        if (m_manager && !m_deviceId.isEmpty())
+          m_manager->setDeviceRgbColor(m_deviceId, color);
+      };
+    }
+  }
+
+  SmartLifeManager *m_manager = nullptr;
+  fa::QtAwesome *m_qtAwesome = nullptr;
+  QObject *m_controlHost = nullptr;
+  QString m_deviceId;
+  QLabel *m_titleLabel = nullptr;
+  QLabel *m_metaLabel = nullptr;
+  QLabel *m_hintLabel = nullptr;
+  QWidget *m_controlsHost = nullptr;
+  QSlider *m_brightnessSlider = nullptr;
+  QLabel *m_brightnessValueLabel = nullptr;
+  QLabel *m_colorCaption = nullptr;
+  QStackedWidget *m_colorStack = nullptr;
+  QWidget *m_presetPanel = nullptr;
+  QGridLayout *m_presetGrid = nullptr;
+  QWidget *m_rgbPanel = nullptr;
+  SmartHomeRgbDial *m_rgbDial = nullptr;
+  QTimer *m_brightnessCommitTimer = nullptr;
+  AnimatedLightToggleButton *m_toggleButton = nullptr;
+  QHBoxLayout *m_powerRow = nullptr;
+};
+
+SmartHomeDeviceInspector *smartHomeInspectorWidget(QWidget *widget) {
+  return static_cast<SmartHomeDeviceInspector *>(widget);
+}
+
 QString normalizedDashboardModelName(const QString &value) {
   const QString trimmed = value.trimmed();
   const QString cloudName = normalizeCloudModelSelection(trimmed);
-  return isCloudModel(cloudName) ? cloudName : trimmed;
+  return isCloudModel(cloudName) ? cloudName : canonicalLocalModelName(trimmed);
 }
 
 QColor dashboardRowFill(bool selected, bool hovered) {
@@ -171,6 +1136,34 @@ const QIcon &downloadActionIcon() {
 const QIcon &trashActionIcon() {
   static const QIcon icon = makeTrashActionIcon(QColor("#C8102E"));
   return icon;
+}
+
+bool isLikelyLanHost(const QString &hostText) {
+  const QString trimmed = hostText.trimmed();
+  if (trimmed.isEmpty())
+    return false;
+
+  QHostAddress addr;
+  if (!addr.setAddress(trimmed))
+    return true;
+
+  if (addr.protocol() == QAbstractSocket::IPv4Protocol) {
+    const quint32 ip = addr.toIPv4Address();
+    if ((ip & 0xFF000000u) == 0x0A000000u)
+      return true;
+    if ((ip & 0xFFF00000u) == 0xAC100000u)
+      return true;
+    if ((ip & 0xFFFF0000u) == 0xC0A80000u)
+      return true;
+    if ((ip & 0xFFFF0000u) == 0xA9FE0000u)
+      return true;
+    return false;
+  }
+
+  const QString lowered = trimmed.toLower();
+  return lowered.startsWith(QStringLiteral("fe80:")) ||
+         lowered.startsWith(QStringLiteral("fc")) ||
+         lowered.startsWith(QStringLiteral("fd"));
 }
 
 class LocalModelRowWidget : public QWidget {
@@ -563,12 +1556,25 @@ QStringList uniqueWakePhrases(const QStringList &values) {
 
 QString supportedAssetDir(const QString &relativePath) {
   const QString appDir = QCoreApplication::applicationDirPath();
-  const QStringList roots = {
+  QStringList roots = {
       appDir,
       QDir(appDir).filePath(".."),
       QDir(appDir).filePath("../QuickSTT_App"),
       QDir(appDir).filePath("../../QuickSTT_App"),
   };
+
+  QString appdata = qgetenv("APPDATA");
+  if (!appdata.isEmpty()) {
+    roots << QDir(appdata).filePath("QuickSTT/models");
+  }
+
+  QString userprofile = qgetenv("USERPROFILE");
+  if (!userprofile.isEmpty()) {
+    roots << QDir(userprofile).filePath("AppData/Local/Programs/Python/Python311/Lib/site-packages");
+    roots << QDir(userprofile).filePath("AppData/Local/Programs/Python/Python312/Lib/site-packages");
+    roots << QDir(userprofile).filePath("AppData/Local/Programs/Python/Python310/Lib/site-packages");
+  }
+
   for (const QString &root : roots) {
     const QString candidate = QDir(root).filePath(relativePath);
     if (QDir(candidate).exists())
@@ -578,25 +1584,35 @@ QString supportedAssetDir(const QString &relativePath) {
 }
 
 QStringList discoverOpenWakeWordChoices() {
-  const QString modelsDir =
-      supportedAssetDir("openwakeword/resources/models");
-  if (modelsDir.isEmpty())
-    return {"hey jarvis", "alexa", "hey glados", "hey mycroft",
-            "hey rhasspy", "timer", "weather"};
-
-  QDir dir(modelsDir);
-  const QFileInfoList files =
-      dir.entryInfoList({"*_v*.tflite"}, QDir::Files, QDir::Name);
   QStringList choices;
-  for (const QFileInfo &file : files) {
-    QString base = file.completeBaseName();
-    const int versionPos = base.lastIndexOf("_v");
-    if (versionPos > 0)
-      base = base.left(versionPos);
-    const QString normalized = normalizeWakePhrase(base);
-    if (!normalized.isEmpty())
-      choices << normalized;
+  QStringList dirsToScan = {
+      supportedAssetDir("openwakeword/resources/models"),
+      supportedAssetDir("oww_models"),
+      supportedAssetDir("data/oww_models"),
+      QCoreApplication::applicationDirPath() + "/data/oww_models"
+  };
+
+  for (const QString &modelsDir : dirsToScan) {
+    if (modelsDir.isEmpty() || !QDir(modelsDir).exists()) continue;
+    QDir dir(modelsDir);
+    const QFileInfoList files =
+        dir.entryInfoList({"*.tflite", "*.onnx"}, QDir::Files, QDir::Name);
+    for (const QFileInfo &file : files) {
+      QString base = file.completeBaseName();
+      if (base.contains("melspectrogram") || base.contains("embedding_model"))
+        continue;
+      const int versionPos = base.lastIndexOf("_v");
+      if (versionPos > 0)
+        base = base.left(versionPos);
+      const QString normalized = normalizeWakePhrase(base);
+      if (!normalized.isEmpty())
+        choices << normalized;
+    }
   }
+
+  if (choices.isEmpty())
+    return {"hey jarvis", "alexa", "agent", "hem", "jarvis", "timer", "weather"};
+
   return uniqueWakePhrases(choices);
 }
 
@@ -819,6 +1835,225 @@ QString findBestModelMatch(const QString &query) {
   return QString();
 }
 
+constexpr int kAndroidTvProfileIdRole = Qt::UserRole + 420;
+constexpr int kAndroidTvListKindRole = Qt::UserRole + 421;
+constexpr int kAndroidTvListProfileIdRole = Qt::UserRole + 422;
+constexpr int kAndroidTvListDeviceJsonRole = Qt::UserRole + 423;
+
+QString cleanAndroidTvStateKey(QString value) {
+  value = value.toLower().trimmed();
+  QString result;
+  result.reserve(value.size());
+  for (const QChar ch : value)
+    result += ch.isLetterOrNumber() ? ch : QChar('_');
+  while (result.contains(QStringLiteral("__")))
+    result.replace(QStringLiteral("__"), QStringLiteral("_"));
+  return result.trimmed();
+}
+
+QString androidTvStateRootPathForUi() {
+  const QString root =
+      QDir(quickSttDataRoot()).filePath(QStringLiteral("android_tv_state"));
+  QDir().mkpath(root);
+  return root;
+}
+
+QStringList androidTvStateKeyCandidates(const QJsonObject &profile) {
+  QStringList candidates;
+  auto appendCandidate = [&candidates](const QString &raw) {
+    const QString cleaned = cleanAndroidTvStateKey(raw);
+    if (!cleaned.isEmpty() &&
+        !candidates.contains(cleaned, Qt::CaseInsensitive)) {
+      candidates << cleaned;
+    }
+  };
+  appendCandidate(profile.value(QStringLiteral("stateKey")).toString().trimmed());
+  appendCandidate(profile.value(QStringLiteral("host")).toString().trimmed());
+  appendCandidate(profile.value(QStringLiteral("pairingHost")).toString().trimmed());
+  return candidates;
+}
+
+bool androidTvCredentialsExist(const QString &stateKey) {
+  const QString cleaned = cleanAndroidTvStateKey(stateKey);
+  if (cleaned.isEmpty())
+    return false;
+  const QStringList candidateRoots = {
+      androidTvStateRootPathForUi(),
+      QDir(optionalServiceInstallPath(QStringLiteral("android_tv_remote")))
+          .filePath(QStringLiteral("state"))};
+  for (const QString &stateRoot : candidateRoots) {
+    const QString certDir = QDir(stateRoot).filePath(cleaned);
+    if (QFileInfo::exists(QDir(certDir).filePath(QStringLiteral("cert.pem"))) &&
+        QFileInfo::exists(QDir(certDir).filePath(QStringLiteral("key.pem")))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool androidTvProfileHasCredentials(const QJsonObject &profile) {
+  for (const QString &candidate : androidTvStateKeyCandidates(profile)) {
+    if (androidTvCredentialsExist(candidate))
+      return true;
+  }
+  return false;
+}
+
+bool androidTvProfileMatchesLanHost(const QJsonObject &profile,
+                                    const QString &host) {
+  const QString normalizedHost = host.trimmed().toLower();
+  if (normalizedHost.isEmpty())
+    return false;
+
+  const QString profileHost =
+      profile.value(QStringLiteral("host")).toString().trimmed().toLower();
+  const QString pairingHost =
+      profile.value(QStringLiteral("pairingHost")).toString().trimmed().toLower();
+  const QString stateKey =
+      cleanAndroidTvStateKey(profile.value(QStringLiteral("stateKey"))
+                                 .toString()
+                                 .trimmed()
+                                 .toLower());
+  const QString cleanedHost = cleanAndroidTvStateKey(normalizedHost);
+
+  return (!profileHost.isEmpty() && profileHost == normalizedHost) ||
+         (!pairingHost.isEmpty() && pairingHost == normalizedHost) ||
+         (!stateKey.isEmpty() && stateKey == cleanedHost);
+}
+
+QString preferredAndroidTvStateKey(const QJsonObject &profile) {
+  const QStringList candidates = androidTvStateKeyCandidates(profile);
+  for (const QString &candidate : candidates) {
+    if (androidTvCredentialsExist(candidate))
+      return candidate;
+  }
+  return candidates.isEmpty() ? QString() : candidates.first();
+}
+
+QString normalizeSmartLifeSchemaKey(QString value) {
+  value = value.trimmed();
+  const QString compact =
+      value.toLower().remove(QChar(' ')).remove(QChar('_')).remove(QChar('-'));
+  if (compact == QStringLiteral("tuyasmart"))
+    return QStringLiteral("tuyaSmart");
+  return QStringLiteral("smartlife");
+}
+
+QString normalizeSmartLifeAccountModeKey(QString value,
+                                         const QString &developerUid,
+                                         const QString &developerHomeIds,
+                                         const QString &username,
+                                         const QString &password) {
+  const QString normalized = value.trimmed().toLower();
+  const bool hasDeveloperConfig =
+      !developerUid.trimmed().isEmpty() || !developerHomeIds.trimmed().isEmpty();
+  const bool hasSmartLifeCredentials =
+      !username.trimmed().isEmpty() || !password.trimmed().isEmpty();
+  if (normalized == QStringLiteral("developer") && hasDeveloperConfig)
+    return QStringLiteral("developer");
+  if (normalized == QStringLiteral("developer") && !hasDeveloperConfig &&
+      hasSmartLifeCredentials) {
+    return QStringLiteral("smartlife");
+  }
+  return QStringLiteral("smartlife");
+}
+
+QString normalizedAndroidTvName(QString value) {
+  value = value.toLower().trimmed();
+  for (QChar &ch : value) {
+    if (!ch.isLetterOrNumber())
+      ch = QLatin1Char(' ');
+  }
+  return value.simplified();
+}
+
+QString androidTvDiscoveryBtAddress(const QJsonObject &device) {
+  const QJsonObject properties =
+      device.value(QStringLiteral("properties")).toObject();
+  return properties.value(QStringLiteral("bt")).toString().trimmed().toLower();
+}
+
+bool androidTvProfileMatchesDiscoveredDevice(const QJsonObject &profile,
+                                             const QJsonObject &device) {
+  const QString host = device.value(QStringLiteral("host")).toString().trimmed();
+  if (!host.isEmpty() && androidTvProfileMatchesLanHost(profile, host))
+    return true;
+
+  const QString profileServiceName =
+      profile.value(QStringLiteral("serviceName")).toString().trimmed().toLower();
+  const QString deviceServiceName =
+      device.value(QStringLiteral("service_name")).toString().trimmed().toLower();
+  if (!profileServiceName.isEmpty() && !deviceServiceName.isEmpty() &&
+      profileServiceName == deviceServiceName) {
+    return true;
+  }
+
+  const QString profileBt =
+      profile.value(QStringLiteral("btAddress")).toString().trimmed().toLower();
+  const QString deviceBt = androidTvDiscoveryBtAddress(device);
+  if (!profileBt.isEmpty() && !deviceBt.isEmpty() && profileBt == deviceBt)
+    return true;
+
+  const QString profileLabel =
+      normalizedAndroidTvName(profile.value(QStringLiteral("label"))
+                                  .toString()
+                                  .trimmed());
+  const QString profileFriendlyName =
+      normalizedAndroidTvName(profile.value(QStringLiteral("friendlyName"))
+                                  .toString()
+                                  .trimmed());
+  const QString deviceName = normalizedAndroidTvName(
+      device.value(QStringLiteral("name")).toString().trimmed());
+  if (!deviceName.isEmpty() &&
+      ((!profileLabel.isEmpty() && profileLabel == deviceName) ||
+       (!profileFriendlyName.isEmpty() && profileFriendlyName == deviceName))) {
+    return true;
+  }
+
+  return false;
+}
+
+QString androidTvProfileDisplayName(const QJsonObject &profile) {
+  const QString label = profile.value(QStringLiteral("label")).toString().trimmed();
+  const QString host = profile.value(QStringLiteral("host")).toString().trimmed();
+  if (!label.isEmpty() && !host.isEmpty())
+    return QStringLiteral("%1  |  %2").arg(label, host);
+  if (!label.isEmpty())
+    return label;
+  if (!host.isEmpty())
+    return host;
+  return QStringLiteral("Unnamed TV");
+}
+
+QString androidTvProfileTooltip(const QJsonObject &profile) {
+  QStringList lines;
+  lines << QStringLiteral("Saved TV: %1")
+               .arg(profile.value(QStringLiteral("label")).toString().trimmed().isEmpty()
+                        ? QStringLiteral("Unnamed TV")
+                        : profile.value(QStringLiteral("label")).toString().trimmed());
+  lines << QStringLiteral("TV Address: %1")
+               .arg(profile.value(QStringLiteral("host")).toString().trimmed().isEmpty()
+                        ? QStringLiteral("Not set")
+                        : profile.value(QStringLiteral("host")).toString().trimmed());
+  lines << QStringLiteral("Remote Port: %1")
+               .arg(profile.value(QStringLiteral("apiPort")).toInt(6466));
+  lines << QStringLiteral("Pair Address: %1")
+               .arg(profile.value(QStringLiteral("pairingHost")).toString().trimmed().isEmpty()
+                        ? QStringLiteral("Uses TV Address")
+                        : profile.value(QStringLiteral("pairingHost")).toString().trimmed());
+  lines << QStringLiteral("Pair Port: %1")
+               .arg(profile.value(QStringLiteral("pairingPort")).toInt(6467));
+  lines << QStringLiteral("Controller Name: %1")
+               .arg(profile.value(QStringLiteral("friendlyName")).toString().trimmed().isEmpty()
+                        ? QStringLiteral("QuickSTT Android TV")
+                        : profile.value(QStringLiteral("friendlyName")).toString().trimmed());
+  lines << QStringLiteral("Voice commands: %1")
+               .arg(profile.value(QStringLiteral("voiceEnabled")).toBool(true)
+                        ? QStringLiteral("Enabled")
+                        : QStringLiteral("Disabled"));
+  return lines.join(QLatin1Char('\n'));
+}
+
 } // namespace
 
 // --- Collapsible Helper Implementation ---
@@ -841,7 +2076,7 @@ CollapsibleSection::CollapsibleSection(const QString &title,
   contentArea = new QScrollArea(this);
   contentArea->setMaximumHeight(0);
   contentArea->setMinimumHeight(0);
-  contentArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  contentArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding);
   contentArea->setFrameShape(QFrame::NoFrame);
 
   toggleAnimation = new QParallelAnimationGroup(this);
@@ -867,21 +2102,86 @@ void CollapsibleSection::setContentLayout(QLayout *layout) {
   top->setLayout(layout);
   contentArea->setWidget(top);
   contentArea->setWidgetResizable(true);
-  // Measure height
-  int h = top->sizeHint().height();
-  if (h < 100)
-    h = 300; // Fallback
-
   QPropertyAnimation *anim =
       static_cast<QPropertyAnimation *>(toggleAnimation->animationAt(0));
-  anim->setEndValue(h + 20); // Add padding
+  anim->setEndValue(expandedContentHeight());
+  // Defer a height refresh to pick up final layout geometry
+  QTimer::singleShot(0, this, &CollapsibleSection::refreshExpandedHeight);
+}
+
+int CollapsibleSection::expandedContentHeight() const {
+  QWidget *top = contentArea ? contentArea->widget() : nullptr;
+  if (!top)
+    return 344;
+
+  if (top->layout())
+    top->layout()->activate();
+  top->adjustSize();
+
+  int h = top->sizeHint().height();
+  h = qMax(h, top->minimumSizeHint().height());
+  h = qMax(h, top->minimumHeight());
+  if (top->layout()) {
+    h = qMax(h, top->layout()->sizeHint().height());
+    h = qMax(h, top->layout()->minimumSize().height());
+  }
+  if (h < 180)
+    h = 320;
+  return h + 24;
+}
+
+void CollapsibleSection::refreshExpandedHeight() {
+  const int h = expandedContentHeight();
+  QPropertyAnimation *anim =
+      static_cast<QPropertyAnimation *>(toggleAnimation->animationAt(0));
+  anim->setEndValue(h);
+  if (toggleButton && toggleButton->isChecked()) {
+    m_animationHeight = h;
+    m_fullyExpanded = true;
+    updateHeight();
+    updateGeometry();
+    if (QWidget *top = contentArea->widget())
+      top->updateGeometry();
+    for (QWidget *w = parentWidget(); w; w = w->parentWidget()) {
+      w->updateGeometry();
+      if (qobject_cast<QScrollArea *>(w))
+        break;
+    }
+  }
+}
+
+void CollapsibleSection::setExpanded(bool expanded) {
+  if (toggleButton->isChecked() == expanded) {
+    if (expanded) {
+      m_fullyExpanded = true;
+      refreshExpandedHeight();
+    }
+    toggle(expanded);
+    return;
+  }
+  toggleButton->setChecked(expanded);
 }
 
 void CollapsibleSection::toggle(bool checked) {
+  m_fullyExpanded = false;
+  if (checked) {
+    QPropertyAnimation *anim =
+        static_cast<QPropertyAnimation *>(toggleAnimation->animationAt(0));
+    anim->setEndValue(expandedContentHeight());
+  }
   toggleButton->setArrowType(checked ? Qt::DownArrow : Qt::RightArrow);
   toggleAnimation->setDirection(checked ? QAbstractAnimation::Forward
                                         : QAbstractAnimation::Backward);
   toggleAnimation->start();
+  if (checked) {
+    connect(toggleAnimation, &QAbstractAnimation::finished, this,
+            [this]() {
+              m_fullyExpanded = true;
+              updateHeight();
+              updateGeometry();
+            },
+            Qt::SingleShotConnection);
+  }
 }
 
 // --- Main Window Implementation ---
@@ -889,6 +2189,17 @@ void CollapsibleSection::toggle(bool checked) {
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   setWindowTitle("QuickSTT Advanced Dashboard");
   resize(700, 650);
+  qtAwesome = new fa::QtAwesome(this);
+  qtAwesome->initFontAwesome();
+  qtAwesome->setDefaultOption(QStringLiteral("color"),
+                              QColor(QStringLiteral("#F4F6FA")));
+  qtAwesome->setDefaultOption(QStringLiteral("color-disabled"),
+                              QColor(QStringLiteral("#6F7784")));
+  qtAwesome->setDefaultOption(QStringLiteral("color-active"),
+                              QColor(QStringLiteral("#FFFFFF")));
+  qtAwesome->setDefaultOption(QStringLiteral("color-selected"),
+                              QColor(QStringLiteral("#FFFFFF")));
+  qtAwesome->setDefaultOption(QStringLiteral("scale-factor"), 0.92);
 
   const QString tickIconPath = QDir::fromNativeSeparators(
       QDir(QCoreApplication::applicationDirPath()).filePath("WhiteTick.svg"));
@@ -1028,6 +2339,26 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                                                             ? selectedModelName(modelList->currentItem())
                                                             : QString()));
   localModelsLayout->addWidget(localModelDetailsLabel);
+
+  auto *localBackendRow = new QHBoxLayout();
+  localBackendRow->setContentsMargins(0, 0, 0, 0);
+  localBackendRow->setSpacing(8);
+  auto *localBackendCaption =
+      makeSelectableCaption(QStringLiteral("Runtime Backend"),
+                            QStringLiteral("color: #D9E2EE; font-weight: 600;"));
+  localModelBackendCombo = new QComboBox();
+  localModelBackendCombo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  localModelBackendCombo->setMinimumWidth(210);
+  localBackendRow->addWidget(localBackendCaption);
+  localBackendRow->addWidget(localModelBackendCombo, 0, Qt::AlignVCenter);
+  localBackendRow->addStretch(1);
+  localModelsLayout->addLayout(localBackendRow);
+
+  localModelBackendStatusLabel = new SelectableTextLabel();
+  localModelBackendStatusLabel->setWordWrap(true);
+  localModelBackendStatusLabel->setStyleSheet(
+      QStringLiteral("color: #A9B3BF; font-size: 11px;"));
+  localModelsLayout->addWidget(localModelBackendStatusLabel);
 
   auto *cloudIntro = new QLabel(
       "Cloud selection is provider-first. Check the providers that should "
@@ -1539,16 +2870,51 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   QWidget *smartLifeTab = new QWidget();
   auto *smartLifeLayout = new QVBoxLayout(smartLifeTab);
   smartLifeLayout->setContentsMargins(12, 12, 12, 12);
-  smartLifeLayout->setSpacing(10);
+  smartLifeLayout->setSpacing(6);
 
   auto *smartLifeIntro = new QLabel(
-      "Connect your Tuya cloud project and then either your Smart Life app "
-      "account or a developer-linked home. After that, sync your lights and "
-      "control them from the dashboard or by voice.");
+      "SmartHome brings your Smart Life / Tuya lights and Android TV controls "
+      "into one dashboard. Connect your Tuya cloud project for lights, and "
+      "optionally install Android TV support when you want LAN TV control.");
   smartLifeIntro->setWordWrap(true);
   smartLifeIntro->setTextInteractionFlags(Qt::TextSelectableByMouse);
   smartLifeIntro->setCursor(Qt::IBeamCursor);
+  smartLifeIntro->setVisible(false);
   smartLifeLayout->addWidget(smartLifeIntro);
+
+  auto addSmartHomeSection = [](QVBoxLayout *parentLayout, QWidget *owner,
+                                const QString &title, QWidget *content,
+                                bool expanded = true) {
+    auto *section = new CollapsibleSection(title, 220, owner);
+    auto *sectionLayout = new QVBoxLayout();
+    sectionLayout->setContentsMargins(0, 0, 0, 0);
+    sectionLayout->setSpacing(0);
+    sectionLayout->addWidget(content);
+    section->setContentLayout(sectionLayout);
+    section->setExpanded(expanded);
+    parentLayout->addWidget(section);
+    return section;
+  };
+
+  auto *smartLifeServiceGroup = new QGroupBox("SmartHome Lights Service");
+  auto *smartLifeServiceLayout = new QVBoxLayout(smartLifeServiceGroup);
+  smartLifeServiceLayout->setContentsMargins(9, 10, 9, 9);
+  smartLifeServiceLayout->setSpacing(6);
+  smartLifeInstallStateLabel = new SelectableTextLabel(
+      "SmartHome lights support is optional. Install it only if you want "
+      "Smart Life / Tuya lighting control in this app.");
+  smartLifeInstallStateLabel->setWordWrap(true);
+  smartLifeServiceLayout->addWidget(smartLifeInstallStateLabel);
+  auto *smartLifeServiceButtonRow = new QHBoxLayout();
+  smartLifeInstallBtn = new QPushButton("Install Lights Support");
+  smartLifeUninstallBtn = new QPushButton("Remove Lights Support");
+  smartLifeServiceButtonRow->addWidget(smartLifeInstallBtn);
+  smartLifeServiceButtonRow->addWidget(smartLifeUninstallBtn);
+  smartLifeServiceButtonRow->addStretch();
+  smartLifeServiceLayout->addLayout(smartLifeServiceButtonRow);
+  addSmartHomeSection(smartLifeLayout, smartLifeTab,
+                      QStringLiteral("Lights Service"),
+                      smartLifeServiceGroup, true);
 
   auto saveSmartLifeSettings = [=]() {
     QSettings settings("QuickSTT", "Config");
@@ -1561,10 +2927,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                         smartLifeEndpointCombo->currentData().toString());
     }
     if (smartLifeAccessIdEdit)
-      settings.setValue("smartLife/accessId", smartLifeAccessIdEdit->text());
+      settings.setValue("smartLife/accessId",
+                        smartLifeAccessIdEdit->text().trimmed());
     if (smartLifeAccessKeyEdit) {
       saveProtectedSetting(settings, QStringLiteral("smartLife/accessKey"),
-                           smartLifeAccessKeyEdit->text());
+                           smartLifeAccessKeyEdit->text().trimmed());
     }
     if (smartLifeDeveloperUidEdit) {
       settings.setValue("smartLife/developerUid",
@@ -1575,28 +2942,33 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                         smartLifeDeveloperHomeIdsEdit->toPlainText());
     }
     if (smartLifeUsernameEdit)
-      settings.setValue("smartLife/username", smartLifeUsernameEdit->text());
+      settings.setValue("smartLife/username",
+                        smartLifeUsernameEdit->text().trimmed());
     if (smartLifePasswordEdit) {
       saveProtectedSetting(settings, QStringLiteral("smartLife/password"),
                            smartLifePasswordEdit->text());
     }
     if (smartLifeCountryCodeEdit) {
-      settings.setValue("smartLife/countryCode", smartLifeCountryCodeEdit->text());
+      settings.setValue("smartLife/countryCode",
+                        smartLifeCountryCodeEdit->text().trimmed());
     }
     if (smartLifeSchemaCombo) {
       settings.setValue("smartLife/appSchema",
-                        smartLifeSchemaCombo->currentData().toString());
+                        normalizeSmartLifeSchemaKey(
+                            smartLifeSchemaCombo->currentData().toString()));
     }
     if (smartLifePasswordMd5Check) {
       settings.setValue("smartLife/passwordAlreadyMd5",
                         smartLifePasswordMd5Check->isChecked());
     }
+    settings.sync();
   };
 
-  auto *smartLifeConnectionGroup = new QGroupBox("1. Login Setup");
-  auto *smartLifeConnectionLayout = new QVBoxLayout(smartLifeConnectionGroup);
-  smartLifeConnectionLayout->setContentsMargins(10, 12, 10, 10);
-  smartLifeConnectionLayout->setSpacing(8);
+  smartLifeConnectionGroupBox = new QGroupBox("Tuya / Smart Life Login");
+  auto *smartLifeConnectionLayout =
+      new QVBoxLayout(smartLifeConnectionGroupBox);
+  smartLifeConnectionLayout->setContentsMargins(9, 10, 9, 9);
+  smartLifeConnectionLayout->setSpacing(6);
 
   auto *smartLifeTopForm = new QFormLayout();
   smartLifeTopForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
@@ -1607,8 +2979,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   smartLifeAccountModeCombo = new QComboBox();
   smartLifeAccountModeCombo->addItem("Smart Life Account", "smartlife");
   smartLifeAccountModeCombo->addItem("Tuya Developer Project", "developer");
-  const QString savedSmartMode =
-      s.value("smartLife/accountMode", "smartlife").toString().trimmed().toLower();
+  const QString savedSmartMode = normalizeSmartLifeAccountModeKey(
+      s.value("smartLife/accountMode", "smartlife").toString(),
+      s.value("smartLife/developerUid").toString(),
+      s.value("smartLife/developerHomeIds").toString(),
+      s.value("smartLife/username").toString(),
+      loadProtectedSetting(s, QStringLiteral("smartLife/password")));
+  s.setValue(QStringLiteral("smartLife/accountMode"), savedSmartMode);
+  s.sync();
   smartLifeAccountModeCombo->setCurrentIndex(savedSmartMode == "developer" ? 1 : 0);
   smartLifeAccountModeCombo->setToolTip(
       "Smart Life Account is the normal end-user path. Tuya Developer Project "
@@ -1632,13 +3010,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   smartLifeTopForm->addRow(makeSelectableCaption("Cloud Region"),
                            smartLifeEndpointCombo);
 
-  smartLifeAccessIdEdit = new QLineEdit(s.value("smartLife/accessId").toString());
+  smartLifeAccessIdEdit =
+      new QLineEdit(s.value("smartLife/accessId").toString().trimmed());
   smartLifeAccessIdEdit->setPlaceholderText("Tuya Cloud project Access ID");
   smartLifeTopForm->addRow(makeSelectableCaption("Project Access ID"),
                            smartLifeAccessIdEdit);
 
   smartLifeAccessKeyEdit = new QLineEdit(
-      loadProtectedSetting(s, QStringLiteral("smartLife/accessKey")));
+      loadProtectedSetting(s, QStringLiteral("smartLife/accessKey")).trimmed());
   smartLifeAccessKeyEdit->setPlaceholderText("Tuya Cloud project Access Key");
   smartLifeAccessKeyEdit->setEchoMode(QLineEdit::Password);
   smartLifeTopForm->addRow(makeSelectableCaption("Project Access Key"),
@@ -1706,8 +3085,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     smartForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
     smartForm->setHorizontalSpacing(12);
     smartForm->setVerticalSpacing(8);
-    smartLifeUsernameEdit =
-        new QLineEdit(s.value("smartLife/username").toString());
+  smartLifeUsernameEdit =
+      new QLineEdit(s.value("smartLife/username").toString().trimmed());
     smartLifeUsernameEdit->setPlaceholderText("Smart Life email or phone number");
     smartForm->addRow(makeSelectableCaption("Smart Life Account"),
                       smartLifeUsernameEdit);
@@ -1717,8 +3096,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     smartLifePasswordEdit->setEchoMode(QLineEdit::Password);
     smartForm->addRow(makeSelectableCaption("Account Password"),
                       smartLifePasswordEdit);
-    smartLifeCountryCodeEdit =
-        new QLineEdit(s.value("smartLife/countryCode", "1").toString());
+  smartLifeCountryCodeEdit =
+      new QLineEdit(s.value("smartLife/countryCode", "1").toString().trimmed());
     smartLifeCountryCodeEdit->setPlaceholderText(
         "Phone country code, for example 1 or 91");
     smartForm->addRow(makeSelectableCaption("Country Code"),
@@ -1727,8 +3106,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     smartLifeSchemaCombo->addItem("Smart Life", "smartlife");
     smartLifeSchemaCombo->addItem("Tuya Smart", "tuyaSmart");
     {
-      const QString savedSchema =
-          s.value("smartLife/appSchema", "smartlife").toString();
+      const QString savedSchema = normalizeSmartLifeSchemaKey(
+          s.value("smartLife/appSchema", "smartlife").toString());
       const int schemaIndex = smartLifeSchemaCombo->findData(savedSchema);
       smartLifeSchemaCombo->setCurrentIndex(schemaIndex >= 0 ? schemaIndex : 0);
     }
@@ -1766,18 +3145,20 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   smartLifeStatusLabel->setStyleSheet("color: #E0E0E0;");
   smartLifeConnectionLayout->addWidget(smartLifeStatusLabel);
 
-  smartLifeLayout->addWidget(smartLifeConnectionGroup);
+  addSmartHomeSection(smartLifeLayout, smartLifeTab,
+                      QStringLiteral("Lights Connection"),
+                      smartLifeConnectionGroupBox, true);
 
-  auto *smartLifeInfoGroup = new QGroupBox("2. Status And Guidance");
-  auto *smartLifeInfoLayout = new QVBoxLayout(smartLifeInfoGroup);
+  smartLifeInfoGroupBox = new QGroupBox("Lights Status And Guidance", smartLifeTab);
+  auto *smartLifeInfoLayout = new QVBoxLayout(smartLifeInfoGroupBox);
   smartLifeInfoLayout->setContentsMargins(10, 12, 10, 10);
   smartLifeInfoLayout->setSpacing(8);
   smartLifeConnectionPanel = new SelectableTextPanel();
-  smartLifeConnectionPanel->setMinimumHeight(110);
-  smartLifeConnectionPanel->setMaximumHeight(180);
+  smartLifeConnectionPanel->setMinimumHeight(130);
+  smartLifeConnectionPanel->setMaximumHeight(320);
   smartLifeHelpPanel = new SelectableTextPanel();
-  smartLifeHelpPanel->setMinimumHeight(120);
-  smartLifeHelpPanel->setMaximumHeight(210);
+  smartLifeHelpPanel->setMinimumHeight(140);
+  smartLifeHelpPanel->setMaximumHeight(360);
   smartLifeHelpPanel->setPlainText(
       "Smart Life mode needs both your Smart Life app credentials and a linked "
       "Tuya cloud project Access ID / Access Key.\n\nIf login fails, the usual "
@@ -1787,43 +3168,113 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   smartLifeInfoLayout->addWidget(smartLifeConnectionPanel);
   smartLifeInfoLayout->addWidget(makeSelectableCaption("Voice And Setup Help"));
   smartLifeInfoLayout->addWidget(smartLifeHelpPanel);
-  smartLifeLayout->addWidget(smartLifeInfoGroup);
+  smartLifeInfoGroupBox->setVisible(false);
 
-  auto *smartLifeDevicesGroup = new QGroupBox("3. Homes And Lights");
-  auto *smartLifeDevicesLayout = new QVBoxLayout(smartLifeDevicesGroup);
-  smartLifeDevicesLayout->setContentsMargins(10, 12, 10, 10);
+  smartLifeDevicesGroupBox = new QGroupBox("Lights And Smart Devices", smartLifeTab);
+  auto *smartLifeDevicesLayout = new QVBoxLayout(smartLifeDevicesGroupBox);
+  smartLifeDevicesLayout->setContentsMargins(10, 10, 10, 10);
   smartLifeDevicesLayout->setSpacing(8);
+  smartLifeDevicesGroupBox->setMinimumHeight(860);
+  smartLifeDevicesGroupBox->setSizePolicy(QSizePolicy::Expanding,
+                                          QSizePolicy::MinimumExpanding);
+  smartLifeDevicesGroupBox->setStyleSheet(
+      QStringLiteral(
+          "QGroupBox { border: 1px solid #333; border-radius: 18px; margin-top: 10px; "
+          "background: #121212; color: #E0E0E0; font-weight: 700; }"
+          "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }"));
 
   smartLifeSearchEdit = new QLineEdit();
   smartLifeSearchEdit->setPlaceholderText(
-      "Search synced homes, rooms, or lights...");
+      "Search synced homes, rooms, lights, or other smart devices...");
+  smartLifeSearchEdit->setClearButtonEnabled(true);
+  smartLifeSearchEdit->setFixedHeight(38);
+  smartLifeSearchEdit->setStyleSheet(
+      QStringLiteral(
+          "QLineEdit { background: #1A1A1A; color: #E0E0E0; border: 1px solid #333; "
+          "border-radius: 12px; padding: 0 12px; font-size: 12px; }"
+          "QLineEdit:focus { border-color: #00AAFF; background: #1E1E1E; }"));
   smartLifeDevicesLayout->addWidget(smartLifeSearchEdit);
 
+  smartLifeDeviceSummaryLabel =
+      new SelectableTextLabel(QStringLiteral("No SmartHome devices are synced yet."));
+  smartLifeDeviceSummaryLabel->setWordWrap(true);
+  smartLifeDeviceSummaryLabel->setStyleSheet(
+      QStringLiteral("color: #AAB2BD; padding: 0 2px 4px 2px; font-size: 11px;"));
+  smartLifeDevicesLayout->addWidget(smartLifeDeviceSummaryLabel);
+
   smartLifeDeviceTree = new QTreeWidget();
+  smartLifeDeviceTree->setItemDelegate(
+      new SmartLifeDeviceTreeDelegate(smartLifeDeviceTree, smartLifeDeviceTree));
   smartLifeDeviceTree->setHeaderHidden(true);
   smartLifeDeviceTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
+  smartLifeDeviceTree->setEditTriggers(QAbstractItemView::SelectedClicked |
+                                       QAbstractItemView::EditKeyPressed);
   smartLifeDeviceTree->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
   smartLifeDeviceTree->setAlternatingRowColors(true);
-  smartLifeDeviceTree->setMinimumHeight(240);
+  smartLifeDeviceTree->setMouseTracking(true);
+  // Per-row heights must differ: home/room rows are short text, device rows host
+  // a ~46px tall On/Off control. Uniform heights would match the first short row
+  // and clip every device row (Qt uses the first row's height when uniform).
+  smartLifeDeviceTree->setUniformRowHeights(false);
+  smartLifeDeviceTree->setIndentation(14);
+  smartLifeDeviceTree->setMinimumHeight(700);
+  smartLifeDeviceTree->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  smartLifeDeviceTree->setAnimated(true);
+  smartLifeDeviceTree->setRootIsDecorated(true);
+  smartLifeDeviceTree->setItemsExpandable(true);
+  smartLifeDeviceTree->setExpandsOnDoubleClick(false);
   smartLifeDeviceTree->header()->setStretchLastSection(true);
-  smartLifeDevicesLayout->addWidget(smartLifeDeviceTree);
+  smartLifeDeviceTree->setStyleSheet(
+      QStringLiteral(
+          "QTreeWidget { background: #1A1A1A; border: 1px solid #333; border-radius: 16px; "
+          "padding: 6px; outline: none; color: #E0E0E0; }"
+          "QTreeWidget::item { padding: 4px 2px; }"
+          "QTreeWidget::branch { background: transparent; }"
+          "QTreeWidget::item:selected { background: #333; border-radius: 8px; }"));
 
-  auto *smartLifeActionRow = new QHBoxLayout();
-  auto *smartLifeOnBtn = new QPushButton("Turn Selected On");
-  auto *smartLifeOffBtn = new QPushButton("Turn Selected Off");
-  smartLifeActionRow->addWidget(smartLifeOnBtn);
-  smartLifeActionRow->addWidget(smartLifeOffBtn);
-  smartLifeActionRow->addStretch();
-  smartLifeDevicesLayout->addLayout(smartLifeActionRow);
+  smartLifeSelectionPanel = new SelectableTextPanel(smartLifeDevicesGroupBox);
+  smartLifeSelectionPanel->setMinimumWidth(280);
+  smartLifeSelectionPanel->setMaximumWidth(360);
+  smartLifeSelectionPanel->setMinimumHeight(700);
+  smartLifeSelectionPanel->setSizePolicy(QSizePolicy::Preferred,
+                                         QSizePolicy::MinimumExpanding);
+  smartLifeSelectionPanel->setStyleSheet(
+      QStringLiteral(
+          "QPlainTextEdit { background: #1A1A1A; color: #E0E0E0; border: 1px solid #333; "
+          "border-radius: 16px; padding: 12px 14px; font-size: 11px; selection-background-color: #333; }"));
 
-  smartLifeSelectionPanel = new SelectableTextPanel();
-  smartLifeSelectionPanel->setMinimumHeight(120);
-  smartLifeSelectionPanel->setMaximumHeight(220);
-  smartLifeDevicesLayout->addWidget(makeSelectableCaption("Selection Details"));
-  smartLifeDevicesLayout->addWidget(smartLifeSelectionPanel);
-  smartLifeLayout->addWidget(smartLifeDevicesGroup, 1);
+  smartLifeDeviceInspectorScroll = new QScrollArea(smartLifeDevicesGroupBox);
+  smartLifeDeviceInspectorScroll->setWidgetResizable(true);
+  smartLifeDeviceInspectorScroll->setFrameShape(QFrame::NoFrame);
+  smartLifeDeviceInspectorScroll->setMinimumWidth(280);
+  smartLifeDeviceInspectorScroll->setMaximumWidth(380);
+  smartLifeDeviceInspectorScroll->setMinimumHeight(700);
+  smartLifeDeviceInspectorScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  smartLifeDeviceInspectorWidget = new SmartHomeDeviceInspector(smartLifeDeviceInspectorScroll);
+  smartLifeDeviceInspectorScroll->setWidget(smartLifeDeviceInspectorWidget);
 
-  tabs->addTab(makeScrollablePage(smartLifeTab), "Smart Life");
+  smartLifeRightPane = new QStackedWidget(smartLifeDevicesGroupBox);
+  smartLifeRightPane->addWidget(smartLifeDeviceInspectorScroll);
+  smartLifeRightPane->addWidget(smartLifeSelectionPanel);
+  smartLifeRightPane->setCurrentWidget(smartLifeDeviceInspectorScroll);
+
+  auto *smartLifeDeviceSplit = new QSplitter(Qt::Horizontal, smartLifeDevicesGroupBox);
+  smartLifeDeviceSplit->setChildrenCollapsible(false);
+  smartLifeDeviceSplit->setHandleWidth(8);
+  smartLifeDeviceSplit->setMinimumHeight(760);
+  smartLifeDeviceSplit->setSizePolicy(QSizePolicy::Expanding,
+                                      QSizePolicy::MinimumExpanding);
+  smartLifeDeviceSplit->setStyleSheet(
+      QStringLiteral("QSplitter::handle { background: #1E1E1E; }"));
+  smartLifeDeviceSplit->addWidget(smartLifeDeviceTree);
+  smartLifeDeviceSplit->addWidget(smartLifeRightPane);
+  smartLifeDeviceSplit->setStretchFactor(0, 4);
+  smartLifeDeviceSplit->setStretchFactor(1, 2);
+  smartLifeDeviceSplit->setSizes({920, 280});
+  smartLifeDevicesLayout->addWidget(smartLifeDeviceSplit, 1);
+  smartLifeDevicesSection = addSmartHomeSection(smartLifeLayout, smartLifeTab,
+                                                QStringLiteral("Lights And Devices"),
+                                                smartLifeDevicesGroupBox, true);
 
   auto *persistSmartLifeInputs = new QTimer(this);
   persistSmartLifeInputs->setSingleShot(true);
@@ -1854,8 +3305,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   }
   connect(smartLifeDeveloperHomeIdsEdit, &QPlainTextEdit::textChanged, this,
           queueSmartLifeSave);
-  connect(smartLifeSchemaCombo, &QComboBox::currentTextChanged, this,
-          [=](const QString &) { queueSmartLifeSave(); });
+  connect(smartLifeSchemaCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, [=](int) {
+            queueSmartLifeSave();
+            refreshSmartLifeUi();
+          });
   connect(smartLifePasswordMd5Check, &QCheckBox::toggled, this,
           [=](bool) { queueSmartLifeSave(); });
   connect(smartLifeShowSecretsCheck, &QCheckBox::toggled, this,
@@ -1868,11 +3322,37 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
               smartLifePasswordEdit->setEchoMode(echoMode);
           });
 
+  connect(smartLifeInstallBtn, &QPushButton::clicked, this, [=]() {
+    if (!optionalServiceManager) {
+      if (smartLifeStatusLabel)
+        smartLifeStatusLabel->setText(
+            "SmartHome lights support is not ready yet. Try again in a moment.");
+      return;
+    }
+    optionalServiceManager->downloadService(QStringLiteral("smart_life"));
+  });
+  connect(smartLifeUninstallBtn, &QPushButton::clicked, this, [=]() {
+    if (!optionalServiceManager) {
+      if (smartLifeStatusLabel)
+        smartLifeStatusLabel->setText(
+            "SmartHome lights support is not ready yet. Try again in a moment.");
+      return;
+    }
+    optionalServiceManager->uninstallService(QStringLiteral("smart_life"));
+  });
+
   connect(smartLifeConnectBtn, &QPushButton::clicked, this, [=]() {
     saveSmartLifeSettings();
+    if (!isOptionalServiceInstalled(QStringLiteral("smart_life"))) {
+      if (smartLifeStatusLabel)
+        smartLifeStatusLabel->setText(
+            "Install SmartHome lights support first. In the basic build this stays off until you enable it.");
+      return;
+    }
     if (!smartLifeManager) {
-      QMessageBox::warning(this, "Smart Life",
-                           "Smart Life manager is not ready yet.");
+      if (smartLifeStatusLabel)
+        smartLifeStatusLabel->setText(
+            "SmartHome lights manager is not ready yet. Try again in a moment.");
       return;
     }
 
@@ -1884,10 +3364,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                              ? smartLifeAccountModeCombo->currentData().toString()
                              : QStringLiteral("smartlife");
     if (accessId.isEmpty() || accessKey.isEmpty()) {
-      QMessageBox::warning(
-          this, "Smart Life",
-          "Enter the Tuya Cloud project Access ID and Access Key first. "
-          "Smart Life mode still requires a linked Tuya cloud project.");
+      if (smartLifeStatusLabel)
+        smartLifeStatusLabel->setText(
+            "Enter the Tuya Cloud project Access ID and Access Key first. Smart Life mode still needs a linked Tuya cloud project.");
+      if (accessId.isEmpty() && smartLifeAccessIdEdit)
+        smartLifeAccessIdEdit->setFocus();
+      else if (smartLifeAccessKeyEdit)
+        smartLifeAccessKeyEdit->setFocus();
       return;
     }
     if (mode == QLatin1String("smartlife")) {
@@ -1896,9 +3379,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
       const QString password =
           smartLifePasswordEdit ? smartLifePasswordEdit->text() : QString();
       if (username.isEmpty() || password.isEmpty()) {
-        QMessageBox::warning(
-            this, "Smart Life",
-            "Enter your Smart Life app account and password before connecting.");
+        if (smartLifeStatusLabel)
+          smartLifeStatusLabel->setText(
+              "Enter your Smart Life app account and password before connecting.");
+        if (username.isEmpty() && smartLifeUsernameEdit)
+          smartLifeUsernameEdit->setFocus();
+        else if (smartLifePasswordEdit)
+          smartLifePasswordEdit->setFocus();
         return;
       }
     } else {
@@ -1909,17 +3396,23 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                                   ? smartLifeDeveloperHomeIdsEdit->toPlainText().trimmed()
                                   : QString();
       if (uid.isEmpty() && homeIds.isEmpty()) {
-        QMessageBox::warning(
-            this, "Smart Life",
-            "Developer mode needs either a linked User UID or one or more Home IDs.");
+        if (smartLifeStatusLabel)
+          smartLifeStatusLabel->setText(
+              "Developer mode needs either a linked User UID or one or more Home IDs.");
+        if (smartLifeDeveloperUidEdit)
+          smartLifeDeveloperUidEdit->setFocus();
         return;
       }
     }
 
+    if (smartLifeStatusLabel)
+      smartLifeStatusLabel->setText("Connecting SmartHome lights...");
     if (smartLifeManager)
       smartLifeManager->connectAndSync();
   });
   connect(smartLifeDisconnectBtn, &QPushButton::clicked, this, [=]() {
+    if (smartLifeStatusLabel)
+      smartLifeStatusLabel->setText("Disconnecting SmartHome lights...");
     if (smartLifeManager)
       smartLifeManager->disconnectSession();
   });
@@ -1953,25 +3446,913 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   });
   connect(smartLifeSyncBtn, &QPushButton::clicked, this, [=]() {
     saveSmartLifeSettings();
+    if (smartLifeStatusLabel)
+      smartLifeStatusLabel->setText("Refreshing SmartHome lights...");
     if (smartLifeManager)
       smartLifeManager->syncDevices();
-  });
-  connect(smartLifeOnBtn, &QPushButton::clicked, this, [=]() {
-    if (smartLifeManager)
-      smartLifeManager->controlDevices(selectedSmartLifeDeviceIds(), true);
-  });
-  connect(smartLifeOffBtn, &QPushButton::clicked, this, [=]() {
-    if (smartLifeManager)
-      smartLifeManager->controlDevices(selectedSmartLifeDeviceIds(), false);
   });
   connect(smartLifeSearchEdit, &QLineEdit::textChanged, this,
           [=](const QString &) { applySmartLifeSearchFilter(); });
   connect(smartLifeDeviceTree, &QTreeWidget::itemSelectionChanged, this,
           &MainWindow::refreshSmartLifeSelectionDetails);
+  connect(smartLifeDeviceTree, &QTreeWidget::itemDoubleClicked, this,
+          [this](QTreeWidgetItem *item, int column) {
+            if (!item || column != 0)
+              return;
+            if (item->data(0, kSmartLifeNodeTypeRole).toString() !=
+                QLatin1String("device")) {
+              return;
+            }
+            smartLifeDeviceTree->editItem(item, 0);
+          });
+  connect(smartLifeDeviceTree, &QTreeWidget::itemChanged, this,
+          [this](QTreeWidgetItem *item, int column) {
+            if (!item || column != 0 || !smartLifeManager)
+              return;
+            if (item->data(0, kSmartLifeNodeTypeRole).toString() !=
+                QLatin1String("device")) {
+              return;
+            }
+            const QString deviceId =
+                item->data(0, kSmartLifeNodeIdRole).toString().trimmed();
+            if (deviceId.isEmpty())
+              return;
+            const SmartLifeDeviceInfo device = smartLifeManager->deviceById(deviceId);
+            if (device.id.isEmpty())
+              return;
+            const QString typed = item->text(0).trimmed();
+            const QString rawName = device.name.isEmpty() ? device.id : device.name;
+            if (typed.isEmpty()) {
+              QSignalBlocker blocker(smartLifeDeviceTree);
+              item->setText(0, smartLifeManager->deviceDisplayName(deviceId));
+              return;
+            }
+            smartLifeManager->setDeviceAlias(
+                deviceId,
+                typed.compare(rawName, Qt::CaseInsensitive) == 0 ? QString()
+                                                                 : typed);
+            rebuildSmartLifeDeviceTree();
+            refreshSmartLifeUi();
+          });
   smartLifeConnectionPanel->setPlainText(
-      QStringLiteral("Smart Life manager is waiting for credentials."));
+        QStringLiteral("SmartHome lights manager is waiting for credentials."));
   smartLifeSelectionPanel->setPlainText(
       QStringLiteral("Select a home, room, or device to inspect it here."));
+
+  QWidget *androidTvTab = new QWidget();
+  auto *androidTvLayout = new QVBoxLayout(androidTvTab);
+  androidTvLayout->setContentsMargins(12, 12, 12, 12);
+  androidTvLayout->setSpacing(10);
+
+  auto *androidTvIntro = new QLabel(
+      "Android TV control is optional. Install it only when you want QuickSTT "
+      "to discover TVs on your current network and control them with a built-in "
+      "remote. No developer mode or ADB is required.");
+  androidTvIntro->setWordWrap(true);
+  androidTvIntro->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  androidTvIntro->setCursor(Qt::IBeamCursor);
+  androidTvIntro->setVisible(false);
+  androidTvLayout->addWidget(androidTvIntro);
+
+  androidTvSetupGroupBox = new QGroupBox("Android TV");
+  auto *androidTvSetupLayout = new QVBoxLayout(androidTvSetupGroupBox);
+  androidTvSetupLayout->setContentsMargins(10, 12, 10, 10);
+  androidTvSetupLayout->setSpacing(10);
+  androidTvInstallStateLabel = new SelectableTextLabel(
+      "Install Android TV support to unlock discovery, pairing, and the QuickSTT TV remote.");
+  androidTvInstallStateLabel->setWordWrap(true);
+  androidTvSetupLayout->addWidget(androidTvInstallStateLabel);
+  auto *androidTvInstallButtons = new QHBoxLayout();
+  androidTvInstallBtn = new QPushButton("Install Android TV Support");
+  androidTvUninstallBtn = new QPushButton("Remove Android TV Support");
+  androidTvScanBtn = new QPushButton("Rescan TVs");
+  androidTvInstallButtons->addWidget(androidTvInstallBtn);
+  androidTvInstallButtons->addWidget(androidTvUninstallBtn);
+  androidTvInstallButtons->addWidget(androidTvScanBtn);
+  androidTvInstallButtons->addStretch();
+  androidTvSetupLayout->addLayout(androidTvInstallButtons);
+  androidTvAutoScanCheck =
+      new SelectableCheckBox(QStringLiteral("Auto scan on startup"), androidTvSetupGroupBox);
+  androidTvAutoScanCheck->setChecked(
+      s.value(QStringLiteral("androidTv/scanOnStartup"), true).toBool());
+  androidTvSetupLayout->addWidget(androidTvAutoScanCheck);
+
+  androidTvDiscoveryGroupBox = new QGroupBox("Unpaired TVs On Your LAN");
+  auto *androidTvDiscoveryLayout = new QVBoxLayout(androidTvDiscoveryGroupBox);
+  androidTvDiscoveryLayout->setContentsMargins(10, 12, 10, 10);
+  androidTvDiscoveryLayout->setSpacing(8);
+  auto *androidTvDiscoveryIntro = new SelectableTextLabel(
+      "QuickSTT shows only TVs that are not already remembered on this device, so rescans stay focused on new TVs you can pair.");
+  androidTvDiscoveryIntro->setWordWrap(true);
+  androidTvDiscoveryLayout->addWidget(androidTvDiscoveryIntro);
+  androidTvDiscoveryStatusLabel =
+      new SelectableTextLabel("No TVs are ready yet. Install support, then let QuickSTT scan your LAN.");
+  androidTvDiscoveryStatusLabel->setWordWrap(true);
+  androidTvDiscoveryLayout->addWidget(androidTvDiscoveryStatusLabel);
+  androidTvDiscoveryList = new QListWidget();
+  applyDashboardListChrome(androidTvDiscoveryList);
+  androidTvDiscoveryList->setSelectionMode(QAbstractItemView::SingleSelection);
+  androidTvDiscoveryList->setWordWrap(true);
+  androidTvDiscoveryList->setSpacing(6);
+  androidTvDiscoveryList->setMinimumHeight(220);
+  androidTvDiscoveryList->setMaximumHeight(480);
+  androidTvDiscoveryList->setStyleSheet(
+      androidTvDiscoveryList->styleSheet() +
+      QStringLiteral(
+          "QListWidget::item { padding: 8px 10px; }"
+          "QListWidget::item:selected { background: #24334A; border: 1px solid "
+          "#5EA3FF; border-radius: 8px; color: #FFFFFF; }"
+          "QListWidget::item:hover { background: #252525; border: 1px solid "
+          "#454545; border-radius: 8px; }"));
+  androidTvDiscoveryLayout->addWidget(androidTvDiscoveryList);
+  androidTvSetupLayout->addWidget(androidTvDiscoveryGroupBox);
+
+  androidTvProfilesGroupBox = new QGroupBox("Remembered TVs");
+  auto *androidTvProfilesLayout = new QVBoxLayout(androidTvProfilesGroupBox);
+  androidTvProfilesLayout->setContentsMargins(10, 12, 10, 10);
+  androidTvProfilesLayout->setSpacing(8);
+  auto *androidTvProfilesNote = new SelectableTextLabel(
+      "Paired TVs stay saved on this device and reconnect automatically after restart or update.");
+  androidTvProfilesNote->setWordWrap(true);
+  androidTvProfilesLayout->addWidget(androidTvProfilesNote);
+  androidTvProfileList = new QListWidget();
+  applyDashboardListChrome(androidTvProfileList);
+  androidTvProfileList->setSelectionMode(QAbstractItemView::SingleSelection);
+  androidTvProfileList->setWordWrap(true);
+  androidTvProfileList->setSpacing(6);
+  androidTvProfileList->setMinimumHeight(140);
+  androidTvProfileList->setMaximumHeight(320);
+  androidTvProfileList->setStyleSheet(
+      androidTvProfileList->styleSheet() +
+      QStringLiteral(
+          "QListWidget::item { padding: 8px 10px; }"
+          "QListWidget::item:selected { background: #24334A; border: 1px solid "
+          "#5EA3FF; border-radius: 8px; color: #FFFFFF; }"
+          "QListWidget::item:hover { background: #252525; border: 1px solid "
+          "#454545; border-radius: 8px; }"));
+  androidTvProfilesLayout->addWidget(androidTvProfileList);
+  androidTvProfileNameEdit =
+      new QLineEdit(s.value("androidTv/profileLabel").toString(), androidTvProfilesGroupBox);
+  auto *androidTvProfileButtonRow = new QHBoxLayout();
+  androidTvNewProfileBtn = new QPushButton("Pair As New TV", androidTvProfilesGroupBox);
+  androidTvSaveProfileBtn =
+      new QPushButton("Remember Selected TV", androidTvProfilesGroupBox);
+  androidTvDeleteProfileBtn =
+      new QPushButton("Forget TV", androidTvProfilesGroupBox);
+  androidTvProfileButtonRow->addStretch();
+  androidTvProfileButtonRow->addWidget(androidTvDeleteProfileBtn);
+  androidTvProfilesLayout->addLayout(androidTvProfileButtonRow);
+  androidTvProfilesGroupBox->setVisible(false);
+  androidTvProfileNameEdit->setVisible(false);
+  androidTvNewProfileBtn->setVisible(false);
+  androidTvSaveProfileBtn->setVisible(false);
+  androidTvSetupLayout->addWidget(androidTvProfilesGroupBox);
+
+  auto *androidTvDetailsGroup = new QGroupBox("Pairing");
+  auto *androidTvDetailsLayout = new QVBoxLayout(androidTvDetailsGroup);
+  androidTvDetailsLayout->setContentsMargins(10, 12, 10, 10);
+  androidTvDetailsLayout->setSpacing(8);
+
+  auto *androidTvHiddenConfig = new QWidget(androidTvDetailsGroup);
+  auto *androidTvForm = new QFormLayout(androidTvHiddenConfig);
+  androidTvForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+  androidTvForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
+  androidTvForm->setHorizontalSpacing(12);
+  androidTvForm->setVerticalSpacing(8);
+  androidTvHostEdit = new QLineEdit(s.value("androidTv/host").toString(),
+                                    androidTvHiddenConfig);
+  androidTvHostEdit->setPlaceholderText("TV IP or hostname");
+  androidTvForm->addRow(makeSelectableCaption("TV Address"), androidTvHostEdit);
+  androidTvPortEdit =
+      new QLineEdit(s.value("androidTv/port", "6466").toString(), androidTvHiddenConfig);
+  androidTvPortEdit->setValidator(new QIntValidator(1, 65535, androidTvPortEdit));
+  androidTvPortEdit->setPlaceholderText("6466");
+  androidTvForm->addRow(makeSelectableCaption("Remote Port"), androidTvPortEdit);
+  androidTvPairHostEdit = new QLineEdit(
+      s.value("androidTv/pairingHost").toString(), androidTvHiddenConfig);
+  androidTvPairHostEdit->setPlaceholderText("Usually the same as TV Address");
+  androidTvForm->addRow(makeSelectableCaption("Pair Address"), androidTvPairHostEdit);
+  androidTvPairPortEdit =
+      new QLineEdit(s.value("androidTv/pairingPort", "6467").toString(),
+                    androidTvHiddenConfig);
+  androidTvPairPortEdit->setValidator(
+      new QIntValidator(1, 65535, androidTvPairPortEdit));
+  androidTvPairPortEdit->setPlaceholderText("6467");
+  androidTvForm->addRow(makeSelectableCaption("Pair Port"), androidTvPairPortEdit);
+  androidTvPairCodeEdit =
+      new QLineEdit(s.value("androidTv/pairingCode").toString(), androidTvHiddenConfig);
+  androidTvPairCodeEdit->setPlaceholderText("6-character pairing code shown on TV");
+  androidTvForm->addRow(makeSelectableCaption("Pair Code"), androidTvPairCodeEdit);
+  androidTvFriendlyNameEdit =
+      new QLineEdit(s.value("androidTv/friendlyName").toString(), androidTvHiddenConfig);
+  androidTvFriendlyNameEdit->setPlaceholderText("QuickSTT Android TV");
+  androidTvForm->addRow(makeSelectableCaption("Controller Name"), androidTvFriendlyNameEdit);
+  androidTvVoiceEnabledCheck =
+      new SelectableCheckBox("Enable voice commands for Android TV",
+                             androidTvHiddenConfig);
+  androidTvVoiceEnabledCheck->setChecked(
+      s.value("androidTv/voiceEnabled", true).toBool());
+  androidTvForm->addRow(makeSelectableCaption("Voice"), androidTvVoiceEnabledCheck);
+  androidTvHiddenConfig->setVisible(false);
+  androidTvDetailsLayout->addWidget(androidTvHiddenConfig);
+
+  auto *androidTvPairingGuide = new SelectableTextLabel(
+      "Choose a TV, press Pair once, enter the code shown on the TV, and QuickSTT will connect and remember it on this device.");
+  androidTvPairingGuide->setWordWrap(true);
+  androidTvDetailsLayout->addWidget(androidTvPairingGuide);
+
+  auto *androidTvActionRow = new QHBoxLayout();
+  androidTvStartPairBtn = new QPushButton("Pair Selected TV");
+  androidTvDisconnectBtn = new QPushButton("Disconnect");
+  androidTvDeleteProfileBtn->setVisible(true);
+  androidTvActionRow->addWidget(androidTvStartPairBtn);
+  androidTvActionRow->addWidget(androidTvDisconnectBtn);
+  androidTvActionRow->addWidget(androidTvDeleteProfileBtn);
+  androidTvActionRow->addStretch();
+  androidTvDetailsLayout->addLayout(androidTvActionRow);
+  androidTvStatusLabel =
+      new SelectableTextLabel("Install Android TV support to begin.");
+  androidTvStatusLabel->setWordWrap(true);
+  androidTvDetailsLayout->addWidget(androidTvStatusLabel);
+  androidTvSetupLayout->addWidget(androidTvDetailsGroup);
+  addSmartHomeSection(androidTvLayout, androidTvTab,
+                      QStringLiteral("TV Setup"),
+                      androidTvSetupGroupBox, true);
+
+  androidTvControlsGroupBox = new QGroupBox("Android TV Remote");
+  auto *androidTvControlsLayout = new QVBoxLayout(androidTvControlsGroupBox);
+  androidTvControlsLayout->setContentsMargins(10, 12, 10, 10);
+  androidTvControlsLayout->setSpacing(10);
+  androidTvSummaryPanel = new SelectableTextPanel();
+  androidTvSummaryPanel->setMinimumHeight(140);
+  androidTvSummaryPanel->setMaximumHeight(320);
+  androidTvSummaryPanel->setVisible(false);
+  androidTvHelpPanel = new SelectableTextPanel();
+  androidTvHelpPanel->setMinimumHeight(160);
+  androidTvHelpPanel->setMaximumHeight(360);
+  androidTvHelpPanel->setVisible(false);
+  auto *androidTvRemoteHint = new SelectableTextLabel(
+      "QuickSTT shows the full remote after pairing. Some buttons may work on your TV while others may not.");
+  androidTvRemoteHint->setWordWrap(true);
+  androidTvControlsLayout->addWidget(androidTvRemoteHint);
+
+  auto makeQtAwesomeIcon = [this](const QString &name,
+                                  const QColor &color = QColor(QStringLiteral("#F4F6FA"))) {
+    if (!qtAwesome)
+      return QIcon();
+    QVariantMap options;
+    options.insert(QStringLiteral("color"), color);
+    options.insert(QStringLiteral("color-disabled"),
+                   QColor(QStringLiteral("#6F7784")));
+    options.insert(QStringLiteral("color-active"),
+                   QColor(QStringLiteral("#FFFFFF")));
+    options.insert(QStringLiteral("color-selected"),
+                   QColor(QStringLiteral("#FFFFFF")));
+    options.insert(QStringLiteral("scale-factor"), 0.92);
+    return qtAwesome->icon(name, options);
+  };
+
+  auto makeRemoteButton = [this](const QString &text, const QIcon &icon,
+                                 const QString &toolTip,
+                                 const QSize &size = QSize(66, 58)) {
+    auto *button = new QToolButton();
+    button->setText(text);
+    button->setIcon(icon);
+    const bool iconOnly = !icon.isNull() && text.trimmed().isEmpty();
+    button->setToolButtonStyle(iconOnly
+                                   ? Qt::ToolButtonIconOnly
+                                   : (icon.isNull() ? Qt::ToolButtonTextOnly
+                                                    : Qt::ToolButtonTextUnderIcon));
+    button->setIconSize(iconOnly ? QSize(24, 24) : QSize(18, 18));
+    button->setFixedSize(size);
+    button->setCursor(Qt::PointingHandCursor);
+    button->setToolTip(toolTip);
+    button->setStyleSheet(
+        "QToolButton { background: #171717; color: #FFFFFF; border: 1px solid #303030; "
+        "border-radius: 16px; padding: 0px; font-size: 11px; font-weight: 600; }"
+        "QToolButton:hover { background: #222222; border-color: #4B4B4B; }"
+        "QToolButton:pressed { background: #101010; }");
+    return button;
+  };
+
+  auto *androidTvRemoteFrame = new QFrame(androidTvControlsGroupBox);
+  androidTvRemoteFrame->setStyleSheet(
+      "QFrame { background: #101010; border: 1px solid #2C2C2C; border-radius: 24px; }");
+  androidTvRemoteFrame->setMinimumWidth(320);
+  androidTvRemoteFrame->setMaximumWidth(360);
+  auto *androidTvRemoteLayout = new QVBoxLayout(androidTvRemoteFrame);
+  androidTvRemoteLayout->setContentsMargins(14, 14, 14, 14);
+  androidTvRemoteLayout->setSpacing(12);
+
+  androidTvRemoteStatusPanel = new SelectableTextPanel(androidTvRemoteFrame);
+  androidTvRemoteStatusPanel->setMinimumHeight(52);
+  androidTvRemoteStatusPanel->setMaximumHeight(68);
+  androidTvRemoteStatusPanel->setPlainText(
+      QStringLiteral("No remembered TV is connected yet."));
+  androidTvRemoteStatusPanel->setStyleSheet(
+      QStringLiteral(
+          "QPlainTextEdit { background: #161B23; color: #F5F7FA; border: 1px solid "
+          "#2D3746; border-radius: 12px; padding: 8px 10px; font-size: 11px; }"));
+  androidTvRemoteLayout->addWidget(androidTvRemoteStatusPanel);
+
+  auto *androidTvTopRow = new QHBoxLayout();
+  androidTvPowerBtn = makeRemoteButton(
+      QString(), makeQtAwesomeIcon(QStringLiteral("solid power-off")),
+      "Wake or sleep the paired TV", QSize(72, 56));
+  androidTvMuteBtn = makeRemoteButton(
+      QString(), makeQtAwesomeIcon(QStringLiteral("solid volume-xmark")),
+      "Mute or unmute the TV", QSize(64, 56));
+  androidTvTopRow->addStretch();
+  androidTvTopRow->addWidget(androidTvPowerBtn);
+  androidTvTopRow->addWidget(androidTvMuteBtn);
+  androidTvTopRow->addStretch();
+  androidTvRemoteLayout->addLayout(androidTvTopRow);
+
+  auto *androidTvUtilityRow = new QHBoxLayout();
+  androidTvInputBtn = makeRemoteButton(
+      QString(), makeQtAwesomeIcon(QStringLiteral("solid tv")),
+      "Open the TV input selector");
+  androidTvAppsBtn = makeRemoteButton(
+      QString(), makeQtAwesomeIcon(QStringLiteral("solid table-cells-large")),
+      "Open the TV apps list");
+  androidTvMenuBtn = makeRemoteButton(
+      QString(), makeQtAwesomeIcon(QStringLiteral("solid bars")),
+      "Open the TV menu");
+  androidTvSettingsBtn =
+      makeRemoteButton(QString(),
+                       makeQtAwesomeIcon(QStringLiteral("solid gear")),
+                       "Open TV settings", QSize(76, 58));
+  androidTvUtilityRow->addWidget(androidTvInputBtn);
+  androidTvUtilityRow->addWidget(androidTvAppsBtn);
+  androidTvUtilityRow->addWidget(androidTvMenuBtn);
+  androidTvUtilityRow->addWidget(androidTvSettingsBtn);
+  androidTvRemoteLayout->addLayout(androidTvUtilityRow);
+
+  auto *androidTvDpadWrap = new QHBoxLayout();
+  androidTvDpadWrap->addStretch();
+  auto *androidTvDpadGrid = new QGridLayout();
+  androidTvDpadGrid->setHorizontalSpacing(8);
+  androidTvDpadGrid->setVerticalSpacing(8);
+  androidTvUpBtn =
+      makeRemoteButton(QString(),
+                       makeQtAwesomeIcon(QStringLiteral("solid chevron-up")),
+                       "Move up",
+                       QSize(70, 58));
+  androidTvLeftBtn = makeRemoteButton(
+      QString(), makeQtAwesomeIcon(QStringLiteral("solid chevron-left")), "Move left",
+      QSize(70, 58));
+  androidTvOkBtn = makeRemoteButton(QString(),
+                                    makeQtAwesomeIcon(QStringLiteral("solid circle-dot")),
+                                    "Select the focused item", QSize(76, 64));
+  androidTvRightBtn = makeRemoteButton(
+      QString(), makeQtAwesomeIcon(QStringLiteral("solid chevron-right")), "Move right",
+      QSize(70, 58));
+  androidTvDownBtn = makeRemoteButton(
+      QString(), makeQtAwesomeIcon(QStringLiteral("solid chevron-down")), "Move down",
+      QSize(70, 58));
+  androidTvDpadGrid->addWidget(androidTvUpBtn, 0, 1, Qt::AlignCenter);
+  androidTvDpadGrid->addWidget(androidTvLeftBtn, 1, 0, Qt::AlignCenter);
+  androidTvDpadGrid->addWidget(androidTvOkBtn, 1, 1, Qt::AlignCenter);
+  androidTvDpadGrid->addWidget(androidTvRightBtn, 1, 2, Qt::AlignCenter);
+  androidTvDpadGrid->addWidget(androidTvDownBtn, 2, 1, Qt::AlignCenter);
+  androidTvDpadWrap->addLayout(androidTvDpadGrid);
+  androidTvDpadWrap->addStretch();
+  androidTvRemoteLayout->addLayout(androidTvDpadWrap);
+
+  auto *androidTvActionRow2 = new QHBoxLayout();
+  androidTvHomeBtn = makeRemoteButton(
+      QString(), makeQtAwesomeIcon(QStringLiteral("solid house")), "Go to TV home");
+  androidTvBackBtn = makeRemoteButton(
+      QString(), makeQtAwesomeIcon(QStringLiteral("solid reply")), "Go back on the TV");
+  androidTvPlayPauseBtn =
+      makeRemoteButton(QString(), makeQtAwesomeIcon(QStringLiteral("solid play")),
+                       "Play or pause on the TV");
+  androidTvActionRow2->addWidget(androidTvHomeBtn);
+  androidTvActionRow2->addWidget(androidTvBackBtn);
+  androidTvActionRow2->addWidget(androidTvPlayPauseBtn);
+  androidTvRemoteLayout->addLayout(androidTvActionRow2);
+
+  auto *androidTvVolumeWrap = new QHBoxLayout();
+  androidTvVolumeWrap->addStretch();
+  auto *androidTvVolumeWidget = new QWidget(androidTvRemoteFrame);
+  auto *androidTvVolumeColumn = new QVBoxLayout(androidTvVolumeWidget);
+  androidTvVolumeColumn->setContentsMargins(0, 0, 0, 0);
+  androidTvVolumeColumn->setSpacing(10);
+  androidTvVolumeSlider = new VolumeControlSlider(Qt::Vertical);
+  androidTvVolumeSlider->setRange(0, 100);
+  androidTvVolumeSlider->setSingleStep(1);
+  androidTvVolumeSlider->setPageStep(5);
+  androidTvVolumeSlider->setValue(50);
+  androidTvVolumeSlider->setFixedSize(64, 228);
+  androidTvVolumeSlider->setCursor(Qt::PointingHandCursor);
+  androidTvVolumeSlider->setTracking(true);
+  androidTvVolumeSlider->setInvertedAppearance(false);
+  androidTvVolumeSlider->setToolTip(QStringLiteral("TV volume"));
+  androidTvVolumeDownBtn =
+      makeRemoteButton(QString(),
+                       makeQtAwesomeIcon(QStringLiteral("solid minus")),
+                       "Lower TV volume", QSize(64, 48));
+  androidTvVolumeUpBtn =
+      makeRemoteButton(QString(),
+                       makeQtAwesomeIcon(QStringLiteral("solid plus")),
+                       "Raise TV volume", QSize(64, 48));
+  androidTvVolumeDownBtn->setAutoRepeat(true);
+  androidTvVolumeDownBtn->setAutoRepeatDelay(260);
+  androidTvVolumeDownBtn->setAutoRepeatInterval(95);
+  androidTvVolumeUpBtn->setAutoRepeat(true);
+  androidTvVolumeUpBtn->setAutoRepeatDelay(260);
+  androidTvVolumeUpBtn->setAutoRepeatInterval(95);
+  androidTvVolumeValueEdit = new QLineEdit();
+  androidTvVolumeValueEdit->setAlignment(Qt::AlignCenter);
+  androidTvVolumeValueEdit->setFixedWidth(72);
+  androidTvVolumeValueEdit->setFixedHeight(40);
+  androidTvVolumeValueEdit->setMaxLength(3);
+  androidTvVolumeValueEdit->setValidator(new QIntValidator(0, 100, androidTvVolumeValueEdit));
+  androidTvVolumeValueEdit->setPlaceholderText("--");
+  androidTvVolumeValueEdit->setToolTip(
+      QStringLiteral("Enter a volume from 0 to 100 when the TV reports its current level."));
+  androidTvVolumeValueEdit->setStyleSheet(
+      "QLineEdit { background: #F8FAFD; color: #000000; border: 1px solid #D6DDE6; "
+      "border-radius: 12px; padding: 0 6px; font-size: 13px; font-weight: 800; }"
+      "QLineEdit:disabled { color: #555555; border-color: #C7CED7; background: #EAEFF5; }");
+  androidTvVolumeValueEdit->setText(QStringLiteral("50"));
+  androidTvVolumeColumn->addWidget(androidTvVolumeUpBtn, 0, Qt::AlignHCenter);
+  androidTvVolumeColumn->addWidget(androidTvVolumeSlider, 0, Qt::AlignHCenter);
+  androidTvVolumeColumn->addWidget(androidTvVolumeDownBtn, 0, Qt::AlignHCenter);
+  androidTvVolumeColumn->addWidget(androidTvVolumeValueEdit, 0, Qt::AlignHCenter);
+  androidTvVolumeWrap->addWidget(androidTvVolumeWidget);
+  androidTvVolumeWrap->addStretch();
+  androidTvRemoteLayout->addLayout(androidTvVolumeWrap);
+
+  auto *androidTvRemoteWrap = new QHBoxLayout();
+  androidTvRemoteWrap->addStretch();
+  androidTvRemoteWrap->addWidget(androidTvRemoteFrame);
+  androidTvRemoteWrap->addStretch();
+  androidTvControlsLayout->addLayout(androidTvRemoteWrap);
+  addSmartHomeSection(androidTvLayout, androidTvTab,
+                      QStringLiteral("TV Remote"),
+                      androidTvControlsGroupBox, true);
+  androidTvLayout->addStretch(1);
+
+  androidTvTab->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+  smartLifeLayout->addWidget(androidTvTab);
+
+  // ── Home Assistant Section ──
+  {
+    auto *haGroupBox = new QGroupBox("Home Assistant");
+    auto *haLayout = new QVBoxLayout(haGroupBox);
+    haLayout->setContentsMargins(10, 12, 10, 10);
+    haLayout->setSpacing(8);
+
+    auto *haIntro = new QLabel(
+        "Connect to Home Assistant using a long-lived access token. "
+        "Voice commands like \"turn on living room light\" will be matched "
+        "to your HA entities using Rhasspy-style intent matching.");
+    haIntro->setWordWrap(true);
+    haIntro->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    haIntro->setCursor(Qt::IBeamCursor);
+    haLayout->addWidget(haIntro);
+
+    auto *haTokenHint = new QLabel(
+        "To create a token: open Home Assistant -> click your profile icon "
+        "(bottom-left) -> scroll to Security -> Long-Lived Access Tokens "
+        "-> Create Token. Copy the token and paste it here.");
+    haTokenHint->setWordWrap(true);
+    haTokenHint->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    haTokenHint->setCursor(Qt::IBeamCursor);
+    haTokenHint->setStyleSheet("color: #8899AA; font-size: 11px; padding: 2px 0;");
+    haLayout->addWidget(haTokenHint);
+
+    auto *haForm = new QFormLayout();
+    haForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    haForm->setHorizontalSpacing(12);
+    haForm->setVerticalSpacing(8);
+
+    haUrlEdit = new QLineEdit(s.value("ha/url", "http://homeassistant.local:8123").toString());
+    haUrlEdit->setPlaceholderText("http://homeassistant.local:8123");
+    haForm->addRow(makeSelectableCaption("HA URL"), haUrlEdit);
+
+    haTokenEdit = new QLineEdit(
+        loadProtectedSetting(s, QStringLiteral("ha/token")));
+    haTokenEdit->setPlaceholderText("Long-lived access token");
+    haTokenEdit->setEchoMode(QLineEdit::Password);
+    haForm->addRow(makeSelectableCaption("Access Token"), haTokenEdit);
+    haLayout->addLayout(haForm);
+
+    auto *haButtons = new QHBoxLayout();
+    haConnectBtn = new QPushButton("Connect && Sync");
+    haDisconnectBtn = new QPushButton("Disconnect");
+    haButtons->addWidget(haConnectBtn);
+    haButtons->addWidget(haDisconnectBtn);
+    haButtons->addStretch();
+    haLayout->addLayout(haButtons);
+
+    haStatusLabel = new QLabel("Not connected.");
+    haStatusLabel->setWordWrap(true);
+    haStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    haStatusLabel->setCursor(Qt::IBeamCursor);
+    haLayout->addWidget(haStatusLabel);
+
+    haEntityList = new QListWidget();
+    applyDashboardListChrome(haEntityList);
+    haEntityList->setMinimumHeight(200);
+    haEntityList->setMaximumHeight(400);
+    haEntityList->setSelectionMode(QAbstractItemView::NoSelection);
+    haLayout->addWidget(haEntityList);
+
+    haInfoPanel = new SelectableTextPanel();
+    haInfoPanel->setMinimumHeight(100);
+    haInfoPanel->setMaximumHeight(200);
+    haInfoPanel->setPlainText(
+        "Supported voice commands:\n"
+        "• \"turn on/off {device name}\"\n"
+        "• \"toggle {device name}\"\n"
+        "• \"dim / brighten {light name}\"\n"
+        "• \"set {light} brightness to {number}\"\n"
+        "• \"set {thermostat} temperature to {number}\"\n"
+        "• \"lock / unlock {lock name}\"\n"
+        "• \"activate {scene / script name}\"");
+    haLayout->addWidget(haInfoPanel);
+
+    addSmartHomeSection(smartLifeLayout, smartLifeTab,
+                        QStringLiteral("Home Assistant"), haGroupBox, true);
+
+    connect(haConnectBtn, &QPushButton::clicked, this, [=]() {
+      QSettings settings("QuickSTT", "Config");
+      const QString url = haUrlEdit->text().trimmed();
+      const QString token = haTokenEdit->text().trimmed();
+      settings.setValue("ha/url", url);
+      saveProtectedSetting(settings, QStringLiteral("ha/token"), token);
+      settings.sync();
+
+      if (homeAssistantManager) {
+        HomeAssistantManager::Config cfg;
+        cfg.baseUrl = url;
+        cfg.token = token;
+        cfg.enabled = true;
+        homeAssistantManager->setConfig(cfg);
+        homeAssistantManager->connectAndSync();
+        haStatusLabel->setText("Connecting...");
+      }
+    });
+    connect(haDisconnectBtn, &QPushButton::clicked, this, [=]() {
+      if (homeAssistantManager) {
+        homeAssistantManager->disconnect();
+        haStatusLabel->setText("Disconnected.");
+        haEntityList->clear();
+      }
+    });
+  }
+
+  // ── SmartHome Source Selector ──
+  {
+    auto *sourceRow = new QHBoxLayout();
+    sourceRow->addWidget(makeSelectableCaption("Voice Command Routing"));
+    smartHomeSourceCombo = new QComboBox();
+    smartHomeSourceCombo->addItem("Native (Tuya + TV)", "native");
+    smartHomeSourceCombo->addItem("Home Assistant", "ha");
+    smartHomeSourceCombo->addItem("All", "all");
+    const QString savedSource = s.value("smartHome/voiceSource", "all").toString();
+    int sourceIdx = smartHomeSourceCombo->findData(savedSource);
+    smartHomeSourceCombo->setCurrentIndex(sourceIdx >= 0 ? sourceIdx : 2);
+    sourceRow->addWidget(smartHomeSourceCombo);
+    sourceRow->addStretch();
+    smartLifeLayout->addLayout(sourceRow);
+
+    connect(smartHomeSourceCombo, &QComboBox::currentIndexChanged, this, [=]() {
+      QSettings settings("QuickSTT", "Config");
+      settings.setValue("smartHome/voiceSource",
+                        smartHomeSourceCombo->currentData().toString());
+      settings.sync();
+      emit settingChanged("smartHome/voiceSource",
+                          smartHomeSourceCombo->currentData().toString());
+    });
+  }
+
+  smartLifeLayout->addStretch(1);
+  // Smart Home features removed from UI (code retained for future use)
+  // tabs->addTab(makeScrollablePage(smartLifeTab), "SmartHome");
+
+  auto *persistAndroidTvInputs = new QTimer(this);
+  persistAndroidTvInputs->setSingleShot(true);
+  persistAndroidTvInputs->setInterval(180);
+  connect(persistAndroidTvInputs, &QTimer::timeout, this,
+          &MainWindow::persistActiveAndroidTvSettings);
+  androidTvVolumeCommitTimer = new QTimer(this);
+  androidTvVolumeCommitTimer->setSingleShot(true);
+  androidTvVolumeCommitTimer->setInterval(130);
+  androidTvVolumeDisplayHoldTimer = new QTimer(this);
+  androidTvVolumeDisplayHoldTimer->setSingleShot(true);
+  androidTvVolumeDisplayHoldTimer->setInterval(5000);
+  auto queueAndroidTvSave = [persistAndroidTvInputs]() {
+    persistAndroidTvInputs->start();
+  };
+  auto holdAndroidTvVolumeTarget = [this](int targetPercent, int holdMs = 5000) {
+    m_androidTvTargetVolumePercent = qBound(0, targetPercent, 100);
+    if (androidTvVolumeDisplayHoldTimer)
+      androidTvVolumeDisplayHoldTimer->start(qMax(300, holdMs));
+    refreshAndroidTvUi();
+  };
+  connect(androidTvVolumeDisplayHoldTimer, &QTimer::timeout, this, [this]() {
+    m_androidTvTargetVolumePercent = -1;
+    refreshAndroidTvUi();
+  });
+
+  for (QLineEdit *edit : {androidTvProfileNameEdit, androidTvHostEdit,
+                          androidTvPortEdit, androidTvPairHostEdit,
+                          androidTvPairPortEdit, androidTvPairCodeEdit,
+                          androidTvFriendlyNameEdit}) {
+    connect(edit, &QLineEdit::textChanged, this,
+            [=](const QString &) { queueAndroidTvSave(); });
+  }
+  connect(androidTvVoiceEnabledCheck, &QCheckBox::toggled, this,
+          [=](bool) { queueAndroidTvSave(); refreshAndroidTvUi(); });
+  connect(androidTvAutoScanCheck, &QCheckBox::toggled, this, [this](bool checked) {
+    QSettings settings(QStringLiteral("QuickSTT"), QStringLiteral("Config"));
+    settings.setValue(QStringLiteral("androidTv/scanOnStartup"), checked);
+    settings.sync();
+    m_androidTvInitialScanDone = !checked;
+    refreshAndroidTvUi();
+  });
+  connect(androidTvProfileList, &QListWidget::currentItemChanged, this,
+          [this](QListWidgetItem *current, QListWidgetItem *) {
+            if (!current)
+              return;
+            selectAndroidTvProfile(
+                current->data(kAndroidTvProfileIdRole).toString(), true);
+            refreshAndroidTvUi();
+            if (androidTvManager &&
+                !androidTvManager->isConnected() &&
+                androidTvManager->currentConfigHasPairedCredentials() &&
+                (!optionalServiceManager || !optionalServiceManager->isBusy()) &&
+                isOptionalServiceInstalled(QStringLiteral("android_tv_remote")) &&
+                androidTvHostEdit &&
+                !androidTvHostEdit->text().trimmed().isEmpty()) {
+              QTimer::singleShot(120, this, [this]() {
+                if (androidTvManager &&
+                    !androidTvManager->isConnected() &&
+                    androidTvManager->currentConfigHasPairedCredentials() &&
+                    (!optionalServiceManager || !optionalServiceManager->isBusy()) &&
+                    isOptionalServiceInstalled(
+                        QStringLiteral("android_tv_remote")) &&
+                    androidTvHostEdit &&
+                    !androidTvHostEdit->text().trimmed().isEmpty()) {
+                  androidTvManager->connectDevice();
+                }
+              });
+            }
+          });
+  connect(androidTvDiscoveryList, &QListWidget::currentItemChanged, this,
+          [this](QListWidgetItem *current, QListWidgetItem *) {
+            if (!current)
+              return;
+            const QString itemKind =
+                current->data(kAndroidTvListKindRole).toString();
+            if (itemKind == QLatin1String("profile")) {
+              selectAndroidTvProfile(
+                  current->data(kAndroidTvListProfileIdRole).toString(), true);
+            } else if (itemKind == QLatin1String("device")) {
+              const QJsonDocument deviceDoc = QJsonDocument::fromJson(
+                  current->data(kAndroidTvListDeviceJsonRole).toByteArray());
+              if (!deviceDoc.isObject())
+                return;
+              applyDiscoveredAndroidTvDevice(deviceDoc.object());
+            } else {
+              return;
+            }
+            refreshAndroidTvUi();
+            if (androidTvManager &&
+                !androidTvManager->isConnected() &&
+                androidTvManager->currentConfigHasPairedCredentials() &&
+                (!optionalServiceManager || !optionalServiceManager->isBusy()) &&
+                isOptionalServiceInstalled(QStringLiteral("android_tv_remote")) &&
+                androidTvHostEdit &&
+                !androidTvHostEdit->text().trimmed().isEmpty()) {
+              QTimer::singleShot(120, this, [this]() {
+                if (androidTvManager &&
+                    !androidTvManager->isConnected() &&
+                    androidTvManager->currentConfigHasPairedCredentials() &&
+                    (!optionalServiceManager || !optionalServiceManager->isBusy()) &&
+                    isOptionalServiceInstalled(
+                        QStringLiteral("android_tv_remote")) &&
+                    androidTvHostEdit &&
+                    !androidTvHostEdit->text().trimmed().isEmpty()) {
+                  androidTvManager->connectDevice();
+                }
+              });
+            }
+          });
+  connect(androidTvNewProfileBtn, &QPushButton::clicked, this,
+          &MainWindow::createNewAndroidTvProfile);
+  connect(androidTvSaveProfileBtn, &QPushButton::clicked, this,
+          &MainWindow::saveCurrentAndroidTvProfile);
+  connect(androidTvDeleteProfileBtn, &QPushButton::clicked, this,
+          &MainWindow::deleteCurrentAndroidTvProfile);
+  connect(androidTvScanBtn, &QPushButton::clicked, this, [this]() {
+    if (!androidTvManager) {
+      m_androidTvServiceMessage =
+          QStringLiteral("Android TV manager is not ready yet.");
+      refreshAndroidTvUi();
+      return;
+    }
+    m_androidTvDiscoveredDevices = QJsonArray();
+    m_androidTvVisibleDiscoveredDevices = QJsonArray();
+    m_androidTvServiceMessage = QStringLiteral("Scanning your LAN for unpaired TVs...");
+    refreshAndroidTvDiscoveryList();
+    refreshAndroidTvUi();
+    androidTvManager->scanForDevices();
+  });
+
+  connect(androidTvInstallBtn, &QPushButton::clicked, this, [=]() {
+    if (!optionalServiceManager) {
+      m_androidTvServiceMessage =
+          QStringLiteral("Optional service manager is not ready yet.");
+      refreshAndroidTvUi();
+      return;
+    }
+    m_androidTvAutoReconnectAttempted = false;
+    m_androidTvInitialScanDone = false;
+    m_androidTvDiscoveredDevices = QJsonArray();
+    m_androidTvVisibleDiscoveredDevices = QJsonArray();
+    m_androidTvServiceMessage =
+        QStringLiteral("Installing Android TV support on this device...");
+    refreshAndroidTvDiscoveryList();
+    refreshAndroidTvUi();
+    optionalServiceManager->downloadService(QStringLiteral("android_tv_remote"));
+  });
+  connect(androidTvUninstallBtn, &QPushButton::clicked, this, [=]() {
+    if (!optionalServiceManager) {
+      m_androidTvServiceMessage =
+          QStringLiteral("Optional service manager is not ready yet.");
+      refreshAndroidTvUi();
+      return;
+    }
+    if (m_androidTvPairingDialog)
+      m_androidTvPairingDialog->close();
+    if (androidTvManager && isOptionalServiceInstalled(QStringLiteral("android_tv_remote")))
+      androidTvManager->disconnectDevice();
+    m_androidTvAutoReconnectAttempted = false;
+    m_androidTvInitialScanDone = false;
+    m_androidTvDiscoveredDevices = QJsonArray();
+    m_androidTvVisibleDiscoveredDevices = QJsonArray();
+    m_androidTvTargetVolumePercent = -1;
+    m_pendingAndroidTvVolumePercent = -1;
+    m_androidTvServiceMessage =
+        QStringLiteral("Removing Android TV support from this device...");
+    refreshAndroidTvDiscoveryList();
+    refreshAndroidTvUi();
+    optionalServiceManager->uninstallService(QStringLiteral("android_tv_remote"));
+  });
+  connect(androidTvStartPairBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvHostEdit && androidTvHostEdit->text().trimmed().isEmpty() &&
+        m_androidTvVisibleDiscoveredDevices.size() == 1 && androidTvDiscoveryList) {
+      androidTvDiscoveryList->setCurrentRow(0);
+    }
+    persistActiveAndroidTvSettings();
+    if (!androidTvManager) {
+      m_androidTvServiceMessage =
+          QStringLiteral("Android TV manager is not ready yet.");
+      refreshAndroidTvUi();
+      return;
+    }
+    if (androidTvHostEdit && androidTvHostEdit->text().trimmed().isEmpty()) {
+      m_androidTvServiceMessage =
+          QStringLiteral("Select a TV from the unpaired list first, then pair it.");
+      refreshAndroidTvUi();
+      return;
+    }
+    androidTvManager->startPairing();
+  });
+  connect(androidTvDisconnectBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->disconnectDevice();
+  });
+  connect(androidTvPowerBtn, &QPushButton::clicked, this, [=]() {
+    if (!androidTvManager)
+      return;
+    if (androidTvManager->isPowerStateKnown() && androidTvManager->isTvOn())
+      androidTvManager->turnOff();
+    else
+      androidTvManager->turnOn();
+  });
+  connect(androidTvVolumeCommitTimer, &QTimer::timeout, this, [=]() {
+    if (m_pendingAndroidTvVolumePercent < 0 || !androidTvManager)
+      return;
+    const int targetPercent = m_pendingAndroidTvVolumePercent;
+    m_pendingAndroidTvVolumePercent = -1;
+    holdAndroidTvVolumeTarget(targetPercent);
+    androidTvManager->setVolumePercent(targetPercent);
+  });
+  connect(androidTvVolumeSlider, &QSlider::valueChanged, this, [=](int value) {
+    if (m_updatingAndroidTvVolumeSlider)
+      return;
+    m_pendingAndroidTvVolumePercent = value;
+    m_androidTvTargetVolumePercent = value;
+    if (!androidTvVolumeCommitTimer)
+      return;
+    if (androidTvVolumeSlider->isSliderDown()) {
+      if (androidTvVolumeDisplayHoldTimer)
+        androidTvVolumeDisplayHoldTimer->start(3000);
+      return;
+    }
+    androidTvVolumeCommitTimer->start(20);
+  });
+  connect(androidTvVolumeSlider, &QSlider::sliderReleased, this, [=]() {
+    if (!androidTvVolumeCommitTimer || m_pendingAndroidTvVolumePercent < 0)
+      return;
+    androidTvVolumeCommitTimer->stop();
+    if (!androidTvManager)
+      return;
+    const int targetPercent = m_pendingAndroidTvVolumePercent;
+    m_pendingAndroidTvVolumePercent = -1;
+    holdAndroidTvVolumeTarget(targetPercent);
+    androidTvManager->setVolumePercent(targetPercent);
+  });
+  connect(androidTvMuteBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->muteToggle();
+  });
+  connect(androidTvVolumeDownBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager) {
+      const int basePercent = androidTvVolumeSlider
+                                  ? androidTvVolumeSlider->value()
+                                  : qMax(0, androidTvManager->currentVolumePercent());
+      holdAndroidTvVolumeTarget(basePercent - 1, 1400);
+      androidTvManager->volumeDown();
+    }
+  });
+  connect(androidTvVolumeUpBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager) {
+      const int basePercent = androidTvVolumeSlider
+                                  ? androidTvVolumeSlider->value()
+                                  : qMax(0, androidTvManager->currentVolumePercent());
+      holdAndroidTvVolumeTarget(basePercent + 1, 1400);
+      androidTvManager->volumeUp();
+    }
+  });
+  connect(androidTvVolumeValueEdit, &QLineEdit::editingFinished, this, [=]() {
+    if (!androidTvManager || !androidTvVolumeValueEdit)
+      return;
+    const QString trimmed = androidTvVolumeValueEdit->text().trimmed();
+    if (trimmed.isEmpty())
+      return;
+    bool ok = false;
+    const int targetPercent = trimmed.toInt(&ok);
+    if (!ok)
+      return;
+    holdAndroidTvVolumeTarget(targetPercent);
+    androidTvManager->setVolumePercent(targetPercent);
+  });
+  connect(androidTvInputBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->openInputSelector();
+  });
+  connect(androidTvAppsBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->showApps();
+  });
+  connect(androidTvSettingsBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->openSettings();
+  });
+  connect(androidTvHomeBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->goHome();
+  });
+  connect(androidTvBackBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->goBack();
+  });
+  connect(androidTvMenuBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->openMenu();
+  });
+  connect(androidTvPlayPauseBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->playPause();
+  });
+  connect(androidTvUpBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->navigateUp();
+  });
+  connect(androidTvDownBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->navigateDown();
+  });
+  connect(androidTvLeftBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->navigateLeft();
+  });
+  connect(androidTvRightBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->navigateRight();
+  });
+  connect(androidTvOkBtn, &QPushButton::clicked, this, [=]() {
+    if (androidTvManager)
+      androidTvManager->navigateCenter();
+  });
+
+  refreshAndroidTvProfileList();
 
   modelCompleter = new QCompleter(allModelCatalog(), this);
   modelCompleter->setCaseSensitivity(Qt::CaseInsensitive);
@@ -2025,6 +4406,24 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
           [=](QListWidgetItem *, QListWidgetItem *) {
             refreshSelectionDetails();
             refreshListRowStates(modelList);
+          });
+  connect(localModelBackendCombo,
+          qOverload<int>(&QComboBox::currentIndexChanged), this,
+          [=](int) {
+            if (!localModelBackendCombo)
+              return;
+            const QString modelName =
+                selectedModelName(modelList ? modelList->currentItem() : nullptr);
+            if (modelName.isEmpty())
+              return;
+            const QString backendKey =
+                localModelBackendCombo->currentData().toString();
+            if (backendKey.isEmpty())
+              return;
+            setLocalModelSelectedBackendKey(modelName, backendKey);
+            refreshDashboardModelStatuses();
+            refreshSelectionDetails();
+            emit settingChanged("refreshModels", 0);
           });
   connect(cloudModelList, &QListWidget::itemChanged, this,
           [=](QListWidgetItem *item) {
@@ -2251,6 +4650,39 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   gLayout->addWidget(soundCheck);
   gLayout->addWidget(setupWizardBtn);
 
+  // Wakeword Activation Mode Section
+  QGroupBox *wakeModeGroup = new QGroupBox("Wakeword Activation Mode");
+  wakeModeGroup->setStyleSheet(
+      "QGroupBox { border: 1px solid #333; border-radius: 6px; margin-top: "
+      "18px; padding: 14px 8px 8px 8px; font-weight: bold; }"
+      "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 "
+      "4px; }");
+  QHBoxLayout *wmLayout = new QHBoxLayout(wakeModeGroup);
+  wmLayout->setContentsMargins(10, 16, 10, 10);
+  wmLayout->setSpacing(8);
+  QLabel *wmLabel = new QLabel("Wakeword Mode:");
+  wakeWordModeCombo = new QComboBox();
+  wakeWordModeCombo->addItem("Off (Default)", "Off");
+  wakeWordModeCombo->addItem("Always On", "Always On");
+  wakeWordModeCombo->addItem("On with Widget", "On with Widget");
+
+  const QString currentWmMode = s.value("wakeWordMode", "Off").toString();
+  int wmIdx = wakeWordModeCombo->findData(currentWmMode);
+  if (wmIdx >= 0)
+    wakeWordModeCombo->setCurrentIndex(wmIdx);
+
+  connect(wakeWordModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          [=](int index) {
+            QString modeStr = wakeWordModeCombo->itemData(index).toString();
+            QSettings settings("QuickSTT", "Config");
+            settings.setValue("wakeWordMode", modeStr);
+            emit settingChanged("wakeWordMode", modeStr);
+          });
+
+  wmLayout->addWidget(wmLabel);
+  wmLayout->addWidget(wakeWordModeCombo, 1);
+  gLayout->addWidget(wakeModeGroup);
+
   // Recording Management Section
   QGroupBox *recGroup = new QGroupBox("Recording Management");
   recGroup->setStyleSheet(
@@ -2355,8 +4787,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     QPainter memPainter(&memPix);
     memSvg.render(&memPainter);
     memIcon->setPixmap(memPix);
-  } else {
-    memIcon->setText("⚙");
   }
   memIcon->setFixedSize(18, 18);
   memTitleRow->addWidget(memIcon);
@@ -2374,10 +4804,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   autoOffloadCheck->setChecked(s.value("autoOffload", true).toBool());
   memLayout->addWidget(autoOffloadCheck);
 
-  // Timer row: "Offload after: [H] hours [M] min"
-  int savedTotalMin = s.value("offloadMinutes", 3).toInt();
-  int savedH = savedTotalMin / 60;
-  int savedM = savedTotalMin % 60;
+  // Timer row: "Offload after: [M] min [S] sec"
+  int savedTotalSec = 15;
+  if (s.contains("offloadSeconds")) {
+    savedTotalSec = s.value("offloadSeconds", 15).toInt();
+  } else {
+    savedTotalSec = s.value("offloadMinutes", 3).toInt() * 60;
+  }
+  int savedM = savedTotalSec / 60;
+  int savedS = savedTotalSec % 60;
 
   QHBoxLayout *offloadTimeRow = new QHBoxLayout();
   offloadTimeRow->setSpacing(6);
@@ -2385,18 +4820,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   QLabel *offloadTimeLbl = new QLabel("Offload after:");
   offloadTimeLbl->setStyleSheet("font-size: 12px; color: #AAA;");
   offloadTimeRow->addWidget(offloadTimeLbl);
-
-  // Hours input
-  QLineEdit *offloadHoursEdit = new QLineEdit();
-  offloadHoursEdit->setValidator(new QIntValidator(0, 12, offloadHoursEdit));
-  offloadHoursEdit->setText(QString::number(savedH));
-  offloadHoursEdit->setFixedWidth(42);
-  offloadHoursEdit->setAlignment(Qt::AlignCenter);
-  offloadHoursEdit->setEnabled(autoOffloadCheck->isChecked());
-  offloadTimeRow->addWidget(offloadHoursEdit);
-  QLabel *hrLabel = new QLabel("hr");
-  hrLabel->setStyleSheet("font-size: 12px; color: #AAA;");
-  offloadTimeRow->addWidget(hrLabel);
 
   // Minutes input
   QLineEdit *offloadMinEdit = new QLineEdit();
@@ -2410,22 +4833,34 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   minLabel->setStyleSheet("font-size: 12px; color: #AAA;");
   offloadTimeRow->addWidget(minLabel);
 
+  // Seconds input
+  QLineEdit *offloadSecEdit = new QLineEdit();
+  offloadSecEdit->setValidator(new QIntValidator(0, 59, offloadSecEdit));
+  offloadSecEdit->setText(QString::number(savedS));
+  offloadSecEdit->setFixedWidth(42);
+  offloadSecEdit->setAlignment(Qt::AlignCenter);
+  offloadSecEdit->setEnabled(autoOffloadCheck->isChecked());
+  offloadTimeRow->addWidget(offloadSecEdit);
+  QLabel *secLabel = new QLabel("sec");
+  secLabel->setStyleSheet("font-size: 12px; color: #AAA;");
+  offloadTimeRow->addWidget(secLabel);
+
   // Summary label
   QLabel *offloadSummary = new QLabel();
   offloadSummary->setStyleSheet(
       "font-size: 11px; color: #888; padding-left: 6px;");
   auto updateSummary = [=]() {
-    int h = offloadHoursEdit->text().toInt();
     int m = offloadMinEdit->text().toInt();
-    int total = h * 60 + m;
+    int sec = offloadSecEdit->text().toInt();
+    int total = m * 60 + sec;
     if (total == 0)
       offloadSummary->setText("(instant)");
-    else if (h == 0)
-      offloadSummary->setText(QString("(%1 min)").arg(m));
     else if (m == 0)
-      offloadSummary->setText(QString("(%1 hr)").arg(h));
+      offloadSummary->setText(QString("(%1 sec)").arg(sec));
+    else if (sec == 0)
+      offloadSummary->setText(QString("(%1 min)").arg(m));
     else
-      offloadSummary->setText(QString("(%1h %2m)").arg(h).arg(m));
+      offloadSummary->setText(QString("(%1m %2s)").arg(m).arg(sec));
   };
   updateSummary();
   offloadTimeRow->addWidget(offloadSummary);
@@ -2442,30 +4877,181 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   offloadWarning->setVisible(!autoOffloadCheck->isChecked());
   memLayout->addWidget(offloadWarning);
 
+  // ── Inactivity Auto-Stop Section ──
+  QGroupBox *inactivityGroup = new QGroupBox("Inactivity Auto-Stop (Main Widget)");
+  inactivityGroup->setStyleSheet(
+      "QGroupBox { border: 1px solid #333; border-radius: 6px; margin-top: 10px; padding-top: 14px; } "
+      "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #AAA; font-size: 11px; }");
+  QVBoxLayout *inactLayout = new QVBoxLayout(inactivityGroup);
+  inactLayout->setContentsMargins(12, 8, 12, 10);
+  inactLayout->setSpacing(6);
+
+  QCheckBox *inactCheck = new SelectableCheckBox("Auto-stop transcription on inactivity (silence)");
+  inactCheck->setStyleSheet("font-size: 12px; color: #CCC; padding: 2px 0;");
+  inactCheck->setChecked(s.value("autoStopInactivity", false).toBool());
+  inactLayout->addWidget(inactCheck);
+
+  QHBoxLayout *inactTimeRow = new QHBoxLayout();
+  QLabel *inactTimeLbl = new QLabel("Stop after silence:");
+  inactTimeLbl->setStyleSheet("font-size: 12px; color: #AAA;");
+  inactTimeRow->addWidget(inactTimeLbl);
+
+  QSpinBox *inactSecSpin = new QSpinBox();
+  inactSecSpin->setRange(1, 300);
+  inactSecSpin->setValue(s.value("inactivityStopSeconds", 8).toInt());
+  inactSecSpin->setFixedWidth(65);
+  inactSecSpin->setSuffix(" sec");
+  inactSecSpin->setStyleSheet(
+      "QSpinBox { background: #2A2A2E; color: #DDD; border: 1px solid #444; border-radius: 4px; padding: 2px 6px; font-size: 12px; }");
+  inactSecSpin->setEnabled(inactCheck->isChecked());
+  inactTimeRow->addWidget(inactSecSpin);
+  inactTimeRow->addStretch();
+  inactLayout->addLayout(inactTimeRow);
+
+  QLabel *inactDesc = new QLabel(
+      "<span style='color:#999;font-size:11px;'>When enabled, recording automatically completes after the specified silence duration. Uncheck to keep microphone recording continuously until manually stopped.</span>");
+  inactDesc->setWordWrap(true);
+  inactLayout->addWidget(inactDesc);
+
+  connect(inactCheck, &QCheckBox::toggled, [=](bool checked) {
+    QSettings s("QuickSTT", "Config");
+    s.setValue("autoStopInactivity", checked);
+    inactSecSpin->setEnabled(checked);
+    emit settingChanged("autoStopInactivity", checked);
+  });
+  connect(inactSecSpin, QOverload<int>::of(&QSpinBox::valueChanged), [=](int val) {
+    QSettings s("QuickSTT", "Config");
+    s.setValue("inactivityStopSeconds", val);
+    emit settingChanged("inactivityStopSeconds", val);
+  });
+
+  gLayout->addWidget(inactivityGroup);
   gLayout->addWidget(memGroup);
 
-  // Lambda to save total minutes
+  // Lambda to save total seconds
   auto saveOffloadTime = [=]() {
-    int total = offloadHoursEdit->text().toInt() * 60 + offloadMinEdit->text().toInt();
+    int total = offloadMinEdit->text().toInt() * 60 + offloadSecEdit->text().toInt();
     QSettings s("QuickSTT", "Config");
-    s.setValue("offloadMinutes", total);
-    emit settingChanged("offloadMinutes", total);
+    s.setValue("offloadSeconds", total);
+    emit settingChanged("offloadSeconds", total);
     updateSummary();
   };
 
   connect(autoOffloadCheck, &QCheckBox::toggled, [=](bool checked) {
     QSettings s("QuickSTT", "Config");
     s.setValue("autoOffload", checked);
-    offloadHoursEdit->setEnabled(checked);
     offloadMinEdit->setEnabled(checked);
+    offloadSecEdit->setEnabled(checked);
     offloadWarning->setVisible(!checked);
     emit settingChanged("autoOffload", checked);
   });
 
-  connect(offloadHoursEdit, &QLineEdit::textEdited,
-          [=](const QString &) { saveOffloadTime(); });
   connect(offloadMinEdit, &QLineEdit::textEdited,
           [=](const QString &) { saveOffloadTime(); });
+  connect(offloadSecEdit, &QLineEdit::textEdited,
+          [=](const QString &) { saveOffloadTime(); });
+
+  // ── Ctrl+Space Quick Transcription (Handy-style popup) ──
+  QGroupBox *hotkeyGroup = new QGroupBox();
+  hotkeyGroup->setStyleSheet(
+      "QGroupBox { border: 1px solid #333; border-radius: 8px; "
+      "margin-top: 10px; padding-top: 14px; } "
+      "QGroupBox::title { subcontrol-origin: margin; left: 10px; "
+      "padding: 0 4px; color: #AAA; font-size: 11px; }");
+  QVBoxLayout *hotkeyLayout = new QVBoxLayout(hotkeyGroup);
+  hotkeyLayout->setContentsMargins(12, 8, 12, 10);
+  hotkeyLayout->setSpacing(6);
+
+  QHBoxLayout *hkTitleRow = new QHBoxLayout();
+  QLabel *hkTitle = new QLabel("Quick Transcription (Ctrl+Space)");
+  hkTitle->setStyleSheet(
+      "font-size: 13px; font-weight: bold; color: #DDD; padding: 0;");
+  hkTitleRow->addWidget(hkTitle);
+  hkTitleRow->addStretch();
+  hotkeyLayout->addLayout(hkTitleRow);
+
+  QCheckBox *ctrlSpaceCheck = new SelectableCheckBox(
+      "Enable Ctrl+Space quick transcription overlay");
+  ctrlSpaceCheck->setStyleSheet("font-size: 12px; color: #CCC; padding: 2px 0;");
+  ctrlSpaceCheck->setChecked(s.value("ctrlSpaceEnabled", true).toBool());
+  hotkeyLayout->addWidget(ctrlSpaceCheck);
+
+  QCheckBox *alwaysOnPillCheck = new SelectableCheckBox(
+      "Always-on floating micro pill (docked on desktop)");
+  alwaysOnPillCheck->setStyleSheet("font-size: 12px; color: #CCC; padding: 2px 0;");
+  alwaysOnPillCheck->setChecked(s.value("alwaysOnPill", true).toBool());
+  hotkeyLayout->addWidget(alwaysOnPillCheck);
+
+  // Activation mode: Push-to-Talk vs Toggle
+  QHBoxLayout *modeRow = new QHBoxLayout();
+  QLabel *modeLbl = new QLabel("Activation mode:");
+  modeLbl->setStyleSheet("font-size: 12px; color: #AAA;");
+  modeRow->addWidget(modeLbl);
+  QComboBox *activationModeCombo = new QComboBox();
+  activationModeCombo->addItems({"Push-to-Talk (hold key)", "Toggle (press on/off)"});
+  activationModeCombo->setCurrentIndex(s.value("ctrlSpaceMode", 0).toInt());
+  activationModeCombo->setFixedWidth(180);
+  activationModeCombo->setStyleSheet(
+      "QComboBox { background: #2A2A2E; color: #DDD; border: 1px solid #444; "
+      "border-radius: 4px; padding: 3px 8px; font-size: 12px; } "
+      "QComboBox::drop-down { border: none; } "
+      "QComboBox QAbstractItemView { background: #2A2A2E; color: #DDD; "
+      "selection-background-color: #3898FF; }");
+  modeRow->addWidget(activationModeCombo);
+  modeRow->addStretch();
+  hotkeyLayout->addLayout(modeRow);
+
+  // Output mode: Type / Clipboard / None
+  QHBoxLayout *outputRow = new QHBoxLayout();
+  QLabel *outputLbl = new QLabel("Output:");
+  outputLbl->setStyleSheet("font-size: 12px; color: #AAA;");
+  outputRow->addWidget(outputLbl);
+  QComboBox *outputModeCombo = new QComboBox();
+  outputModeCombo->addItems({"Type into active text box", "Copy to clipboard", "None (show only)"});
+  outputModeCombo->setCurrentIndex(s.value("ctrlSpaceOutput", 0).toInt());
+  outputModeCombo->setFixedWidth(180);
+  outputModeCombo->setStyleSheet(
+      "QComboBox { background: #2A2A2E; color: #DDD; border: 1px solid #444; "
+      "border-radius: 4px; padding: 3px 8px; font-size: 12px; } "
+      "QComboBox::drop-down { border: none; } "
+      "QComboBox QAbstractItemView { background: #2A2A2E; color: #DDD; "
+      "selection-background-color: #3898FF; }");
+  outputRow->addWidget(outputModeCombo);
+  outputRow->addStretch();
+  hotkeyLayout->addLayout(outputRow);
+
+  QLabel *hkDesc = new QLabel(
+      "<span style='color:#999;font-size:11px;'>Hold Ctrl+Space to record (push-to-talk) "
+      "or press once to start/stop (toggle). Transcribed text is typed into the active "
+      "text box, copied to clipboard, or both depending on output setting.</span>");
+  hkDesc->setWordWrap(true);
+  hotkeyLayout->addWidget(hkDesc);
+
+  connect(ctrlSpaceCheck, &QCheckBox::toggled, [=](bool checked) {
+    QSettings s("QuickSTT", "Config");
+    s.setValue("ctrlSpaceEnabled", checked);
+    emit settingChanged("ctrlSpaceEnabled", checked);
+  });
+
+  connect(alwaysOnPillCheck, &QCheckBox::toggled, [=](bool checked) {
+    QSettings s("QuickSTT", "Config");
+    s.setValue("alwaysOnPill", checked);
+    emit settingChanged("alwaysOnPill", checked);
+  });
+
+  connect(activationModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [=](int idx) {
+    QSettings s("QuickSTT", "Config");
+    s.setValue("ctrlSpaceMode", idx);
+    emit settingChanged("ctrlSpaceMode", idx);
+  });
+
+  connect(outputModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [=](int idx) {
+    QSettings s("QuickSTT", "Config");
+    s.setValue("ctrlSpaceOutput", idx);
+    emit settingChanged("ctrlSpaceOutput", idx);
+  });
+
+  gLayout->addWidget(hotkeyGroup);
 
   gLayout->addStretch();
   tabs->addTab(makeScrollablePage(genTab), "General");
@@ -2830,11 +5416,431 @@ void MainWindow::setSmartLifeManager(SmartLifeManager *manager) {
             refreshSmartLifeUi();
           });
   connect(smartLifeManager, &SmartLifeManager::controlFinished, this,
-          [this](const QString &) { refreshSmartLifeUi(); });
+          [this](const QString &) {
+            refreshSmartLifeTreeDeviceRows();
+            refreshSmartLifeDeviceInspector();
+            refreshSmartLifeUi();
+          });
   connect(smartLifeManager, &SmartLifeManager::controlFailed, this,
-          [this](const QString &) { refreshSmartLifeUi(); });
+          [this](const QString &message) {
+            const QString text = message.trimmed();
+            if (smartLifeStatusLabel && !text.isEmpty())
+              smartLifeStatusLabel->setText(text);
+            if (smartLifeDeviceInspectorWidget && !text.isEmpty()) {
+              auto *inspector =
+                  smartHomeInspectorWidget(smartLifeDeviceInspectorWidget);
+              if (inspector)
+                inspector->showControlError(text);
+            }
+            refreshSmartLifeUi();
+          });
+  connect(smartLifeManager, &SmartLifeManager::deviceStateChanged, this,
+          [this](const QString &deviceId) {
+            refreshSmartLifeTreeDeviceRows();
+            if (smartLifeDeviceInspectorWidget)
+              smartHomeInspectorWidget(smartLifeDeviceInspectorWidget)
+                  ->refreshIfShowing(deviceId);
+          });
+
+  if (smartLifeDeviceInspectorWidget) {
+    smartHomeInspectorWidget(smartLifeDeviceInspectorWidget)
+        ->setContext(smartLifeManager, qtAwesome, this);
+  }
 
   refreshSmartLifeUi();
+  attemptAutoReconnectSmartHome();
+}
+
+void MainWindow::setHomeAssistantManager(HomeAssistantManager *manager) {
+  if (homeAssistantManager == manager)
+    return;
+
+  if (homeAssistantManager)
+    disconnect(homeAssistantManager, nullptr, this, nullptr);
+
+  homeAssistantManager = manager;
+  if (!homeAssistantManager)
+    return;
+
+  connect(homeAssistantManager, &HomeAssistantManager::connectionStatusChanged,
+          this, [this](bool connected, const QString &statusText) {
+            if (haStatusLabel)
+              haStatusLabel->setText(statusText);
+            Q_UNUSED(connected);
+          });
+
+  connect(homeAssistantManager, &HomeAssistantManager::entitiesSynced,
+          this, [this](int count) {
+            if (!haEntityList)
+              return;
+            haEntityList->clear();
+            const auto entities = homeAssistantManager->entities();
+            for (const HaEntity &entity : entities) {
+              const QString label = QStringLiteral("%1  [%2]  %3")
+                                        .arg(entity.friendlyName,
+                                             entity.domain,
+                                             entity.state);
+              haEntityList->addItem(label);
+            }
+            Q_UNUSED(count);
+          });
+
+  connect(homeAssistantManager, &HomeAssistantManager::errorOccurred,
+          this, [this](const QString &errorText) {
+            if (haStatusLabel)
+              haStatusLabel->setText(QStringLiteral("Error: %1").arg(errorText));
+          });
+
+  // Auto-connect on startup if token is saved
+  QSettings s("QuickSTT", "Config");
+  const QString haUrl = s.value("ha/url").toString().trimmed();
+  const QString haToken = loadProtectedSetting(s, QStringLiteral("ha/token")).trimmed();
+  if (!haUrl.isEmpty() && !haToken.isEmpty()) {
+    HomeAssistantManager::Config cfg;
+    cfg.baseUrl = haUrl;
+    cfg.token = haToken;
+    cfg.enabled = true;
+    homeAssistantManager->setConfig(cfg);
+    homeAssistantManager->connectAndSync();
+  }
+}
+
+void MainWindow::setOptionalServiceManager(OptionalServiceManager *manager) {
+  if (optionalServiceManager == manager)
+    return;
+
+  if (optionalServiceManager)
+    disconnect(optionalServiceManager, nullptr, this, nullptr);
+
+  optionalServiceManager = manager;
+  if (!optionalServiceManager) {
+    refreshSmartLifeUi();
+    refreshAndroidTvUi();
+    return;
+  }
+
+  connect(optionalServiceManager, &OptionalServiceManager::statusMessage, this,
+          [this](const QString &statusText) {
+            if (optionalServiceManager &&
+                optionalServiceManager->activeService() ==
+                    QStringLiteral("android_tv_remote")) {
+              m_androidTvServiceMessage = statusText.trimmed();
+            }
+            refreshSmartLifeUi();
+            refreshAndroidTvUi();
+          });
+  connect(optionalServiceManager, &OptionalServiceManager::busyChanged, this,
+          [this](bool busy) {
+            if (!busy && optionalServiceManager &&
+                optionalServiceManager->activeService() ==
+                    QStringLiteral("android_tv_remote") &&
+                m_androidTvServiceMessage.trimmed().isEmpty()) {
+              m_androidTvServiceMessage =
+                  isOptionalServiceInstalled(QStringLiteral("android_tv_remote"))
+                      ? QStringLiteral("Android TV support is ready on this device.")
+                      : QStringLiteral(
+                            "Android TV support is not installed on this device.");
+            }
+            refreshSmartLifeUi();
+            refreshAndroidTvUi();
+            if (!busy) {
+              QTimer::singleShot(250, this, [this]() {
+                attemptAutoReconnectSmartHome();
+                attemptAutoReconnectAndroidTv();
+              });
+            }
+          });
+  connect(optionalServiceManager, &OptionalServiceManager::catalogChanged, this,
+          [this]() {
+            refreshSmartLifeUi();
+            refreshAndroidTvUi();
+            QTimer::singleShot(250, this, [this]() {
+              attemptAutoReconnectSmartHome();
+              attemptAutoReconnectAndroidTv();
+            });
+          });
+  connect(optionalServiceManager, &OptionalServiceManager::serviceInstalled, this,
+          [this](const QString &serviceId) {
+            if (serviceId == QStringLiteral("android_tv_remote")) {
+              m_androidTvServiceMessage =
+                  QStringLiteral("Android TV support is installed and ready.");
+              m_androidTvAutoReconnectAttempted = false;
+              m_androidTvInitialScanDone = false;
+            }
+            refreshSmartLifeUi();
+            refreshAndroidTvUi();
+          });
+  connect(optionalServiceManager, &OptionalServiceManager::serviceUninstalled, this,
+          [this](const QString &serviceId) {
+            if (serviceId == QStringLiteral("android_tv_remote")) {
+              m_androidTvServiceMessage =
+                  QStringLiteral("Android TV support was removed from this device.");
+              m_androidTvDiscoveredDevices = QJsonArray();
+              m_androidTvVisibleDiscoveredDevices = QJsonArray();
+            }
+            refreshSmartLifeUi();
+            refreshAndroidTvUi();
+          });
+  connect(optionalServiceManager, &OptionalServiceManager::operationFailed, this,
+          [this](const QString &serviceId, const QString &errorText) {
+            refreshSmartLifeUi();
+            refreshAndroidTvUi();
+            if (serviceId == QStringLiteral("smart_life")) {
+              if (smartLifeStatusLabel)
+                smartLifeStatusLabel->setText(errorText);
+              return;
+            }
+            if (serviceId == QStringLiteral("android_tv_remote")) {
+              m_androidTvServiceMessage = errorText.trimmed();
+              refreshAndroidTvUi();
+              return;
+            }
+            QMessageBox::warning(this, "Optional Service", errorText);
+          });
+
+  refreshSmartLifeUi();
+  refreshAndroidTvUi();
+  attemptAutoReconnectSmartHome();
+  attemptAutoReconnectAndroidTv();
+}
+
+void MainWindow::setAndroidTvManager(AndroidTvManager *manager) {
+  if (androidTvManager == manager)
+    return;
+
+  if (androidTvManager)
+    disconnect(androidTvManager, nullptr, this, nullptr);
+
+  androidTvManager = manager;
+  if (!androidTvManager) {
+    refreshAndroidTvProfileList();
+    refreshAndroidTvUi();
+    return;
+  }
+
+  connect(androidTvManager, &AndroidTvManager::statusChanged, this,
+          [this](const QString &) { refreshAndroidTvUi(); });
+  connect(androidTvManager, &AndroidTvManager::stateChanged, this,
+          [this](const QJsonObject &) { refreshAndroidTvUi(); });
+  connect(androidTvManager, &AndroidTvManager::connectionChanged, this,
+          [this](bool connected) {
+            if (connected)
+              rememberCurrentAndroidTvProfileIfNeeded();
+            if (connected)
+              m_androidTvServiceMessage.clear();
+            refreshAndroidTvUi();
+            if (connected) {
+              QTimer::singleShot(220, this, [this]() {
+                if (androidTvManager && androidTvManager->isConnected())
+                  androidTvManager->refreshState();
+              });
+              QTimer::singleShot(900, this, [this]() {
+                if (androidTvManager && androidTvManager->isConnected())
+                  androidTvManager->refreshState();
+              });
+              QTimer::singleShot(0, this, [this]() {
+                if (androidTvControlsGroupBox)
+                  androidTvControlsGroupBox->show();
+                QObject *parent = androidTvControlsGroupBox;
+                while (parent) {
+                  if (auto *scrollArea = qobject_cast<QScrollArea *>(parent)) {
+                    scrollArea->ensureWidgetVisible(androidTvControlsGroupBox, 0, 24);
+                    break;
+                  }
+                  parent = parent->parent();
+                }
+              });
+            }
+          });
+  connect(androidTvManager, &AndroidTvManager::controlFinished, this,
+          [this](const QString &) {
+            refreshAndroidTvUi();
+            QTimer::singleShot(280, this, [this]() {
+              if (androidTvManager && androidTvManager->isConnected())
+                androidTvManager->refreshState();
+            });
+          });
+  connect(androidTvManager, &AndroidTvManager::controlFailed, this,
+          [this](const QString &) { refreshAndroidTvUi(); });
+  connect(androidTvManager, &AndroidTvManager::discoveryChanged, this,
+          [this](const QJsonArray &devices) {
+            m_androidTvDiscoveredDevices = devices;
+            reconcileRememberedAndroidTvProfilesWithDiscovery();
+            refreshAndroidTvDiscoveryList();
+            refreshAndroidTvUi();
+            if (androidTvManager &&
+                !androidTvManager->isConnected() &&
+                androidTvManager->currentConfigHasPairedCredentials() &&
+                (!optionalServiceManager || !optionalServiceManager->isBusy()) &&
+                isOptionalServiceInstalled(QStringLiteral("android_tv_remote"))) {
+              QTimer::singleShot(180, this, [this]() {
+                if (androidTvManager &&
+                    !androidTvManager->isConnected() &&
+                    androidTvManager->currentConfigHasPairedCredentials() &&
+                    (!optionalServiceManager || !optionalServiceManager->isBusy()) &&
+                    isOptionalServiceInstalled(
+                        QStringLiteral("android_tv_remote"))) {
+                  androidTvManager->connectDevice();
+                }
+              });
+            }
+          });
+  connect(androidTvManager, &AndroidTvManager::pairingCodeRequested, this,
+          [this](const QString &promptText) {
+            if (!androidTvPairCodeEdit)
+              return;
+            const QString currentValue = androidTvPairCodeEdit->text().trimmed();
+            if (m_androidTvPairingDialog) {
+              m_androidTvPairingDialog->setLabelText(promptText);
+              m_androidTvPairingDialog->setTextValue(currentValue);
+              m_androidTvPairingDialog->show();
+              m_androidTvPairingDialog->raise();
+              m_androidTvPairingDialog->activateWindow();
+              return;
+            }
+
+            auto *dialog = new QInputDialog(this);
+            dialog->setAttribute(Qt::WA_DeleteOnClose);
+            dialog->setWindowTitle(QStringLiteral("Android TV Pairing Code"));
+            dialog->setLabelText(promptText);
+            dialog->setInputMode(QInputDialog::TextInput);
+            dialog->setTextEchoMode(QLineEdit::Normal);
+            dialog->setTextValue(currentValue);
+            dialog->setOkButtonText(QStringLiteral("Pair"));
+            dialog->setCancelButtonText(QStringLiteral("Cancel"));
+            dialog->setModal(false);
+            dialog->setWindowModality(Qt::NonModal);
+            m_androidTvPairingDialog = dialog;
+
+            connect(dialog, &QObject::destroyed, this,
+                    [this]() { m_androidTvPairingDialog = nullptr; });
+            connect(dialog, &QInputDialog::textValueSelected, this,
+                    [this](const QString &code) {
+                      if (!androidTvPairCodeEdit)
+                        return;
+                      const QString trimmed = code.trimmed().toUpper();
+                      if (trimmed.isEmpty())
+                        return;
+                      androidTvPairCodeEdit->setText(trimmed);
+                      persistActiveAndroidTvSettings();
+                      if (androidTvManager)
+                        androidTvManager->finishPairing();
+                    });
+            dialog->open();
+            dialog->raise();
+            dialog->activateWindow();
+          });
+
+  refreshAndroidTvDiscoveryList();
+  refreshAndroidTvProfileList();
+  refreshAndroidTvUi();
+  attemptAutoReconnectAndroidTv();
+}
+
+void MainWindow::attemptAutoReconnectSmartHome() {
+  if (m_smartHomeAutoReconnectAttempted || !smartLifeManager ||
+      !optionalServiceManager ||
+      !isOptionalServiceInstalled(QStringLiteral("smart_life"))) {
+    return;
+  }
+
+  const QString accessId =
+      smartLifeAccessIdEdit ? smartLifeAccessIdEdit->text().trimmed() : QString();
+  const QString accessKey =
+      smartLifeAccessKeyEdit ? smartLifeAccessKeyEdit->text().trimmed() : QString();
+  const QString mode = smartLifeAccountModeCombo
+                           ? smartLifeAccountModeCombo->currentData().toString()
+                           : QStringLiteral("smartlife");
+  if (accessId.isEmpty() || accessKey.isEmpty())
+    return;
+
+  if (mode == QLatin1String("smartlife")) {
+    const QString username =
+        smartLifeUsernameEdit ? smartLifeUsernameEdit->text().trimmed() : QString();
+    const QString password =
+        smartLifePasswordEdit ? smartLifePasswordEdit->text().trimmed() : QString();
+    if (username.isEmpty() || password.isEmpty())
+      return;
+  } else {
+    const QString uid =
+        smartLifeDeveloperUidEdit ? smartLifeDeveloperUidEdit->text().trimmed()
+                                  : QString();
+    const QString homeIds = smartLifeDeveloperHomeIdsEdit
+                                ? smartLifeDeveloperHomeIdsEdit->toPlainText().trimmed()
+                                : QString();
+    if (uid.isEmpty() && homeIds.isEmpty())
+      return;
+  }
+
+  m_smartHomeAutoReconnectAttempted = true;
+  qInfo() << "[SMARTHOME] Auto reconnect armed";
+  auto reconnectAttempt = std::make_shared<std::function<void(int)>>();
+  *reconnectAttempt = [this, reconnectAttempt](int remaining) {
+    if (!smartLifeManager || smartLifeManager->isConnected())
+      return;
+    const QString status = smartLifeManager->statusText().toLower();
+    if (status.contains(QStringLiteral("[28841107]")) ||
+        status.contains(QStringLiteral("data center is suspended")) ||
+        status.contains(QStringLiteral("[1004]")) ||
+        status.contains(QStringLiteral("sign invalid")) ||
+        status.contains(QStringLiteral("[1106] permission deny"))) {
+      qInfo() << "[SMARTHOME] Auto reconnect stopped because the current SmartHome error needs user action:"
+              << smartLifeManager->statusText();
+      return;
+    }
+    qInfo() << "[SMARTHOME] Auto reconnect attempt" << (4 - remaining)
+            << "remaining" << remaining;
+    smartLifeManager->connectAndSync();
+    if (remaining > 1) {
+      QTimer::singleShot(6500, this, [reconnectAttempt, remaining]() {
+        (*reconnectAttempt)(remaining - 1);
+      });
+    }
+  };
+  QTimer::singleShot(1200, this, [reconnectAttempt]() { (*reconnectAttempt)(3); });
+}
+
+void MainWindow::attemptAutoReconnectAndroidTv() {
+  if (m_androidTvAutoReconnectAttempted || !androidTvManager ||
+      !optionalServiceManager || optionalServiceManager->isBusy() ||
+      !isOptionalServiceInstalled(QStringLiteral("android_tv_remote"))) {
+    return;
+  }
+
+  if (!androidTvManager->isConfigured() ||
+      !androidTvManager->currentConfigHasPairedCredentials()) {
+    refreshAndroidTvProfileList();
+  }
+  if (!androidTvManager->isConfigured() ||
+      !androidTvManager->currentConfigHasPairedCredentials()) {
+    return;
+  }
+
+  m_androidTvAutoReconnectAttempted = true;
+  auto reconnectAttempt = std::make_shared<std::function<void(int)>>();
+  *reconnectAttempt = [this, reconnectAttempt](int remaining) {
+    if (!androidTvManager || androidTvManager->isConnected() ||
+        !isOptionalServiceInstalled(QStringLiteral("android_tv_remote"))) {
+      return;
+    }
+    if (!androidTvManager->isConfigured() ||
+        !androidTvManager->currentConfigHasPairedCredentials()) {
+      refreshAndroidTvProfileList();
+    }
+    if (!androidTvManager->isConfigured() ||
+        !androidTvManager->currentConfigHasPairedCredentials()) {
+      return;
+    }
+    qInfo() << "[ANDROIDTV] Auto reconnect attempt" << (4 - remaining)
+            << "remaining" << remaining;
+    androidTvManager->connectDevice();
+    if (remaining > 1) {
+      QTimer::singleShot(4200, this, [reconnectAttempt, remaining]() {
+        (*reconnectAttempt)(remaining - 1);
+      });
+    }
+  };
+  QTimer::singleShot(1500, this, [reconnectAttempt]() { (*reconnectAttempt)(3); });
 }
 
 QStringList MainWindow::selectedSmartLifeDeviceIds() const {
@@ -2894,8 +5900,9 @@ void MainWindow::rebuildSmartLifeDeviceTree() {
   if (!smartLifeDeviceTree)
     return;
 
+  const QSignalBlocker blocker(smartLifeDeviceTree);
   smartLifeDeviceTree->clear();
-  if (!smartLifeManager) {
+  if (!isOptionalServiceInstalled(QStringLiteral("smart_life")) || !smartLifeManager) {
     applySmartLifeSearchFilter();
     return;
   }
@@ -2913,6 +5920,10 @@ void MainWindow::rebuildSmartLifeDeviceTree() {
         0, home.name.isEmpty() ? QStringLiteral("Home %1").arg(home.id) : home.name);
     homeItem->setData(0, kSmartLifeNodeTypeRole, "home");
     homeItem->setData(0, kSmartLifeNodeIdRole, home.id);
+    homeItem->setToolTip(
+        0, QStringLiteral("Home: %1\nID: %2")
+               .arg(home.name.isEmpty() ? QStringLiteral("Unnamed Home") : home.name,
+                    home.id));
     homeItem->setExpanded(true);
     homeItems.insert(home.id, homeItem);
   }
@@ -2925,6 +5936,11 @@ void MainWindow::rebuildSmartLifeDeviceTree() {
     roomItem->setText(0, room.name.isEmpty() ? QStringLiteral("Unnamed Room") : room.name);
     roomItem->setData(0, kSmartLifeNodeTypeRole, "room");
     roomItem->setData(0, kSmartLifeNodeIdRole, room.id);
+    roomItem->setToolTip(
+        0, QStringLiteral("Room: %1\nHome: %2\nID: %3")
+               .arg(room.name.isEmpty() ? QStringLiteral("Unnamed Room") : room.name,
+                    homeItem->text(0),
+                    room.id));
     roomItem->setExpanded(true);
     roomItems.insert(room.id, roomItem);
   }
@@ -2950,36 +5966,402 @@ void MainWindow::rebuildSmartLifeDeviceTree() {
     if (!parentItem)
       parentItem = smartLifeDeviceTree->invisibleRootItem();
 
-    QString text = device.name;
-    if (text.isEmpty())
-      text = device.id;
-    if (!device.online)
-      text += " [Offline]";
-    else if (device.powerOn)
-      text += " [On]";
-    else
-      text += " [Off]";
-    if (device.likelyLighting)
-      text += " [Light]";
+    const QString text = smartLifeManager->deviceDisplayName(device.id);
 
     auto *deviceItem = new QTreeWidgetItem(parentItem);
     deviceItem->setText(0, text);
     deviceItem->setData(0, kSmartLifeNodeTypeRole, "device");
     deviceItem->setData(0, kSmartLifeNodeIdRole, device.id);
     deviceItem->setToolTip(0, smartLifeManager->deviceDetailText(device.id));
+    deviceItem->setForeground(
+        0, !device.online ? QColor(QStringLiteral("#7B828A"))
+                          : (device.powerOn ? QColor(QStringLiteral("#FFE7A7"))
+                                            : QColor(QStringLiteral("#E4E7EB"))));
+
+    auto *row = new SmartHomeTreeDeviceRow(smartLifeDeviceTree);
+    row->setToolTip(deviceItem->toolTip(0));
+    row->nameLabel()->setText(text);
+    row->nameLabel()->setToolTip(deviceItem->toolTip(0));
+
+    QStringList metaParts;
+    if (!device.roomId.isEmpty()) {
+      const auto roomIt =
+          std::find_if(rooms.begin(), rooms.end(), [&](const SmartLifeRoomInfo &room) {
+            return room.id == device.roomId;
+          });
+      if (roomIt != rooms.end() && !roomIt->name.isEmpty())
+        metaParts << roomIt->name;
+    }
+    if (!device.homeId.isEmpty()) {
+      const auto homeIt =
+          std::find_if(homes.begin(), homes.end(), [&](const SmartLifeHomeInfo &home) {
+            return home.id == device.homeId;
+          });
+      if (homeIt != homes.end() && !homeIt->name.isEmpty())
+        metaParts << homeIt->name;
+    }
+    metaParts << (device.online ? QStringLiteral("Online")
+                                : QStringLiteral("Offline"));
+    if (device.controllable)
+      metaParts << (device.powerOn ? QStringLiteral("On")
+                                   : QStringLiteral("Off"));
+    row->metaLabel()->setText(metaParts.join(QStringLiteral(" · ")));
+    row->metaLabel()->setToolTip(deviceItem->toolTip(0));
+
+    if (qtAwesome) {
+      QVariantMap iconOptions;
+      const bool isLightLike = device.likelyLighting;
+      const QColor iconColor =
+          !device.online ? QColor(QStringLiteral("#68707A"))
+                         : (device.powerOn
+                                ? (isLightLike ? QColor(QStringLiteral("#F4C24E"))
+                                               : QColor(QStringLiteral("#7FD1FF")))
+                                : QColor(QStringLiteral("#7A828C")));
+      iconOptions.insert(QStringLiteral("color"), iconColor);
+      iconOptions.insert(QStringLiteral("scale-factor"), 0.85);
+      const QString iconName =
+          isLightLike ? QStringLiteral("solid lightbulb")
+                      : QStringLiteral("solid plug");
+      const QIcon icon = qtAwesome->icon(iconName, iconOptions);
+      row->iconLabel()->setPixmap(icon.pixmap(QSize(18, 18)));
+
+      QVariantMap renameOptions;
+      renameOptions.insert(QStringLiteral("color"), QColor(QStringLiteral("#C7CDD4")));
+      renameOptions.insert(QStringLiteral("scale-factor"), 0.8);
+      row->renameButton()->setIcon(
+          qtAwesome->icon(QStringLiteral("solid pen-to-square"), renameOptions));
+      row->renameButton()->setIconSize(QSize(16, 16));
+    }
+
+    QObject::connect(row->renameButton(), &QToolButton::clicked, this,
+                     [this, deviceId = device.id]() {
+                       if (!smartLifeManager)
+                         return;
+                       const SmartLifeDeviceInfo currentDevice =
+                           smartLifeManager->deviceById(deviceId);
+                       if (currentDevice.id.isEmpty())
+                         return;
+                       bool ok = false;
+                       const QString currentAlias =
+                           smartLifeManager->deviceAlias(deviceId);
+                       const QString rawName =
+                           currentDevice.name.isEmpty() ? currentDevice.id
+                                                        : currentDevice.name;
+                       const QString alias = QInputDialog::getText(
+                           this, QStringLiteral("Rename Light"),
+                           QStringLiteral(
+                               "Rename this light for QuickSTT.\nLeave it empty to use the original device name."),
+                           QLineEdit::Normal, currentAlias, &ok);
+                       if (!ok)
+                         return;
+                       smartLifeManager->setDeviceAlias(
+                           deviceId,
+                           alias.trimmed().compare(rawName, Qt::CaseInsensitive) == 0
+                               ? QString()
+                               : alias.trimmed());
+                       rebuildSmartLifeDeviceTree();
+                       refreshSmartLifeSelectionDetails();
+                     });
+
+    if (device.controllable) {
+      auto *toggle = new AnimatedLightToggleButton(qtAwesome, row);
+      toggle->setToolTip(device.online
+                             ? QStringLiteral("Turn %1 %2")
+                                   .arg(text.isEmpty() ? QStringLiteral("this light")
+                                                       : text,
+                                        device.powerOn ? QStringLiteral("off")
+                                                       : QStringLiteral("on"))
+                             : QStringLiteral("This light is offline right now."));
+      toggle->setVisualState(device.powerOn,
+                             device.online && device.controllable, false);
+      const QPointer<AnimatedLightToggleButton> togglePtr(toggle);
+      QObject::connect(toggle, &QToolButton::toggled, this,
+                       [this, deviceId = device.id, togglePtr](bool checked) {
+                         if (!smartLifeManager) {
+                           if (togglePtr)
+                             togglePtr->setVisualState(!checked, false, false);
+                           return;
+                         }
+                         smartLifeManager->controlDevices({deviceId}, checked);
+                       });
+      row->attachToggle(toggle);
+    } else {
+      row->renameButton()->setVisible(false);
+    }
+
+    const bool hasLightingControls =
+        smartLifeManager &&
+        smartLifeManager->deviceExposesLightingControls(device);
+    row->updateDevicePresentation(device, text, metaParts.join(QStringLiteral(" · ")),
+                                  hasLightingControls);
+
+    smartLifeDeviceTree->setItemWidget(deviceItem, 0, row);
+    deviceItem->setSizeHint(0, QSize(-1, 66));
   }
 
+  smartLifeDeviceTree->doItemsLayout();
+  smartLifeDeviceTree->viewport()->update();
   applySmartLifeSearchFilter();
   refreshSmartLifeSelectionDetails();
+  if (smartLifeDevicesSection) {
+    QTimer::singleShot(0, smartLifeDevicesSection,
+                       &CollapsibleSection::refreshExpandedHeight);
+  }
+}
+
+void MainWindow::rebuildSmartLifeQuickToggleList() {
+  if (!smartLifeQuickToggleLayout)
+    return;
+
+  while (QLayoutItem *item = smartLifeQuickToggleLayout->takeAt(0)) {
+    if (QWidget *widget = item->widget())
+      widget->deleteLater();
+    delete item;
+  }
+
+  if (!isOptionalServiceInstalled(QStringLiteral("smart_life")) || !smartLifeManager) {
+    auto *emptyLabel =
+        new SelectableTextLabel(QStringLiteral("Install SmartHome lights support to show quick light toggles here."));
+    emptyLabel->setWordWrap(true);
+    smartLifeQuickToggleLayout->addWidget(emptyLabel);
+    smartLifeQuickToggleLayout->addStretch();
+    return;
+  }
+
+  QVector<SmartLifeDeviceInfo> toggleDevices;
+  const QVector<SmartLifeDeviceInfo> allDevices = smartLifeManager->devices();
+  for (const SmartLifeDeviceInfo &device : allDevices) {
+    if (device.controllable && device.likelyLighting)
+      toggleDevices.push_back(device);
+  }
+  if (toggleDevices.isEmpty()) {
+    for (const SmartLifeDeviceInfo &device : allDevices) {
+      if (device.controllable)
+        toggleDevices.push_back(device);
+    }
+  }
+
+  if (toggleDevices.isEmpty()) {
+    auto *emptyLabel = new SelectableTextLabel(
+        QStringLiteral("Sync your SmartHome lights first. Quick toggles will appear here automatically."));
+    emptyLabel->setWordWrap(true);
+    smartLifeQuickToggleLayout->addWidget(emptyLabel);
+    smartLifeQuickToggleLayout->addStretch();
+    return;
+  }
+
+  std::sort(toggleDevices.begin(), toggleDevices.end(),
+            [](const SmartLifeDeviceInfo &left, const SmartLifeDeviceInfo &right) {
+              return left.name.toLower() < right.name.toLower();
+            });
+
+  for (const SmartLifeDeviceInfo &device : toggleDevices) {
+    auto *row = new QFrame();
+    row->setObjectName(QStringLiteral("smartHomeLightRow"));
+    row->setAttribute(Qt::WA_Hover, true);
+    row->setStyleSheet(
+        QStringLiteral(
+            "QFrame#smartHomeLightRow { background: #141414; border: 1px solid #262626; "
+            "border-radius: 16px; }"
+            "QFrame#smartHomeLightRow:hover { background: #171717; border-color: #3A3A3A; }"));
+    auto *rowLayout = new QHBoxLayout(row);
+    rowLayout->setContentsMargins(10, 6, 10, 6);
+    rowLayout->setSpacing(8);
+
+    const QString displayName = smartLifeManager->deviceDisplayName(device.id);
+    const QString detailText = smartLifeManager->deviceDetailText(device.id);
+    row->setToolTip(detailText);
+
+    auto *nameLabel = new SelectableTextLabel(displayName);
+    nameLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    nameLabel->setWordWrap(true);
+    nameLabel->setToolTip(detailText);
+
+    auto *renameBtn = new QToolButton(row);
+    renameBtn->setCursor(Qt::PointingHandCursor);
+    renameBtn->setAutoRaise(true);
+    renameBtn->setToolTip(QStringLiteral("Rename this light for QuickSTT and voice control"));
+    if (qtAwesome) {
+      QVariantMap iconOptions;
+      iconOptions.insert(QStringLiteral("color"), QColor(QStringLiteral("#C7CDD4")));
+      iconOptions.insert(QStringLiteral("scale-factor"), 0.8);
+      renameBtn->setIcon(
+          qtAwesome->icon(QStringLiteral("solid pen-to-square"), iconOptions));
+      renameBtn->setIconSize(QSize(16, 16));
+    } else {
+      renameBtn->setText(QStringLiteral("Rename"));
+    }
+    QObject::connect(renameBtn, &QToolButton::clicked, this,
+                     [this, deviceId = device.id]() {
+                       if (!smartLifeManager)
+                         return;
+                       const SmartLifeDeviceInfo currentDevice =
+                           smartLifeManager->deviceById(deviceId);
+                       if (currentDevice.id.isEmpty())
+                         return;
+                       bool ok = false;
+                       const QString currentAlias =
+                           smartLifeManager->deviceAlias(deviceId);
+                       const QString rawName =
+                           currentDevice.name.isEmpty() ? currentDevice.id
+                                                        : currentDevice.name;
+                       const QString alias = QInputDialog::getText(
+                           this, QStringLiteral("Rename Light"),
+                           QStringLiteral(
+                               "Rename this light for QuickSTT.\nLeave it empty to use the original device name."),
+                           QLineEdit::Normal, currentAlias, &ok);
+                       if (!ok)
+                         return;
+                       smartLifeManager->setDeviceAlias(
+                           deviceId,
+                           alias.trimmed().compare(rawName, Qt::CaseInsensitive) == 0
+                               ? QString()
+                               : alias.trimmed());
+                       rebuildSmartLifeDeviceTree();
+                       rebuildSmartLifeQuickToggleList();
+                       refreshSmartLifeSelectionDetails();
+                     });
+
+    auto *toggle = new AnimatedLightToggleButton(qtAwesome);
+    toggle->setToolTip(device.online
+                           ? QStringLiteral("Turn %1 %2")
+                                 .arg(displayName.isEmpty() ? QStringLiteral("this light")
+                                                            : displayName,
+                                      device.powerOn ? QStringLiteral("off")
+                                                     : QStringLiteral("on"))
+                           : QStringLiteral("This light is offline right now."));
+    toggle->setVisualState(device.powerOn, device.online && device.controllable, false);
+
+    const QPointer<AnimatedLightToggleButton> togglePtr(toggle);
+    QObject::connect(toggle, &QToolButton::toggled, this,
+                     [this, deviceId = device.id, togglePtr](bool checked) {
+                       if (!smartLifeManager) {
+                         if (togglePtr)
+                           togglePtr->setVisualState(!checked, false, false);
+                         return;
+                       }
+                       smartLifeManager->controlDevices({deviceId}, checked);
+                     });
+
+    rowLayout->addWidget(nameLabel, 1);
+    rowLayout->addWidget(renameBtn, 0, Qt::AlignRight | Qt::AlignVCenter);
+    rowLayout->addWidget(toggle, 0, Qt::AlignRight | Qt::AlignVCenter);
+    smartLifeQuickToggleLayout->addWidget(row);
+  }
+
+  smartLifeQuickToggleLayout->addStretch();
+}
+
+void MainWindow::refreshSmartLifeDeviceInspector() {
+  if (!smartLifeDeviceInspectorWidget || !smartLifeRightPane)
+    return;
+
+  if (!isOptionalServiceInstalled(QStringLiteral("smart_life")) || !smartLifeManager ||
+      smartLifeManager->devices().isEmpty()) {
+    smartLifeRightPane->setCurrentWidget(smartLifeDeviceInspectorScroll);
+    smartHomeInspectorWidget(smartLifeDeviceInspectorWidget)->clearSelection();
+    return;
+  }
+
+  const QList<QTreeWidgetItem *> selection =
+      smartLifeDeviceTree ? smartLifeDeviceTree->selectedItems()
+                          : QList<QTreeWidgetItem *>{};
+  if (selection.size() == 1 &&
+      selection.first()->data(0, kSmartLifeNodeTypeRole).toString() ==
+          QLatin1String("device")) {
+    smartLifeRightPane->setCurrentWidget(smartLifeDeviceInspectorScroll);
+    smartHomeInspectorWidget(smartLifeDeviceInspectorWidget)
+        ->showDevice(selection.first()->data(0, kSmartLifeNodeIdRole).toString());
+    return;
+  }
+
+  smartLifeRightPane->setCurrentWidget(smartLifeDeviceInspectorScroll);
+  smartHomeInspectorWidget(smartLifeDeviceInspectorWidget)->clearSelection();
+}
+
+void MainWindow::refreshSmartLifeTreeDeviceRows() {
+  if (!smartLifeDeviceTree || !smartLifeManager)
+    return;
+
+  const QVector<SmartLifeRoomInfo> rooms = smartLifeManager->rooms();
+  const QVector<SmartLifeHomeInfo> homes = smartLifeManager->homes();
+
+  std::function<void(QTreeWidgetItem *)> visit;
+  visit = [&](QTreeWidgetItem *item) {
+    if (item->data(0, kSmartLifeNodeTypeRole).toString() == QLatin1String("device")) {
+      const QString deviceId = item->data(0, kSmartLifeNodeIdRole).toString();
+      const SmartLifeDeviceInfo device = smartLifeManager->deviceById(deviceId);
+      if (device.id.isEmpty())
+        return;
+
+      auto *row = static_cast<SmartHomeTreeDeviceRow *>(
+          smartLifeDeviceTree->itemWidget(item, 0));
+      if (!row)
+        return;
+
+      const QString text = smartLifeManager->deviceDisplayName(deviceId);
+      QStringList metaParts;
+      if (!device.roomId.isEmpty()) {
+        const auto roomIt =
+            std::find_if(rooms.begin(), rooms.end(), [&](const SmartLifeRoomInfo &room) {
+              return room.id == device.roomId;
+            });
+        if (roomIt != rooms.end() && !roomIt->name.isEmpty())
+          metaParts << roomIt->name;
+      }
+      if (!device.homeId.isEmpty()) {
+        const auto homeIt =
+            std::find_if(homes.begin(), homes.end(), [&](const SmartLifeHomeInfo &home) {
+              return home.id == device.homeId;
+            });
+        if (homeIt != homes.end() && !homeIt->name.isEmpty())
+          metaParts << homeIt->name;
+      }
+      metaParts << (device.online ? QStringLiteral("Online")
+                                  : QStringLiteral("Offline"));
+      if (device.controllable)
+        metaParts << (device.powerOn ? QStringLiteral("On") : QStringLiteral("Off"));
+
+      const bool hasLightingControls =
+          smartLifeManager->deviceExposesLightingControls(device);
+      row->updateDevicePresentation(device, text, metaParts.join(QStringLiteral(" · ")),
+                                  hasLightingControls);
+
+      item->setForeground(
+          0, !device.online ? QColor(QStringLiteral("#7B828A"))
+                            : (device.powerOn ? QColor(QStringLiteral("#FFE7A7"))
+                                              : QColor(QStringLiteral("#E4E7EB"))));
+    }
+
+    for (int i = 0; i < item->childCount(); ++i)
+      visit(item->child(i));
+  };
+
+  for (int i = 0; i < smartLifeDeviceTree->topLevelItemCount(); ++i)
+    visit(smartLifeDeviceTree->topLevelItem(i));
 }
 
 void MainWindow::refreshSmartLifeSelectionDetails() {
+  refreshSmartLifeDeviceInspector();
+
   if (!smartLifeSelectionPanel)
     return;
 
+  if (!isOptionalServiceInstalled(QStringLiteral("smart_life"))) {
+    smartLifeSelectionPanel->setPlainText(
+        QStringLiteral("Install SmartHome lights support to browse and control your synced lights and devices here."));
+    return;
+  }
+
   if (!smartLifeManager) {
     smartLifeSelectionPanel->setPlainText(
-        QStringLiteral("Smart Life manager is not available."));
+        QStringLiteral("SmartHome lights manager is not available."));
+    return;
+  }
+
+  if (smartLifeManager->devices().isEmpty()) {
+    smartLifeSelectionPanel->setPlainText(
+        QStringLiteral("No SmartHome devices are synced yet.\n\nConnect your account, then press Sync Devices to load homes, rooms, lights, and other supported devices here."));
     return;
   }
 
@@ -2988,7 +6370,7 @@ void MainWindow::refreshSmartLifeSelectionDetails() {
                           : QList<QTreeWidgetItem *>{};
   if (selection.isEmpty()) {
     smartLifeSelectionPanel->setPlainText(
-        QStringLiteral("Select a home, room, or device to inspect it here."));
+        QStringLiteral("Select a light in the list. Brightness and colour tiles appear in this panel when a single light is selected."));
     return;
   }
 
@@ -2997,14 +6379,18 @@ void MainWindow::refreshSmartLifeSelectionDetails() {
     const QString type = item->data(0, kSmartLifeNodeTypeRole).toString();
     const QString id = item->data(0, kSmartLifeNodeIdRole).toString();
     if (type == QLatin1String("device")) {
-      smartLifeSelectionPanel->setPlainText(smartLifeManager->deviceDetailText(id));
+      smartLifeSelectionPanel->setPlainText(
+          QStringLiteral("Device details\n\n%1")
+              .arg(smartLifeManager->deviceDetailText(id)));
       return;
     }
     const QStringList deviceIds = selectedSmartLifeDeviceIds();
     smartLifeSelectionPanel->setPlainText(
-        QStringLiteral("%1\n\nContained controllable devices: %2")
+        QStringLiteral("%1\n\nControllable devices in this section: %2\n\nSelect one light to use brightness and colour controls.")
             .arg(item->text(0))
             .arg(deviceIds.size()));
+    if (smartLifeRightPane)
+      smartLifeRightPane->setCurrentWidget(smartLifeSelectionPanel);
     return;
   }
 
@@ -3012,26 +6398,1287 @@ void MainWindow::refreshSmartLifeSelectionDetails() {
       QStringLiteral("Multiple items selected.\n\nControllable devices in "
                      "selection: %1")
           .arg(selectedSmartLifeDeviceIds().size()));
+  if (smartLifeRightPane)
+    smartLifeRightPane->setCurrentWidget(smartLifeSelectionPanel);
 }
 
 void MainWindow::refreshSmartLifeUi() {
+  const bool serviceInstalled = isOptionalServiceInstalled(QStringLiteral("smart_life"));
+  const bool serviceBusy =
+      optionalServiceManager &&
+      optionalServiceManager->activeService() == QStringLiteral("smart_life") &&
+      optionalServiceManager->isBusy();
+  if (smartLifeInstallStateLabel) {
+    QString text = serviceInstalled
+                       ? QStringLiteral(
+                             "SmartHome lights support is installed. You can connect "
+                             "your Tuya / Smart Life account below.")
+                       : QStringLiteral(
+                             "SmartHome lights support is not installed in this basic "
+                             "build yet. Press Install only if you want lights "
+                             "and Smart Life / Tuya control.");
+    if (serviceBusy && optionalServiceManager)
+      text += QStringLiteral("\n\n%1")
+                  .arg(optionalServiceStateText(QStringLiteral("smart_life")));
+    smartLifeInstallStateLabel->setText(text);
+  }
+  if (smartLifeInstallBtn)
+    smartLifeInstallBtn->setEnabled(!serviceInstalled && !serviceBusy);
+  if (smartLifeUninstallBtn)
+    smartLifeUninstallBtn->setEnabled(serviceInstalled && !serviceBusy);
+  if (smartLifeConnectionGroupBox)
+    smartLifeConnectionGroupBox->setEnabled(serviceInstalled);
+  if (smartLifeInfoGroupBox)
+    smartLifeInfoGroupBox->setEnabled(true);
+  if (smartLifeDevicesGroupBox)
+    smartLifeDevicesGroupBox->setEnabled(serviceInstalled);
+  if (smartLifeDevicesSection)
+    smartLifeDevicesSection->setVisible(serviceInstalled);
+  if (smartLifeDeviceSummaryLabel) {
+    if (!serviceInstalled) {
+      smartLifeDeviceSummaryLabel->setText(
+          QStringLiteral("Install SmartHome lights support to browse synced homes, rooms, lights, and other smart devices here."));
+    } else if (!smartLifeManager) {
+      smartLifeDeviceSummaryLabel->setText(
+          QStringLiteral("SmartHome lights manager is not available."));
+    } else {
+      const QVector<SmartLifeHomeInfo> homes = smartLifeManager->homes();
+      const QVector<SmartLifeRoomInfo> rooms = smartLifeManager->rooms();
+      const QVector<SmartLifeDeviceInfo> devices = smartLifeManager->devices();
+      int onlineCount = 0;
+      int controllableCount = 0;
+      int lightingCount = 0;
+      for (const SmartLifeDeviceInfo &device : devices) {
+        if (device.online)
+          ++onlineCount;
+        if (device.controllable)
+          ++controllableCount;
+        if (device.likelyLighting)
+          ++lightingCount;
+      }
+      if (devices.isEmpty()) {
+        smartLifeDeviceSummaryLabel->setText(
+            QStringLiteral("No devices are synced yet. Connect and sync to load your homes, rooms, lights, and other supported devices."));
+      } else {
+        smartLifeDeviceSummaryLabel->setText(
+            QStringLiteral("Homes: %1  ·  Rooms: %2  ·  Devices: %3  ·  Controllable: %4  ·  Lighting: %5  ·  Online: %6")
+                .arg(homes.size())
+                .arg(rooms.size())
+                .arg(devices.size())
+                .arg(controllableCount)
+                .arg(lightingCount)
+                .arg(onlineCount));
+      }
+    }
+  }
+
   if (smartLifeConnectionPanel) {
     smartLifeConnectionPanel->setPlainText(
-        smartLifeManager ? smartLifeManager->connectionSummaryText()
-                         : QStringLiteral("Smart Life manager is not available."));
+        serviceInstalled
+            ? (smartLifeManager ? smartLifeManager->connectionSummaryText()
+                                : QStringLiteral("SmartHome lights manager is not available."))
+            : QStringLiteral(
+                  "Install SmartHome lights support first. This keeps the basic app "
+                  "lean until you decide to enable Tuya / Smart Life control."));
   }
-  if (smartLifeHelpPanel && smartLifeManager)
-    smartLifeHelpPanel->setPlainText(smartLifeManager->commandHelpText());
+  if (smartLifeHelpPanel) {
+    smartLifeHelpPanel->setPlainText(
+        serviceInstalled
+            ? (smartLifeManager ? smartLifeManager->commandHelpText()
+                                : optionalServiceHelpText(QStringLiteral("smart_life")))
+            : optionalServiceHelpText(QStringLiteral("smart_life")));
+  }
   if (smartLifeStatusLabel) {
     smartLifeStatusLabel->setText(
-        smartLifeManager ? smartLifeManager->statusText()
-                         : QStringLiteral("Smart Life manager is not available."));
+        serviceInstalled
+            ? (smartLifeManager ? smartLifeManager->statusText()
+                                : QStringLiteral("SmartHome lights manager is not available."))
+            : QStringLiteral("Install SmartHome lights support to unlock this tab."));
   }
-  if (smartLifeDeviceTree && smartLifeDeviceTree->topLevelItemCount() == 0 &&
+  if (!serviceInstalled && smartLifeDeviceTree)
+    smartLifeDeviceTree->clear();
+  if (serviceInstalled && smartLifeDeviceTree &&
+      smartLifeDeviceTree->topLevelItemCount() == 0 &&
       smartLifeManager && !smartLifeManager->devices().isEmpty()) {
     rebuildSmartLifeDeviceTree();
   }
+  rebuildSmartLifeQuickToggleList();
   refreshSmartLifeSelectionDetails();
+  if (smartLifeDevicesSection)
+    QTimer::singleShot(0, smartLifeDevicesSection,
+                       &CollapsibleSection::refreshExpandedHeight);
+}
+
+QJsonArray MainWindow::loadAndroidTvProfiles() const {
+  QSettings settings("QuickSTT", "Config");
+  QByteArray raw = settings.value(QStringLiteral("androidTv/profilesJson")).toByteArray();
+  if (raw.isEmpty()) {
+    const QString rawString =
+        settings.value(QStringLiteral("androidTv/profilesJson")).toString().trimmed();
+    if (!rawString.isEmpty())
+      raw = rawString.toUtf8();
+  }
+
+  auto normalizeProfiles = [](const QJsonArray &input) {
+    QJsonArray normalized;
+    for (const QJsonValue &value : input) {
+      if (!value.isObject())
+        continue;
+      QJsonObject profile = value.toObject();
+      QString id = profile.value(QStringLiteral("id")).toString().trimmed();
+      if (id.isEmpty())
+        id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+      QString stateKey =
+          profile.value(QStringLiteral("stateKey")).toString().trimmed();
+      if (stateKey.isEmpty())
+        stateKey = QStringLiteral("android_tv_%1").arg(id);
+      if (!profile.contains(QStringLiteral("apiPort")))
+        profile.insert(QStringLiteral("apiPort"), 6466);
+      if (!profile.contains(QStringLiteral("pairingPort")))
+        profile.insert(QStringLiteral("pairingPort"), 6467);
+      if (!profile.contains(QStringLiteral("voiceEnabled")))
+        profile.insert(QStringLiteral("voiceEnabled"), true);
+      profile.insert(QStringLiteral("id"), id);
+      profile.insert(QStringLiteral("stateKey"),
+                     preferredAndroidTvStateKey(profile).isEmpty()
+                         ? stateKey
+                         : preferredAndroidTvStateKey(profile));
+      normalized.append(profile);
+    }
+    return normalized;
+  };
+
+  if (!raw.isEmpty()) {
+    const QJsonDocument doc = QJsonDocument::fromJson(raw);
+    if (doc.isArray()) {
+      const QJsonArray normalized = normalizeProfiles(doc.array());
+      if (!normalized.isEmpty())
+        return normalized;
+    }
+  }
+
+  const QString legacyHost =
+      settings.value(QStringLiteral("androidTv/host")).toString().trimmed();
+  const QString legacyPairHost =
+      settings.value(QStringLiteral("androidTv/pairingHost")).toString().trimmed();
+  const QString legacyLabel =
+      settings.value(QStringLiteral("androidTv/profileLabel")).toString().trimmed();
+  const QString legacyFriendlyName =
+      settings.value(QStringLiteral("androidTv/friendlyName")).toString().trimmed();
+  const QString legacyPairCode =
+      settings.value(QStringLiteral("androidTv/pairingCode")).toString().trimmed();
+  const bool legacyVoice =
+      settings.value(QStringLiteral("androidTv/voiceEnabled"), true).toBool();
+
+  const bool hasLegacyData = !legacyHost.isEmpty() || !legacyPairHost.isEmpty() ||
+                             !legacyLabel.isEmpty() ||
+                             !legacyFriendlyName.isEmpty() ||
+                             !legacyPairCode.isEmpty() || legacyVoice;
+  if (!hasLegacyData) {
+    QJsonArray recoveredProfiles;
+    const QDir stateRoot(androidTvStateRootPathForUi());
+    const QFileInfoList stateDirs =
+        stateRoot.entryInfoList(QDir::NoDotAndDotDot | QDir::Dirs, QDir::Name);
+    for (const QFileInfo &dirInfo : stateDirs) {
+      const QString stateKey = dirInfo.fileName().trimmed();
+      if (!androidTvCredentialsExist(stateKey))
+        continue;
+      QString guessedHost = stateKey;
+      guessedHost.replace(QLatin1Char('_'), QLatin1Char('.'));
+      QJsonObject recovered;
+      recovered.insert(QStringLiteral("id"),
+                       QUuid::createUuid().toString(QUuid::WithoutBraces));
+      recovered.insert(QStringLiteral("stateKey"), stateKey);
+      recovered.insert(QStringLiteral("label"),
+                       QStringLiteral("Remembered TV %1").arg(guessedHost));
+      recovered.insert(QStringLiteral("host"), guessedHost);
+      recovered.insert(QStringLiteral("apiPort"), 6466);
+      recovered.insert(QStringLiteral("pairingHost"), guessedHost);
+      recovered.insert(QStringLiteral("pairingPort"), 6467);
+      recovered.insert(QStringLiteral("pairingCode"), QString());
+      recovered.insert(QStringLiteral("friendlyName"),
+                       QStringLiteral("QuickSTT Android TV"));
+      recovered.insert(QStringLiteral("voiceEnabled"), true);
+      recoveredProfiles.append(recovered);
+    }
+    if (!recoveredProfiles.isEmpty()) {
+      settings.setValue(QStringLiteral("androidTv/profilesJson"),
+                        QString::fromUtf8(QJsonDocument(recoveredProfiles).toJson(
+                            QJsonDocument::Compact)));
+      settings.sync();
+    }
+    return recoveredProfiles;
+  }
+
+  QString profileId =
+      settings.value(QStringLiteral("androidTv/currentProfileId")).toString().trimmed();
+  if (profileId.isEmpty())
+    profileId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+
+  const QString storedStateKey =
+      settings.value(QStringLiteral("androidTv/stateKey")).toString().trimmed();
+
+  QJsonObject migrated;
+  migrated.insert(QStringLiteral("id"), profileId);
+  migrated.insert(QStringLiteral("stateKey"),
+                  storedStateKey.isEmpty()
+                      ? QStringLiteral("android_tv_%1").arg(profileId)
+                      : storedStateKey);
+  migrated.insert(QStringLiteral("label"), legacyLabel);
+  migrated.insert(QStringLiteral("host"), legacyHost);
+  migrated.insert(
+      QStringLiteral("apiPort"),
+      settings.value(QStringLiteral("androidTv/port"), 6466).toInt());
+  migrated.insert(QStringLiteral("pairingHost"), legacyPairHost);
+  migrated.insert(
+      QStringLiteral("pairingPort"),
+      settings.value(QStringLiteral("androidTv/pairingPort"), 6467).toInt());
+  migrated.insert(QStringLiteral("pairingCode"), legacyPairCode);
+  migrated.insert(QStringLiteral("friendlyName"), legacyFriendlyName);
+  migrated.insert(QStringLiteral("voiceEnabled"), legacyVoice);
+
+  QJsonArray migratedProfiles;
+  migratedProfiles.append(migrated);
+  settings.setValue(QStringLiteral("androidTv/profilesJson"),
+                    QString::fromUtf8(QJsonDocument(migratedProfiles).toJson(
+                        QJsonDocument::Compact)));
+  settings.sync();
+  return migratedProfiles;
+}
+
+void MainWindow::saveAndroidTvProfiles(const QJsonArray &profiles) {
+  QSettings settings("QuickSTT", "Config");
+  settings.setValue(QStringLiteral("androidTv/profilesJson"),
+                    QString::fromUtf8(QJsonDocument(profiles).toJson(
+                        QJsonDocument::Compact)));
+  settings.sync();
+}
+
+QJsonObject MainWindow::androidTvProfileFromEditors(const QString &profileId) const {
+  QString id = profileId.trimmed();
+  if (id.isEmpty())
+    id = m_activeAndroidTvProfileId.trimmed();
+  if (id.isEmpty())
+    id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+
+  QSettings settings("QuickSTT", "Config");
+  const QString savedLabel =
+      settings.value(QStringLiteral("androidTv/profileLabel")).toString().trimmed();
+  const QString savedHost =
+      settings.value(QStringLiteral("androidTv/host")).toString().trimmed();
+  const int savedApiPort =
+      settings.value(QStringLiteral("androidTv/port"), 6466).toInt();
+  const QString savedPairingHost =
+      settings.value(QStringLiteral("androidTv/pairingHost")).toString().trimmed();
+  const int savedPairingPort =
+      settings.value(QStringLiteral("androidTv/pairingPort"), 6467).toInt();
+  const QString savedPairingCode =
+      settings.value(QStringLiteral("androidTv/pairingCode")).toString().trimmed();
+  const QString savedFriendlyName =
+      settings.value(QStringLiteral("androidTv/friendlyName")).toString().trimmed();
+  const bool savedVoiceEnabled =
+      settings.value(QStringLiteral("androidTv/voiceEnabled"), true).toBool();
+
+  QString label =
+      androidTvProfileNameEdit ? androidTvProfileNameEdit->text().trimmed() : QString();
+  if (label.isEmpty())
+    label = savedLabel;
+
+  QString host =
+      androidTvHostEdit ? androidTvHostEdit->text().trimmed() : QString();
+  if (host.isEmpty())
+    host = savedHost;
+
+  int apiPort =
+      androidTvPortEdit ? androidTvPortEdit->text().trimmed().toInt() : 0;
+  if (apiPort <= 0)
+    apiPort = savedApiPort > 0 ? savedApiPort : 6466;
+
+  QString pairingHost =
+      androidTvPairHostEdit ? androidTvPairHostEdit->text().trimmed() : QString();
+  if (pairingHost.isEmpty())
+    pairingHost = savedPairingHost.isEmpty() ? host : savedPairingHost;
+
+  int pairingPort =
+      androidTvPairPortEdit ? androidTvPairPortEdit->text().trimmed().toInt() : 0;
+  if (pairingPort <= 0)
+    pairingPort = savedPairingPort > 0 ? savedPairingPort : 6467;
+
+  QString pairingCode =
+      androidTvPairCodeEdit ? androidTvPairCodeEdit->text().trimmed() : QString();
+  if (pairingCode.isEmpty())
+    pairingCode = savedPairingCode;
+
+  QString friendlyName =
+      androidTvFriendlyNameEdit ? androidTvFriendlyNameEdit->text().trimmed()
+                                : QString();
+  if (friendlyName.isEmpty())
+    friendlyName = savedFriendlyName;
+  if (friendlyName.isEmpty())
+    friendlyName = QStringLiteral("QuickSTT Android TV");
+
+  const bool voiceEnabled =
+      androidTvVoiceEnabledCheck ? androidTvVoiceEnabledCheck->isChecked()
+                                 : savedVoiceEnabled;
+
+  if (label.isEmpty())
+    label = host;
+
+  QString existingStateKey;
+  for (const QJsonValue &value : loadAndroidTvProfiles()) {
+    if (!value.isObject())
+      continue;
+    const QJsonObject existingProfile = value.toObject();
+    if (existingProfile.value(QStringLiteral("id")).toString().trimmed() == id) {
+      existingStateKey =
+          existingProfile.value(QStringLiteral("stateKey")).toString().trimmed();
+      break;
+    }
+  }
+
+  QJsonObject profile;
+  profile.insert(QStringLiteral("id"), id);
+  profile.insert(
+      QStringLiteral("stateKey"),
+      cleanAndroidTvStateKey(existingStateKey.isEmpty()
+                                 ? (!host.isEmpty()
+                                        ? host
+                                        : QStringLiteral("android_tv_%1").arg(id))
+                                 : existingStateKey));
+  profile.insert(QStringLiteral("label"), label);
+  profile.insert(QStringLiteral("host"), host);
+  profile.insert(QStringLiteral("apiPort"), apiPort);
+  profile.insert(QStringLiteral("pairingHost"), pairingHost);
+  profile.insert(QStringLiteral("pairingPort"), pairingPort);
+  profile.insert(QStringLiteral("pairingCode"), pairingCode);
+  profile.insert(QStringLiteral("friendlyName"), friendlyName);
+  profile.insert(QStringLiteral("voiceEnabled"), voiceEnabled);
+  for (const QJsonValue &value : m_androidTvDiscoveredDevices) {
+    if (!value.isObject())
+      continue;
+    const QJsonObject device = value.toObject();
+    const QString discoveredHost =
+        device.value(QStringLiteral("host")).toString().trimmed();
+    const QString discoveredName =
+        device.value(QStringLiteral("name")).toString().trimmed();
+    if ((!host.isEmpty() &&
+         discoveredHost.compare(host, Qt::CaseInsensitive) == 0) ||
+        (!label.isEmpty() && !discoveredName.isEmpty() &&
+         normalizedAndroidTvName(label) == normalizedAndroidTvName(discoveredName))) {
+      const QString serviceName =
+          device.value(QStringLiteral("service_name")).toString().trimmed();
+      const QString btAddress = androidTvDiscoveryBtAddress(device);
+      if (!serviceName.isEmpty())
+        profile.insert(QStringLiteral("serviceName"), serviceName);
+      if (!btAddress.isEmpty())
+        profile.insert(QStringLiteral("btAddress"), btAddress);
+      break;
+    }
+  }
+  return profile;
+}
+
+void MainWindow::applyAndroidTvProfileToEditors(const QJsonObject &profile) {
+  m_updatingAndroidTvProfileUi = true;
+  if (androidTvProfileNameEdit) {
+    QSignalBlocker blocker(androidTvProfileNameEdit);
+    androidTvProfileNameEdit->setText(
+        profile.value(QStringLiteral("label")).toString().trimmed());
+  }
+  if (androidTvHostEdit) {
+    QSignalBlocker blocker(androidTvHostEdit);
+    androidTvHostEdit->setText(
+        profile.value(QStringLiteral("host")).toString().trimmed());
+  }
+  if (androidTvPortEdit) {
+    QSignalBlocker blocker(androidTvPortEdit);
+    androidTvPortEdit->setText(
+        QString::number(profile.value(QStringLiteral("apiPort")).toInt(6466)));
+  }
+  if (androidTvPairHostEdit) {
+    QSignalBlocker blocker(androidTvPairHostEdit);
+    androidTvPairHostEdit->setText(
+        profile.value(QStringLiteral("pairingHost")).toString().trimmed());
+  }
+  if (androidTvPairPortEdit) {
+    QSignalBlocker blocker(androidTvPairPortEdit);
+    androidTvPairPortEdit->setText(QString::number(
+        profile.value(QStringLiteral("pairingPort")).toInt(6467)));
+  }
+  if (androidTvPairCodeEdit) {
+    QSignalBlocker blocker(androidTvPairCodeEdit);
+    androidTvPairCodeEdit->setText(
+        profile.value(QStringLiteral("pairingCode")).toString().trimmed());
+  }
+  if (androidTvFriendlyNameEdit) {
+    QSignalBlocker blocker(androidTvFriendlyNameEdit);
+    const QString friendlyName =
+        profile.value(QStringLiteral("friendlyName")).toString().trimmed();
+    androidTvFriendlyNameEdit->setText(
+        friendlyName.isEmpty() ? QStringLiteral("QuickSTT Android TV")
+                               : friendlyName);
+  }
+  if (androidTvVoiceEnabledCheck) {
+    QSignalBlocker blocker(androidTvVoiceEnabledCheck);
+    androidTvVoiceEnabledCheck->setChecked(
+        profile.value(QStringLiteral("voiceEnabled")).toBool(true));
+  }
+  m_updatingAndroidTvProfileUi = false;
+}
+
+void MainWindow::clearAndroidTvProfileEditors() {
+  m_updatingAndroidTvProfileUi = true;
+  if (androidTvProfileNameEdit) {
+    QSignalBlocker blocker(androidTvProfileNameEdit);
+    androidTvProfileNameEdit->clear();
+  }
+  if (androidTvHostEdit) {
+    QSignalBlocker blocker(androidTvHostEdit);
+    androidTvHostEdit->clear();
+  }
+  if (androidTvPortEdit) {
+    QSignalBlocker blocker(androidTvPortEdit);
+    androidTvPortEdit->setText(QStringLiteral("6466"));
+  }
+  if (androidTvPairHostEdit) {
+    QSignalBlocker blocker(androidTvPairHostEdit);
+    androidTvPairHostEdit->clear();
+  }
+  if (androidTvPairPortEdit) {
+    QSignalBlocker blocker(androidTvPairPortEdit);
+    androidTvPairPortEdit->setText(QStringLiteral("6467"));
+  }
+  if (androidTvPairCodeEdit) {
+    QSignalBlocker blocker(androidTvPairCodeEdit);
+    androidTvPairCodeEdit->clear();
+  }
+  if (androidTvFriendlyNameEdit) {
+    QSignalBlocker blocker(androidTvFriendlyNameEdit);
+    androidTvFriendlyNameEdit->setText(QStringLiteral("QuickSTT Android TV"));
+  }
+  if (androidTvVoiceEnabledCheck) {
+    QSignalBlocker blocker(androidTvVoiceEnabledCheck);
+    androidTvVoiceEnabledCheck->setChecked(false);
+  }
+  m_updatingAndroidTvProfileUi = false;
+}
+
+QString MainWindow::androidTvSelectedProfileId() const {
+  if (androidTvProfileList && androidTvProfileList->currentItem()) {
+    return androidTvProfileList->currentItem()
+        ->data(kAndroidTvProfileIdRole)
+        .toString()
+        .trimmed();
+  }
+  return m_activeAndroidTvProfileId.trimmed();
+}
+
+void MainWindow::persistActiveAndroidTvSettings() {
+  if (m_updatingAndroidTvProfileUi)
+    return;
+
+  const QJsonObject profile =
+      androidTvProfileFromEditors(m_activeAndroidTvProfileId.trimmed());
+  const QString profileId = profile.value(QStringLiteral("id")).toString().trimmed();
+  if (profileId.isEmpty())
+    return;
+
+  m_activeAndroidTvProfileId = profileId;
+
+  QSettings settings("QuickSTT", "Config");
+  settings.setValue(QStringLiteral("androidTv/currentProfileId"), profileId);
+  settings.setValue(QStringLiteral("androidTv/profileLabel"),
+                    profile.value(QStringLiteral("label")).toString().trimmed());
+  settings.setValue(QStringLiteral("androidTv/stateKey"),
+                    profile.value(QStringLiteral("stateKey")).toString().trimmed());
+  settings.setValue(QStringLiteral("androidTv/host"),
+                    profile.value(QStringLiteral("host")).toString().trimmed());
+  settings.setValue(QStringLiteral("androidTv/port"),
+                    profile.value(QStringLiteral("apiPort")).toInt(6466));
+  settings.setValue(QStringLiteral("androidTv/pairingHost"),
+                    profile.value(QStringLiteral("pairingHost")).toString().trimmed());
+  settings.setValue(QStringLiteral("androidTv/pairingPort"),
+                    profile.value(QStringLiteral("pairingPort")).toInt(6467));
+  settings.setValue(QStringLiteral("androidTv/pairingCode"),
+                    profile.value(QStringLiteral("pairingCode")).toString().trimmed());
+  settings.setValue(QStringLiteral("androidTv/friendlyName"),
+                    profile.value(QStringLiteral("friendlyName")).toString().trimmed());
+  settings.setValue(QStringLiteral("androidTv/voiceEnabled"),
+                    profile.value(QStringLiteral("voiceEnabled")).toBool(true));
+
+  refreshAndroidTvUi();
+}
+
+void MainWindow::rememberCurrentAndroidTvProfileIfNeeded() {
+  if (!androidTvManager || !androidTvManager->currentConfigHasPairedCredentials())
+    return;
+
+  const QJsonObject currentProfile =
+      androidTvProfileFromEditors(m_activeAndroidTvProfileId.trimmed());
+  const QString currentHost =
+      currentProfile.value(QStringLiteral("host")).toString().trimmed();
+  const QString currentStateKey =
+      preferredAndroidTvStateKey(currentProfile).trimmed();
+  if (currentHost.isEmpty())
+    return;
+
+  const QJsonArray profiles = loadAndroidTvProfiles();
+  for (const QJsonValue &value : profiles) {
+    if (!value.isObject())
+      continue;
+    const QJsonObject profile = value.toObject();
+    const QString existingStateKey =
+        preferredAndroidTvStateKey(profile).trimmed();
+    if ((androidTvProfileMatchesLanHost(profile, currentHost) ||
+         (!currentStateKey.isEmpty() && !existingStateKey.isEmpty() &&
+          existingStateKey.compare(currentStateKey, Qt::CaseInsensitive) == 0)) &&
+        androidTvProfileHasCredentials(profile)) {
+      return;
+    }
+  }
+
+  saveCurrentAndroidTvProfile();
+}
+
+void MainWindow::refreshAndroidTvProfileList(const QString &selectedProfileId) {
+  if (!androidTvProfileList)
+    return;
+
+  const QJsonArray rawProfiles = loadAndroidTvProfiles();
+  QJsonArray profiles;
+  bool prunedProfiles = false;
+  for (const QJsonValue &value : rawProfiles) {
+    if (!value.isObject())
+      continue;
+    const QJsonObject profile = value.toObject();
+    const QString host = profile.value(QStringLiteral("host")).toString().trimmed();
+    if (host.isEmpty() || !androidTvProfileHasCredentials(profile)) {
+      prunedProfiles = true;
+      continue;
+    }
+    profiles.append(profile);
+  }
+  if (prunedProfiles)
+    saveAndroidTvProfiles(profiles);
+
+  QString targetProfileId = selectedProfileId.trimmed();
+  if (targetProfileId.isEmpty())
+    targetProfileId = m_activeAndroidTvProfileId.trimmed();
+  if (targetProfileId.isEmpty()) {
+    QSettings settings("QuickSTT", "Config");
+    targetProfileId =
+        settings.value(QStringLiteral("androidTv/currentProfileId")).toString().trimmed();
+  }
+
+  QString profileIdToApply;
+  {
+    QSignalBlocker blocker(androidTvProfileList);
+    androidTvProfileList->clear();
+    int rowToSelect = -1;
+    int rowIndex = 0;
+    for (const QJsonValue &value : profiles) {
+      if (!value.isObject())
+        continue;
+      const QJsonObject profile = value.toObject();
+      auto *item = new QListWidgetItem(androidTvProfileDisplayName(profile),
+                                       androidTvProfileList);
+      item->setData(kAndroidTvProfileIdRole,
+                    profile.value(QStringLiteral("id")).toString().trimmed());
+      item->setToolTip(androidTvProfileTooltip(profile));
+      item->setSizeHint(QSize(0, 54));
+      item->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+      if (item->data(kAndroidTvProfileIdRole).toString() == targetProfileId)
+        rowToSelect = rowIndex;
+      ++rowIndex;
+    }
+
+    if (rowToSelect >= 0)
+      androidTvProfileList->setCurrentRow(rowToSelect);
+    else if (androidTvProfileList->count() > 0)
+      androidTvProfileList->setCurrentRow(0);
+
+    if (androidTvProfileList->currentItem()) {
+      profileIdToApply = androidTvProfileList->currentItem()
+                             ->data(kAndroidTvProfileIdRole)
+                             .toString()
+                             .trimmed();
+    }
+  }
+
+  if (!profileIdToApply.isEmpty())
+    selectAndroidTvProfile(profileIdToApply, true);
+
+  if (androidTvDeleteProfileBtn)
+    androidTvDeleteProfileBtn->setEnabled(androidTvProfileList->count() > 0);
+}
+
+void MainWindow::reconcileRememberedAndroidTvProfilesWithDiscovery() {
+  if (m_androidTvDiscoveredDevices.isEmpty())
+    return;
+
+  QJsonArray profiles = loadAndroidTvProfiles();
+  if (profiles.isEmpty())
+    return;
+
+  bool changed = false;
+  bool activeProfileChanged = false;
+  QString activeProfileId = m_activeAndroidTvProfileId.trimmed();
+  if (activeProfileId.isEmpty()) {
+    QSettings settings(QStringLiteral("QuickSTT"), QStringLiteral("Config"));
+    activeProfileId =
+        settings.value(QStringLiteral("androidTv/currentProfileId")).toString().trimmed();
+  }
+
+  for (int i = 0; i < profiles.size(); ++i) {
+    if (!profiles.at(i).isObject())
+      continue;
+    QJsonObject profile = profiles.at(i).toObject();
+    if (!androidTvProfileHasCredentials(profile))
+      continue;
+
+    for (const QJsonValue &deviceValue : m_androidTvDiscoveredDevices) {
+      if (!deviceValue.isObject())
+        continue;
+      const QJsonObject device = deviceValue.toObject();
+      if (!androidTvProfileMatchesDiscoveredDevice(profile, device))
+        continue;
+
+      const QString discoveredHost =
+          device.value(QStringLiteral("host")).toString().trimmed();
+      const int discoveredApiPort =
+          device.value(QStringLiteral("api_port")).toInt(6466);
+      const int discoveredPairPort =
+          device.value(QStringLiteral("pair_port")).toInt(6467);
+      const QString discoveredName =
+          device.value(QStringLiteral("name")).toString().trimmed();
+      const QString discoveredServiceName =
+          device.value(QStringLiteral("service_name")).toString().trimmed();
+      const QString discoveredBt = androidTvDiscoveryBtAddress(device);
+
+      if (!discoveredHost.isEmpty()) {
+        profile.insert(QStringLiteral("host"), discoveredHost);
+        profile.insert(QStringLiteral("pairingHost"), discoveredHost);
+      }
+      if (discoveredApiPort > 0)
+        profile.insert(QStringLiteral("apiPort"), discoveredApiPort);
+      if (discoveredPairPort > 0)
+        profile.insert(QStringLiteral("pairingPort"), discoveredPairPort);
+      if (!discoveredServiceName.isEmpty())
+        profile.insert(QStringLiteral("serviceName"), discoveredServiceName);
+      if (!discoveredBt.isEmpty())
+        profile.insert(QStringLiteral("btAddress"), discoveredBt);
+      if (profile.value(QStringLiteral("label")).toString().trimmed().isEmpty() &&
+          !discoveredName.isEmpty()) {
+        profile.insert(QStringLiteral("label"), discoveredName);
+      }
+
+      profiles.replace(i, profile);
+      changed = true;
+      if (!activeProfileId.isEmpty() &&
+          profile.value(QStringLiteral("id")).toString().trimmed() == activeProfileId) {
+        activeProfileChanged = true;
+      }
+      break;
+    }
+  }
+
+  if (!changed)
+    return;
+
+  saveAndroidTvProfiles(profiles);
+  if (activeProfileChanged) {
+    selectAndroidTvProfile(activeProfileId, true);
+    if (androidTvManager && androidTvManager->currentConfigHasPairedCredentials() &&
+        !androidTvManager->isConnected() &&
+        isOptionalServiceInstalled(QStringLiteral("android_tv_remote"))) {
+      QTimer::singleShot(120, this, [this]() {
+        if (androidTvManager && !androidTvManager->isConnected() &&
+            androidTvManager->currentConfigHasPairedCredentials() &&
+            isOptionalServiceInstalled(QStringLiteral("android_tv_remote"))) {
+          androidTvManager->connectDevice();
+        }
+      });
+    }
+  }
+}
+
+void MainWindow::refreshAndroidTvDiscoveryList() {
+  if (!androidTvDiscoveryList)
+    return;
+
+  int rowToSelect = -1;
+  const QString activeHost =
+      androidTvHostEdit ? androidTvHostEdit->text().trimmed() : QString();
+  const QString activeProfileId = m_activeAndroidTvProfileId.trimmed();
+  QJsonArray visibleDevices;
+  const QJsonArray profiles = loadAndroidTvProfiles();
+  const QJsonObject activeProfile =
+      androidTvProfileFromEditors(m_activeAndroidTvProfileId.trimmed());
+  const bool activeProfileHasCredentials =
+      androidTvManager && androidTvManager->currentConfigHasPairedCredentials();
+  {
+    QSignalBlocker blocker(androidTvDiscoveryList);
+    androidTvDiscoveryList->clear();
+    int rowIndex = 0;
+    for (const QJsonValue &value : m_androidTvDiscoveredDevices) {
+      if (!value.isObject())
+        continue;
+      const QJsonObject device = value.toObject();
+      const QString host = device.value(QStringLiteral("host")).toString().trimmed();
+      if (!isLikelyLanHost(host))
+        continue;
+      if (host.isEmpty())
+        continue;
+
+      bool alreadyRemembered = false;
+      for (const QJsonValue &profileValue : profiles) {
+        if (!profileValue.isObject())
+          continue;
+        const QJsonObject profile = profileValue.toObject();
+        if (androidTvProfileHasCredentials(profile) &&
+            androidTvProfileMatchesDiscoveredDevice(profile, device)) {
+          alreadyRemembered = true;
+          break;
+        }
+      }
+      if (!alreadyRemembered && activeProfileHasCredentials &&
+          androidTvProfileMatchesDiscoveredDevice(activeProfile, device)) {
+        alreadyRemembered = true;
+      }
+      if (alreadyRemembered)
+        continue;
+
+      visibleDevices.append(device);
+      const QString name =
+          device.value(QStringLiteral("name")).toString().trimmed().isEmpty()
+              ? QStringLiteral("Android TV")
+              : device.value(QStringLiteral("name")).toString().trimmed();
+      const int apiPort = device.value(QStringLiteral("api_port")).toInt(6466);
+      const int pairPort = device.value(QStringLiteral("pair_port")).toInt(6467);
+      auto *item = new QListWidgetItem(name, androidTvDiscoveryList);
+      item->setSizeHint(QSize(0, 58));
+      item->setToolTip(QStringLiteral("TV: %1\nHost: %2\nRemote port: %3\nPair port: %4")
+                           .arg(name)
+                           .arg(host)
+                           .arg(apiPort)
+                           .arg(pairPort));
+      item->setData(kAndroidTvListKindRole, QStringLiteral("device"));
+      item->setData(kAndroidTvListDeviceJsonRole,
+                    QJsonDocument(device).toJson(QJsonDocument::Compact));
+      if (activeProfileId.isEmpty() && !activeHost.isEmpty() &&
+          host.compare(activeHost, Qt::CaseInsensitive) == 0)
+        rowToSelect = rowIndex;
+      ++rowIndex;
+    }
+
+    if (rowToSelect >= 0)
+      androidTvDiscoveryList->setCurrentRow(rowToSelect);
+    else if (androidTvDiscoveryList->count() == 1)
+      androidTvDiscoveryList->setCurrentRow(0);
+  }
+  m_androidTvVisibleDiscoveredDevices = visibleDevices;
+
+  const int effectiveRow = rowToSelect >= 0 ? rowToSelect
+                                            : (androidTvDiscoveryList->count() == 1 ? 0 : -1);
+  const bool shouldAutoApplyDiscovered =
+      activeProfileId.isEmpty() &&
+      (!androidTvManager || !androidTvManager->currentConfigHasPairedCredentials());
+  if (shouldAutoApplyDiscovered && effectiveRow >= 0 &&
+      androidTvDiscoveryList->item(effectiveRow)) {
+    QListWidgetItem *currentItem = androidTvDiscoveryList->item(effectiveRow);
+    const QString itemKind = currentItem->data(kAndroidTvListKindRole).toString();
+    if (itemKind == QLatin1String("device")) {
+      const QJsonDocument deviceDoc = QJsonDocument::fromJson(
+          currentItem->data(kAndroidTvListDeviceJsonRole).toByteArray());
+      if (deviceDoc.isObject())
+        applyDiscoveredAndroidTvDevice(deviceDoc.object());
+    }
+  }
+
+  if (androidTvDiscoveryStatusLabel) {
+    const int rememberedCount = loadAndroidTvProfiles().size();
+    if (androidTvDiscoveryList->count() == 0) {
+      androidTvDiscoveryStatusLabel->setText(
+          rememberedCount > 0
+              ? QStringLiteral(
+                    "No new unpaired TVs are showing on your LAN right now. QuickSTT is already remembering %1 TV(s) on this device.")
+                    .arg(rememberedCount)
+              : QStringLiteral(
+                    "No TVs are ready yet. Pair one TV once and QuickSTT will remember it on this device."));
+    } else {
+      androidTvDiscoveryStatusLabel->setText(
+          QStringLiteral("Unpaired TVs ready to pair: %1. Remembered TVs on this device: %2.")
+              .arg(androidTvDiscoveryList->count())
+              .arg(rememberedCount));
+    }
+  }
+}
+
+void MainWindow::applyDiscoveredAndroidTvDevice(const QJsonObject &device) {
+  const QString detectedHost =
+      device.value(QStringLiteral("host")).toString().trimmed();
+  const QString detectedName =
+      device.value(QStringLiteral("name")).toString().trimmed();
+  QString matchedProfileId;
+  const QJsonArray profiles = loadAndroidTvProfiles();
+  for (const QJsonValue &value : profiles) {
+    if (!value.isObject())
+      continue;
+    const QJsonObject profile = value.toObject();
+    if (androidTvProfileMatchesDiscoveredDevice(profile, device)) {
+      matchedProfileId =
+          profile.value(QStringLiteral("id")).toString().trimmed();
+      break;
+    }
+  }
+  if (matchedProfileId.isEmpty()) {
+    m_activeAndroidTvProfileId =
+        QUuid::createUuid().toString(QUuid::WithoutBraces);
+  } else {
+    m_activeAndroidTvProfileId = matchedProfileId;
+    selectAndroidTvProfile(matchedProfileId, true);
+  }
+
+  m_updatingAndroidTvProfileUi = true;
+  if (androidTvHostEdit) {
+    QSignalBlocker blocker(androidTvHostEdit);
+    androidTvHostEdit->setText(detectedHost);
+  }
+  if (androidTvPortEdit) {
+    QSignalBlocker blocker(androidTvPortEdit);
+    androidTvPortEdit->setText(
+        QString::number(device.value(QStringLiteral("api_port")).toInt(6466)));
+  }
+  if (androidTvPairHostEdit) {
+    QSignalBlocker blocker(androidTvPairHostEdit);
+    androidTvPairHostEdit->setText(detectedHost);
+  }
+  if (androidTvPairPortEdit) {
+    QSignalBlocker blocker(androidTvPairPortEdit);
+    androidTvPairPortEdit->setText(
+        QString::number(device.value(QStringLiteral("pair_port")).toInt(6467)));
+  }
+  if (androidTvProfileNameEdit) {
+    QSignalBlocker blocker(androidTvProfileNameEdit);
+    const QString currentLabel = androidTvProfileNameEdit->text().trimmed();
+    androidTvProfileNameEdit->setText(
+        !currentLabel.isEmpty() && !matchedProfileId.isEmpty()
+            ? currentLabel
+            : (detectedName.isEmpty() ? detectedHost : detectedName));
+  }
+  m_updatingAndroidTvProfileUi = false;
+  persistActiveAndroidTvSettings();
+}
+
+void MainWindow::selectAndroidTvProfile(const QString &profileId, bool updateEditors) {
+  const QString normalizedId = profileId.trimmed();
+  if (normalizedId.isEmpty())
+    return;
+
+  const QJsonArray profiles = loadAndroidTvProfiles();
+  for (const QJsonValue &value : profiles) {
+    if (!value.isObject())
+      continue;
+    const QJsonObject profile = value.toObject();
+    if (profile.value(QStringLiteral("id")).toString().trimmed() != normalizedId)
+      continue;
+    m_activeAndroidTvProfileId = normalizedId;
+    if (updateEditors)
+      applyAndroidTvProfileToEditors(profile);
+    persistActiveAndroidTvSettings();
+    return;
+  }
+}
+
+void MainWindow::createNewAndroidTvProfile() {
+  m_activeAndroidTvProfileId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+  if (androidTvProfileList) {
+    QSignalBlocker blocker(androidTvProfileList);
+    androidTvProfileList->clearSelection();
+    androidTvProfileList->setCurrentRow(-1);
+  }
+  clearAndroidTvProfileEditors();
+  persistActiveAndroidTvSettings();
+  refreshAndroidTvUi();
+}
+
+void MainWindow::saveCurrentAndroidTvProfile() {
+  QString profileId = m_activeAndroidTvProfileId.trimmed();
+  if (profileId.isEmpty())
+    profileId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+
+  const QJsonObject profile = androidTvProfileFromEditors(profileId);
+  const QString profileHost =
+      profile.value(QStringLiteral("host")).toString().trimmed();
+  const QString profileStateKey =
+      preferredAndroidTvStateKey(profile).trimmed();
+  QJsonArray profiles = loadAndroidTvProfiles();
+  bool replaced = false;
+  for (int i = 0; i < profiles.size(); ++i) {
+    if (!profiles.at(i).isObject())
+      continue;
+    const QJsonObject existing = profiles.at(i).toObject();
+    const QString existingId =
+        existing.value(QStringLiteral("id")).toString().trimmed();
+    const QString existingHost =
+        existing.value(QStringLiteral("host")).toString().trimmed();
+    const QString existingStateKey =
+        preferredAndroidTvStateKey(existing).trimmed();
+    if (existingId == profileId ||
+        (!profileHost.isEmpty() &&
+         (androidTvProfileMatchesLanHost(existing, profileHost) ||
+          existingHost.compare(profileHost, Qt::CaseInsensitive) == 0)) ||
+        (!profileStateKey.isEmpty() && !existingStateKey.isEmpty() &&
+         existingStateKey.compare(profileStateKey, Qt::CaseInsensitive) == 0)) {
+      profiles.replace(i, profile);
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced)
+    profiles.append(profile);
+
+  saveAndroidTvProfiles(profiles);
+  m_activeAndroidTvProfileId = profileId;
+  refreshAndroidTvProfileList(profileId);
+  persistActiveAndroidTvSettings();
+  refreshAndroidTvUi();
+}
+
+void MainWindow::deleteCurrentAndroidTvProfile() {
+  QString profileId = androidTvSelectedProfileId();
+  if (profileId.isEmpty())
+    profileId = m_activeAndroidTvProfileId.trimmed();
+  if (profileId.isEmpty())
+    return;
+
+  if (androidTvManager)
+    androidTvManager->forgetCurrentDevice();
+
+  QJsonArray profiles = loadAndroidTvProfiles();
+  QJsonArray remaining;
+  for (const QJsonValue &value : profiles) {
+    if (!value.isObject())
+      continue;
+    const QJsonObject profile = value.toObject();
+    if (profile.value(QStringLiteral("id")).toString().trimmed() == profileId)
+      continue;
+    remaining.append(profile);
+  }
+  saveAndroidTvProfiles(remaining);
+
+  if (!remaining.isEmpty()) {
+    const QString nextId = remaining.first()
+                               .toObject()
+                               .value(QStringLiteral("id"))
+                               .toString()
+                               .trimmed();
+    m_activeAndroidTvProfileId = nextId;
+    refreshAndroidTvProfileList(nextId);
+    selectAndroidTvProfile(nextId, true);
+    return;
+  }
+
+  m_activeAndroidTvProfileId.clear();
+  clearAndroidTvProfileEditors();
+  QSettings settings("QuickSTT", "Config");
+  settings.setValue(QStringLiteral("androidTv/currentProfileId"), QString());
+  settings.setValue(QStringLiteral("androidTv/profileLabel"), QString());
+  settings.setValue(QStringLiteral("androidTv/stateKey"), QString());
+  settings.setValue(QStringLiteral("androidTv/host"), QString());
+  settings.setValue(QStringLiteral("androidTv/port"), 6466);
+  settings.setValue(QStringLiteral("androidTv/pairingHost"), QString());
+  settings.setValue(QStringLiteral("androidTv/pairingPort"), 6467);
+  settings.setValue(QStringLiteral("androidTv/pairingCode"), QString());
+  settings.setValue(QStringLiteral("androidTv/friendlyName"),
+                    QStringLiteral("QuickSTT Android TV"));
+  settings.setValue(QStringLiteral("androidTv/voiceEnabled"), false);
+  refreshAndroidTvProfileList();
+  refreshAndroidTvUi();
+}
+
+void MainWindow::refreshAndroidTvUi() {
+  const AndroidTvConfig liveConfig =
+      androidTvManager ? androidTvManager->loadConfig() : AndroidTvConfig{};
+  const bool serviceBusy =
+      optionalServiceManager &&
+      optionalServiceManager->activeService() == QStringLiteral("android_tv_remote") &&
+      optionalServiceManager->isBusy();
+  const bool bundledInstalled =
+      isOptionalServiceInstalled(QStringLiteral("android_tv_remote"));
+  const bool serviceInstalled = bundledInstalled;
+  const int savedProfileCount = loadAndroidTvProfiles().size();
+  const QString activeProfileLabel =
+      androidTvProfileNameEdit ? androidTvProfileNameEdit->text().trimmed() : QString();
+  const int discoveredCount = m_androidTvDiscoveredDevices.size();
+  const bool hasSelection = !liveConfig.host.trimmed().isEmpty() ||
+                            (androidTvHostEdit &&
+                             !androidTvHostEdit->text().trimmed().isEmpty());
+  const bool hasPairedSelection =
+      androidTvManager && androidTvManager->currentConfigHasPairedCredentials();
+  const bool hasConnectedSelection =
+      androidTvManager && androidTvManager->isConnected();
+  const bool remoteReady =
+      serviceInstalled && hasSelection &&
+      (hasConnectedSelection || hasPairedSelection);
+  const bool showFullRemote = remoteReady;
+  const bool hasLiveVolumeInfo =
+      androidTvManager && androidTvManager->hasVolumeInfo();
+  const QString serviceMessage = m_androidTvServiceMessage.trimmed();
+  const QString managerStatusText =
+      androidTvManager ? androidTvManager->statusText().trimmed() : QString();
+  QString primaryStatusText;
+  if (!serviceInstalled) {
+    primaryStatusText = serviceMessage.isEmpty()
+                            ? QStringLiteral("Install Android TV support to begin.")
+                            : serviceMessage;
+  } else if (serviceBusy) {
+    primaryStatusText = serviceMessage.isEmpty()
+                            ? QStringLiteral("QuickSTT is working on Android TV support...")
+                            : serviceMessage;
+  } else if (!managerStatusText.isEmpty()) {
+    primaryStatusText = managerStatusText;
+  } else if (!serviceMessage.isEmpty()) {
+    primaryStatusText = serviceMessage;
+  } else if (discoveredCount > 0 || savedProfileCount > 0) {
+    primaryStatusText = QStringLiteral("QuickSTT is ready for Android TV control.");
+  } else {
+    primaryStatusText = QStringLiteral("QuickSTT is ready to scan your LAN for TVs.");
+  }
+
+  if (!serviceInstalled)
+    m_androidTvInitialScanDone = false;
+
+  if (androidTvInstallStateLabel) {
+    QString text = bundledInstalled
+                       ? QStringLiteral("Android TV support is installed on this device.")
+                       : QStringLiteral("Install Android TV support only when you want TV control.");
+    if (!serviceInstalled)
+      text += QStringLiteral(" The basic build stays lean until you add it.");
+    androidTvInstallStateLabel->setText(text);
+  }
+  if (androidTvInstallBtn)
+    androidTvInstallBtn->setEnabled(!serviceInstalled && !serviceBusy);
+  if (androidTvUninstallBtn)
+    androidTvUninstallBtn->setEnabled(bundledInstalled && !serviceBusy);
+  if (androidTvScanBtn)
+    androidTvScanBtn->setEnabled(serviceInstalled && !serviceBusy);
+  if (androidTvStartPairBtn)
+    androidTvStartPairBtn->setEnabled(serviceInstalled && !serviceBusy && hasSelection);
+  if (androidTvDisconnectBtn)
+    androidTvDisconnectBtn->setEnabled(serviceInstalled && !serviceBusy && hasSelection);
+  if (androidTvProfileList)
+    androidTvProfileList->setEnabled(true);
+  if (androidTvNewProfileBtn)
+    androidTvNewProfileBtn->setEnabled(false);
+  if (androidTvSaveProfileBtn)
+    androidTvSaveProfileBtn->setEnabled(false);
+  if (androidTvDeleteProfileBtn)
+    androidTvDeleteProfileBtn->setEnabled(savedProfileCount > 0);
+  if (androidTvProfilesGroupBox)
+    androidTvProfilesGroupBox->setVisible(serviceInstalled && savedProfileCount > 0);
+  if (androidTvDiscoveryGroupBox)
+    androidTvDiscoveryGroupBox->setVisible(serviceInstalled);
+  if (androidTvSetupGroupBox)
+    androidTvSetupGroupBox->setEnabled(true);
+  if (androidTvControlsGroupBox) {
+    androidTvControlsGroupBox->setEnabled(remoteReady);
+    androidTvControlsGroupBox->setVisible(serviceInstalled &&
+                                          (remoteReady || hasConnectedSelection ||
+                                           hasPairedSelection));
+  }
+  if (androidTvSummaryPanel) {
+    androidTvSummaryPanel->setPlainText(
+        serviceInstalled
+            ? (savedProfileCount > 0
+                   ? (androidTvManager
+                          ? androidTvManager->connectionSummaryText() +
+                                QStringLiteral(
+                                    "\n\nQuick note: QuickSTT shows the full remote for connected TVs because many Android TVs do not report their supported buttons correctly. Some buttons may work on your TV while others may not.")
+                                       : QStringLiteral("Android TV manager is not available."))
+                   : QStringLiteral(
+                         "Select a discovered TV, pair it once, and QuickSTT will remember it automatically for later use."))
+            : QStringLiteral(
+                  "Install Android TV support to add TV discovery and remote control."));
+  }
+  if (androidTvRemoteStatusPanel) {
+    QStringList statusLines;
+    const QString displayName = activeProfileLabel.isEmpty()
+                                    ? (liveConfig.profileLabel.trimmed().isEmpty()
+                                           ? (liveConfig.host.trimmed().isEmpty()
+                                                  ? QStringLiteral("No TV selected")
+                                                  : liveConfig.host.trimmed())
+                                           : liveConfig.profileLabel.trimmed())
+                                    : activeProfileLabel;
+    if (!serviceInstalled) {
+      statusLines << QStringLiteral("Android TV support is not installed.");
+      if (!serviceMessage.isEmpty())
+        statusLines << serviceMessage;
+    } else if (serviceBusy) {
+      statusLines << QStringLiteral("Android TV support is changing...");
+      statusLines << primaryStatusText;
+    } else if (hasConnectedSelection) {
+      statusLines << QStringLiteral("Connected: %1").arg(displayName);
+      statusLines << primaryStatusText;
+    } else if (hasPairedSelection) {
+      statusLines << QStringLiteral("Remembered TV: %1").arg(displayName);
+      statusLines << primaryStatusText;
+    } else {
+      statusLines << QStringLiteral("No TV is paired yet.");
+      statusLines << primaryStatusText;
+    }
+    androidTvRemoteStatusPanel->setPlainText(statusLines.join(QLatin1Char('\n')));
+    androidTvRemoteStatusPanel->setVisible(serviceInstalled || !serviceMessage.isEmpty());
+  }
+  if (androidTvHelpPanel) {
+    androidTvHelpPanel->setPlainText(
+        androidTvManager ? androidTvManager->helpText()
+                         : optionalServiceHelpText(QStringLiteral("android_tv_remote")));
+  }
+  if (androidTvStatusLabel) {
+    androidTvStatusLabel->setText(
+        serviceInstalled
+            ? (hasConnectedSelection
+                   ? QStringLiteral("Connected to %1.")
+                          .arg(activeProfileLabel.isEmpty() ? QStringLiteral("your TV")
+                                                            : activeProfileLabel)
+                   : primaryStatusText)
+            : primaryStatusText);
+  }
+  if (androidTvDiscoveryStatusLabel && !serviceInstalled) {
+    androidTvDiscoveryStatusLabel->setText(
+        QStringLiteral("Install Android TV support first, then scan your LAN for TVs."));
+  }
+  if (androidTvPowerBtn) {
+    const bool powerKnown =
+        androidTvManager && androidTvManager->isPowerStateKnown();
+    const bool tvIsOn = powerKnown && androidTvManager->isTvOn();
+    androidTvPowerBtn->setVisible(showFullRemote);
+    androidTvPowerBtn->setText(tvIsOn ? QStringLiteral("Sleep")
+                                      : QStringLiteral("Wake"));
+    androidTvPowerBtn->setToolTip(
+        tvIsOn ? QStringLiteral("Put the TV to sleep")
+               : QStringLiteral("Wake the paired TV"));
+  }
+  if (androidTvMuteBtn)
+    androidTvMuteBtn->setVisible(showFullRemote);
+  if (androidTvVolumeDownBtn)
+    androidTvVolumeDownBtn->setVisible(showFullRemote);
+  if (androidTvVolumeUpBtn)
+    androidTvVolumeUpBtn->setVisible(showFullRemote);
+  if (androidTvInputBtn)
+    androidTvInputBtn->setVisible(showFullRemote);
+  if (androidTvAppsBtn)
+    androidTvAppsBtn->setVisible(showFullRemote);
+  if (androidTvMenuBtn)
+    androidTvMenuBtn->setVisible(showFullRemote);
+  if (androidTvSettingsBtn)
+    androidTvSettingsBtn->setVisible(showFullRemote);
+  if (androidTvUpBtn)
+    androidTvUpBtn->setVisible(showFullRemote);
+  if (androidTvLeftBtn)
+    androidTvLeftBtn->setVisible(showFullRemote);
+  if (androidTvOkBtn)
+    androidTvOkBtn->setVisible(showFullRemote);
+  if (androidTvRightBtn)
+    androidTvRightBtn->setVisible(showFullRemote);
+  if (androidTvDownBtn)
+    androidTvDownBtn->setVisible(showFullRemote);
+  if (androidTvHomeBtn)
+    androidTvHomeBtn->setVisible(showFullRemote);
+  if (androidTvBackBtn)
+    androidTvBackBtn->setVisible(showFullRemote);
+  if (androidTvPlayPauseBtn)
+    androidTvPlayPauseBtn->setVisible(showFullRemote);
+  if (androidTvVolumeSlider) {
+    const bool showVolumeSlider = showFullRemote;
+    if (androidTvVolumeSlider->parentWidget())
+      androidTvVolumeSlider->parentWidget()->setVisible(showVolumeSlider);
+    androidTvVolumeSlider->setVisible(showVolumeSlider);
+    const int currentPercent =
+        androidTvManager ? androidTvManager->currentVolumePercent() : -1;
+    if (!showFullRemote || !androidTvManager || !androidTvManager->isConnected()) {
+      m_androidTvTargetVolumePercent = -1;
+      if (androidTvVolumeDisplayHoldTimer)
+        androidTvVolumeDisplayHoldTimer->stop();
+    } else if (m_androidTvTargetVolumePercent >= 0 && currentPercent >= 0 &&
+               qAbs(currentPercent - m_androidTvTargetVolumePercent) <= 1) {
+      m_androidTvTargetVolumePercent = -1;
+      if (androidTvVolumeDisplayHoldTimer)
+        androidTvVolumeDisplayHoldTimer->stop();
+    }
+    const int sliderDisplayPercent =
+        m_androidTvTargetVolumePercent >= 0 ? m_androidTvTargetVolumePercent
+                                            : currentPercent;
+    androidTvVolumeSlider->setEnabled(showVolumeSlider &&
+                                      (hasLiveVolumeInfo || sliderDisplayPercent >= 0));
+    if (sliderDisplayPercent >= 0 && !androidTvVolumeSlider->isSliderDown()) {
+      m_updatingAndroidTvVolumeSlider = true;
+      androidTvVolumeSlider->setValue(sliderDisplayPercent);
+      m_updatingAndroidTvVolumeSlider = false;
+      if (m_androidTvTargetVolumePercent >= 0 && currentPercent >= 0 &&
+          currentPercent != m_androidTvTargetVolumePercent) {
+        androidTvVolumeSlider->setToolTip(
+            QStringLiteral("Target volume: %1% (live TV volume: %2%)")
+                .arg(m_androidTvTargetVolumePercent)
+                .arg(currentPercent));
+      } else {
+        androidTvVolumeSlider->setToolTip(
+            QStringLiteral("TV volume: %1%").arg(sliderDisplayPercent));
+      }
+    } else {
+      androidTvVolumeSlider->setToolTip(
+          QStringLiteral(
+              "QuickSTT will enable the volume slider after the TV reports its live volume."));
+    }
+  }
+  if (androidTvVolumeValueEdit) {
+    const int currentPercent =
+        androidTvManager ? androidTvManager->currentVolumePercent() : -1;
+    const int displayedPercent =
+        m_androidTvTargetVolumePercent >= 0 ? m_androidTvTargetVolumePercent
+                                            : currentPercent;
+    const bool enableValueEdit = showFullRemote &&
+                                 (hasLiveVolumeInfo || displayedPercent >= 0);
+    androidTvVolumeValueEdit->setVisible(showFullRemote);
+    androidTvVolumeValueEdit->setEnabled(enableValueEdit);
+    if (!androidTvVolumeValueEdit->hasFocus() &&
+        m_androidTvTargetVolumePercent >= 0) {
+      androidTvVolumeValueEdit->setText(
+          QString::number(m_androidTvTargetVolumePercent));
+      androidTvVolumeValueEdit->setToolTip(
+          QStringLiteral("Target TV volume: %1%. Waiting for the TV to catch up.")
+              .arg(m_androidTvTargetVolumePercent));
+    } else if (enableValueEdit && !androidTvVolumeValueEdit->hasFocus() &&
+               currentPercent >= 0) {
+      androidTvVolumeValueEdit->setText(QString::number(currentPercent));
+      androidTvVolumeValueEdit->setToolTip(
+          QStringLiteral("Current TV volume: %1%. Edit and press Enter or click away to apply.")
+              .arg(currentPercent));
+    } else {
+      androidTvVolumeValueEdit->clear();
+      androidTvVolumeValueEdit->setPlaceholderText(QStringLiteral("--"));
+      androidTvVolumeValueEdit->setToolTip(
+          QStringLiteral("Live TV volume is not available yet. Use the - and + buttons if needed."));
+    }
+  }
+  const bool autoScanEnabled =
+      !androidTvAutoScanCheck || androidTvAutoScanCheck->isChecked();
+  if (serviceInstalled && !serviceBusy && androidTvManager && autoScanEnabled &&
+      !m_androidTvInitialScanDone) {
+    m_androidTvInitialScanDone = true;
+    if (androidTvDiscoveryStatusLabel && discoveredCount == 0) {
+      androidTvDiscoveryStatusLabel->setText(
+          QStringLiteral("Scanning your LAN for Android TVs..."));
+    }
+    QTimer::singleShot(150, this, [this]() {
+      if (!androidTvManager ||
+          !isOptionalServiceInstalled(QStringLiteral("android_tv_remote"))) {
+        return;
+      }
+      androidTvManager->scanForDevices();
+    });
+  }
 }
 
 QString MainWindow::selectedModelName(QListWidgetItem *item) const {
@@ -3259,12 +7906,52 @@ void MainWindow::refreshDashboardModelStatuses() {
   refreshListRowStates(cloudModelList);
 }
 
+void MainWindow::refreshLocalModelBackendUi() {
+  if (!localModelBackendCombo || !localModelBackendStatusLabel)
+    return;
+
+  const QString modelName =
+      selectedModelName(modelList ? modelList->currentItem() : nullptr);
+  const bool backendEligible =
+      !modelName.isEmpty() && localModelUsesFrontendTranscriber(modelName);
+
+  {
+    QSignalBlocker blocker(localModelBackendCombo);
+    localModelBackendCombo->clear();
+    if (backendEligible) {
+      const QStringList keys = localModelAvailableBackendKeys(modelName);
+      for (const QString &key : keys) {
+        localModelBackendCombo->addItem(localModelBackendLabelForKey(key), key);
+      }
+      const QString selectedKey = localModelSelectedBackendKey(modelName);
+      const int selectedIndex = localModelBackendCombo->findData(selectedKey);
+      localModelBackendCombo->setCurrentIndex(selectedIndex >= 0 ? selectedIndex
+                                                                 : 0);
+    } else {
+      localModelBackendCombo->addItem(QStringLiteral("CPU ONNX Runtime"),
+                                      QStringLiteral("cpu"));
+      localModelBackendCombo->setCurrentIndex(0);
+    }
+  }
+
+  localModelBackendCombo->setEnabled(backendEligible &&
+                                     localModelBackendCombo->count() > 1);
+  if (!backendEligible) {
+    localModelBackendStatusLabel->setText(
+        QStringLiteral("This model does not use an optional sherpa-onnx backend runtime."));
+    return;
+  }
+
+  localModelBackendStatusLabel->setText(localModelBackendStatusText(modelName));
+}
+
 void MainWindow::refreshSelectionDetails() {
   if (localModelDetailsLabel) {
     localModelDetailsLabel->setText(
         localDashboardDetails(selectedModelName(modelList ? modelList->currentItem()
                                                           : nullptr)));
   }
+  refreshLocalModelBackendUi();
 
   if (!cloudSelectedModelLabel || !cloudProviderStatusPanel ||
       !cloudInputSummaryPanel || !cloudModelDetailsPanel ||
@@ -3720,6 +8407,68 @@ void MainWindow::setupWakewordTab() {
 
   wLayout->addWidget(wakeEngineSettingsStack);
 
+  // ── Hybrid Acoustic Event Assignment Section ──
+  QGroupBox *clapSnapGroup = new QGroupBox("Hybrid Acoustic Triggers (Clap & Snap)");
+  clapSnapGroup->setStyleSheet(
+      "QGroupBox { border: 1px solid #333; border-radius: 6px; margin-top: 10px; padding-top: 14px; font-weight: bold; } "
+      "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #AAA; font-size: 11px; }");
+  QFormLayout *clapLayout = new QFormLayout(clapSnapGroup);
+  clapLayout->setContentsMargins(12, 10, 12, 10);
+  clapLayout->setSpacing(8);
+
+  QComboBox *clapActionCombo = new QComboBox();
+  clapActionCombo->addItem("Start Transcription (Wakeword)", "wakeword");
+  clapActionCombo->addItem("Stop Transcription (Closeword)", "closeword");
+  clapActionCombo->addItem("Disabled", "disabled");
+  QString curClap = s.value("clapAction", "wakeword").toString();
+  int clapIdx = clapActionCombo->findData(curClap);
+  if (clapIdx >= 0) clapActionCombo->setCurrentIndex(clapIdx);
+
+  QComboBox *snapActionCombo = new QComboBox();
+  snapActionCombo->addItem("Start Transcription (Wakeword)", "wakeword");
+  snapActionCombo->addItem("Stop Transcription (Closeword)", "closeword");
+  snapActionCombo->addItem("Disabled", "disabled");
+  QString curSnap = s.value("snapAction", "closeword").toString();
+  int snapIdx = snapActionCombo->findData(curSnap);
+  if (snapIdx >= 0) snapActionCombo->setCurrentIndex(snapIdx);
+
+  QDoubleSpinBox *sensSpin = new QDoubleSpinBox();
+  sensSpin->setRange(0.2, 3.0);
+  sensSpin->setSingleStep(0.1);
+  sensSpin->setValue(s.value("acousticSensitivity", 1.0).toDouble());
+  sensSpin->setFixedWidth(75);
+  sensSpin->setStyleSheet(
+      "QDoubleSpinBox { background: #2A2A2E; color: #DDD; border: 1px solid #444; border-radius: 4px; padding: 2px 6px; font-size: 12px; }");
+
+  clapLayout->addRow("Hand Clap Action:", clapActionCombo);
+  clapLayout->addRow("Finger Snap Action:", snapActionCombo);
+  clapLayout->addRow("Detection Sensitivity:", sensSpin);
+
+  QLabel *acouDesc = new QLabel(
+      "<span style='color:#999;font-size:11px;'>Real-time transient onset & spectral analysis with noise floor adaptation. Assign Claps or Snaps to start/stop transcription independently.</span>");
+  acouDesc->setWordWrap(true);
+  clapLayout->addRow(acouDesc);
+
+  connect(clapActionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [=](int idx) {
+    QString act = clapActionCombo->itemData(idx).toString();
+    QSettings s("QuickSTT", "Config");
+    s.setValue("clapAction", act);
+    emit settingChanged("clapAction", act);
+  });
+  connect(snapActionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [=](int idx) {
+    QString act = snapActionCombo->itemData(idx).toString();
+    QSettings s("QuickSTT", "Config");
+    s.setValue("snapAction", act);
+    emit settingChanged("snapAction", act);
+  });
+  connect(sensSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), [=](double val) {
+    QSettings s("QuickSTT", "Config");
+    s.setValue("acousticSensitivity", val);
+    emit settingChanged("acousticSensitivity", val);
+  });
+
+  wLayout->addWidget(clapSnapGroup);
+
   // ══════════════════════════════════════════════════════════════════════════
   // Section 3: Active Wake Words
   // ══════════════════════════════════════════════════════════════════════════
@@ -3739,6 +8488,40 @@ void MainWindow::setupWakewordTab() {
   wakeWordList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
   wLayout->addWidget(wakeWordList);
 
+  QHBoxLayout *addWLayout = new QHBoxLayout();
+  QLineEdit *newWakeWordEdit = new QLineEdit();
+  newWakeWordEdit->setPlaceholderText("Enter new custom wake word (e.g. 'hey computer')...");
+  QPushButton *addWakeWordBtn = new QPushButton();
+  if (qtAwesome) {
+    QVariantMap opts;
+    opts.insert("color", QColor("#CCC"));
+    addWakeWordBtn->setIcon(qtAwesome->icon(QStringLiteral("solid plus"), opts));
+  } else {
+    addWakeWordBtn->setText("+");
+  }
+  addWakeWordBtn->setFixedWidth(32);
+  addWakeWordBtn->setToolTip("Add custom wake word");
+  addWLayout->addWidget(newWakeWordEdit);
+  addWLayout->addWidget(addWakeWordBtn);
+  wLayout->addLayout(addWLayout);
+
+  auto addCustomWakeWordAction = [=]() {
+    QString word = newWakeWordEdit->text().trimmed().toLower();
+    if (word.isEmpty())
+      return;
+    QSettings s("QuickSTT", "Config");
+    QStringList active = s.value("wakeWords", QStringList() << "hey jarvis" << "alexa").toStringList();
+    if (!active.contains(word)) {
+      active.append(word);
+      s.setValue("wakeWords", active);
+      emit settingChanged("wakeWordsChanged", active);
+      refreshWakeWordSelections(wakeEngineCombo->currentText());
+    }
+    newWakeWordEdit->clear();
+  };
+  connect(addWakeWordBtn, &QPushButton::clicked, addCustomWakeWordAction);
+  connect(newWakeWordEdit, &QLineEdit::returnPressed, addCustomWakeWordAction);
+
   // ══════════════════════════════════════════════════════════════════════════
   // Section 4: Active Close Words
   // ══════════════════════════════════════════════════════════════════════════
@@ -3748,25 +8531,35 @@ void MainWindow::setupWakewordTab() {
   wLayout->addWidget(closeLabel);
 
   closeWordList = new QListWidget();
-  closeWordList->setMaximumHeight(80);
+  closeWordList->setMaximumHeight(120);
+  closeWordList->setStyleSheet(
+      "QListWidget { background: #2A2A2A; border: 1px solid #444; "
+      "border-radius: 4px; }"
+      "QListWidget::item { padding: 2px 4px; }"
+      "QListWidget::item:selected { background: #3A3A5A; }");
   QStringList cWords =
       s.value("closeWords", QStringList() << "stop listening" << "go to sleep")
           .toStringList();
-  closeWordList->addItems(cWords);
+  for (const QString &w : cWords)
+    addCloseWordRow(w);
   wLayout->addWidget(closeWordList);
 
   QHBoxLayout *addCLayout = new QHBoxLayout();
   newCloseWordEdit = new QLineEdit();
   newCloseWordEdit->setPlaceholderText("Enter new close word...");
-  addCloseWordBtn = new QPushButton("+");
+  addCloseWordBtn = new QPushButton();
+  if (qtAwesome) {
+    QVariantMap opts;
+    opts.insert("color", QColor("#CCC"));
+    addCloseWordBtn->setIcon(qtAwesome->icon(QStringLiteral("solid plus"), opts));
+  } else {
+    addCloseWordBtn->setText("+");
+  }
   addCloseWordBtn->setFixedWidth(32);
+  addCloseWordBtn->setToolTip("Add close word");
   addCLayout->addWidget(newCloseWordEdit);
   addCLayout->addWidget(addCloseWordBtn);
   wLayout->addLayout(addCLayout);
-
-  removeCloseWordBtn = new QPushButton("Remove Selected");
-  removeCloseWordBtn->setFixedWidth(140);
-  wLayout->addWidget(removeCloseWordBtn);
 
   wLayout->addStretch();
   tabs->addTab(makeScrollablePage(wakeTab), "Wakeword");
@@ -3839,33 +8632,21 @@ void MainWindow::setupWakewordTab() {
               persistCheckedWakeWords();
           });
 
-  // Close word add/remove
-  connect(addCloseWordBtn, &QPushButton::clicked, [=]() {
+  // Close word add
+  auto addCloseWordAction = [=]() {
     QString word = newCloseWordEdit->text().trimmed().toLower();
-    if (!word.isEmpty() &&
-        closeWordList->findItems(word, Qt::MatchExactly).isEmpty()) {
-      closeWordList->addItem(word);
-      newCloseWordEdit->clear();
-      QSettings s("QuickSTT", "Config");
-      QStringList cwords = s.value("closeWords").toStringList();
-      cwords.append(word);
-      s.setValue("closeWords", cwords);
-      emit settingChanged("closeWordsChanged", cwords);
+    if (word.isEmpty())
+      return;
+    for (int i = 0; i < closeWordList->count(); ++i) {
+      if (closeWordList->item(i)->data(Qt::UserRole).toString() == word)
+        return;
     }
-  });
-
-  connect(removeCloseWordBtn, &QPushButton::clicked, [=]() {
-    QListWidgetItem *item = closeWordList->currentItem();
-    if (item) {
-      QString word = item->text();
-      delete item;
-      QSettings s("QuickSTT", "Config");
-      QStringList cwords = s.value("closeWords").toStringList();
-      cwords.removeAll(word);
-      s.setValue("closeWords", cwords);
-      emit settingChanged("closeWordsChanged", cwords);
-    }
-  });
+    addCloseWordRow(word);
+    newCloseWordEdit->clear();
+    persistCloseWords();
+  };
+  connect(addCloseWordBtn, &QPushButton::clicked, addCloseWordAction);
+  connect(newCloseWordEdit, &QLineEdit::returnPressed, addCloseWordAction);
 
   // Initialize UI state
   updateWakeEngineUI();
@@ -3980,6 +8761,98 @@ void MainWindow::persistCheckedWakeWords() {
   QSettings s("QuickSTT", "Config");
   s.setValue("wakeWords", checked);
   emit settingChanged("wakeWordsChanged", checked);
+}
+
+void MainWindow::addCloseWordRow(const QString &word) {
+  auto *item = new QListWidgetItem(closeWordList);
+  item->setData(Qt::UserRole, word);
+  item->setSizeHint(QSize(0, 30));
+
+  auto *row = new QWidget(closeWordList);
+  auto *hl = new QHBoxLayout(row);
+  hl->setContentsMargins(6, 0, 2, 0);
+  hl->setSpacing(4);
+
+  auto *label = new QLabel(word, row);
+  label->setStyleSheet("color: #DDD; font-size: 12px;");
+  hl->addWidget(label, 1);
+
+  auto *editBtn = new QToolButton(row);
+  editBtn->setFixedSize(22, 22);
+  editBtn->setToolTip("Edit");
+  editBtn->setStyleSheet(
+      "QToolButton { border: none; background: transparent; }"
+      "QToolButton:hover { background: #444; border-radius: 3px; }");
+
+  auto *delBtn = new QToolButton(row);
+  delBtn->setFixedSize(22, 22);
+  delBtn->setToolTip("Delete");
+  delBtn->setStyleSheet(
+      "QToolButton { border: none; background: transparent; }"
+      "QToolButton:hover { background: #644; border-radius: 3px; }");
+
+  if (qtAwesome) {
+    QVariantMap penOpts;
+    penOpts.insert("color", QColor("#AAA"));
+    penOpts.insert("scale-factor", 0.75);
+    editBtn->setIcon(
+        qtAwesome->icon(QStringLiteral("solid pen-to-square"), penOpts));
+
+    QVariantMap trashOpts;
+    trashOpts.insert("color", QColor("#E57373"));
+    trashOpts.insert("scale-factor", 0.75);
+    delBtn->setIcon(
+        qtAwesome->icon(QStringLiteral("solid trash-can"), trashOpts));
+  } else {
+    editBtn->setText(QString::fromUtf8("\xe2\x9c\x8f"));
+    delBtn->setText(QString::fromUtf8("\xf0\x9f\x97\x91"));
+  }
+
+  hl->addWidget(editBtn);
+  hl->addWidget(delBtn);
+  closeWordList->setItemWidget(item, row);
+
+  connect(editBtn, &QToolButton::clicked, this, [=]() {
+    int row = closeWordList->row(item);
+    if (row < 0)
+      return;
+    QString oldWord = item->data(Qt::UserRole).toString();
+    bool ok = false;
+    QString newWord =
+        QInputDialog::getText(this, "Edit Close Word", "Close word:",
+                              QLineEdit::Normal, oldWord, &ok)
+            .trimmed()
+            .toLower();
+    if (!ok || newWord.isEmpty() || newWord == oldWord)
+      return;
+    for (int i = 0; i < closeWordList->count(); ++i) {
+      if (closeWordList->item(i)->data(Qt::UserRole).toString() == newWord)
+        return;
+    }
+    item->setData(Qt::UserRole, newWord);
+    label->setText(newWord);
+    persistCloseWords();
+  });
+
+  connect(delBtn, &QToolButton::clicked, this, [=]() {
+    int row = closeWordList->row(item);
+    if (row < 0)
+      return;
+    delete closeWordList->takeItem(row);
+    persistCloseWords();
+  });
+}
+
+void MainWindow::persistCloseWords() {
+  QStringList words;
+  for (int i = 0; i < closeWordList->count(); ++i) {
+    QListWidgetItem *item = closeWordList->item(i);
+    if (item)
+      words << item->data(Qt::UserRole).toString();
+  }
+  QSettings s("QuickSTT", "Config");
+  s.setValue("closeWords", words);
+  emit settingChanged("closeWordsChanged", words);
 }
 
 void MainWindow::onRefreshModels() {

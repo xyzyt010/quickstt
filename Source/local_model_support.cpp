@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QSettings>
@@ -20,6 +21,25 @@ QString cleanIdPart(QString text) {
   while (result.contains("__"))
     result.replace("__", "_");
   return result.trimmed();
+}
+
+QString migrateLegacyModelName(QString text) {
+  text = text.trimmed();
+  if (text.compare(QStringLiteral("NeMo FastConformer TDT 0.6B"),
+                   Qt::CaseInsensitive) == 0) {
+    return QStringLiteral("NVIDIA Parakeet TDT 0.6B v3 INT8");
+  }
+  if (text.compare(QStringLiteral("NeMo FastConformer CTC 110M"),
+                   Qt::CaseInsensitive) == 0) {
+    return QStringLiteral("NVIDIA Parakeet CTC 110M INT8");
+  }
+  if (text.compare(QStringLiteral("NVIDIA Parakeet TDT 0.6B v3 (GGUF)"),
+                   Qt::CaseInsensitive) == 0) {
+    // The former GGUF/CrispASR choice has been retired.  NVIDIA Parakeet is
+    // served exclusively by the bundled Rust ONNX engine.
+    return QStringLiteral("NVIDIA Parakeet TDT 0.6B v3 INT8 (ONNX/Rust)");
+  }
+  return text;
 }
 
 QString formatMemoryMb(int memoryMb) {
@@ -41,13 +61,55 @@ QString targetBackendId(const ComputeTargetInfo &target) {
     return QStringLiteral("cpu");
 
   const QString vendor = target.vendorName.toLower();
-  if (vendor.contains("nvidia") && target.whisperGpuSupported)
+  if (vendor.contains("nvidia") && target.localAccelerationDetected)
     return QStringLiteral("nvidia_cuda");
-  if (vendor.contains("intel") && target.whisperGpuSupported)
+  if (vendor.contains("intel") && target.localAccelerationDetected)
     return QStringLiteral("intel_openvino");
-  if (vendor.contains("amd") && target.whisperGpuSupported)
+  if (vendor.contains("amd") && target.localAccelerationDetected)
     return QStringLiteral("amd_vulkan");
   return QStringLiteral("cpu");
+}
+
+QString normalizeBackendKey(QString key) {
+  key = key.trimmed().toLower();
+  if (key == QStringLiteral("cuda"))
+    return QStringLiteral("nvidia_cuda");
+  if (key == QStringLiteral("openvino"))
+    return QStringLiteral("intel_openvino");
+  if (key.isEmpty())
+    return QStringLiteral("cpu");
+  return key;
+}
+
+QString backendLabel(QString key) {
+  key = normalizeBackendKey(key);
+  if (key == QStringLiteral("nvidia_cuda"))
+    return QStringLiteral("NVIDIA CUDA");
+  if (key == QStringLiteral("intel_openvino"))
+    return QStringLiteral("Intel OpenVINO");
+  return QStringLiteral("CPU ONNX Runtime");
+}
+
+QString backendStateTag(QString key) {
+  key = normalizeBackendKey(key);
+  if (key == QStringLiteral("nvidia_cuda"))
+    return QStringLiteral("CUDA");
+  if (key == QStringLiteral("intel_openvino"))
+    return QStringLiteral("OpenVINO");
+  return QStringLiteral("CPU");
+}
+
+QString modelBackendSettingKey(const QString &modelName) {
+  return QStringLiteral("localModels/%1/backend").arg(cleanIdPart(modelName));
+}
+
+ComputeTargetInfo selectedComputeTarget() {
+  const QVector<ComputeTargetInfo> targets = detectComputeTargets();
+  QSettings settings(QStringLiteral("QuickSTT"), QStringLiteral("Config"));
+  QString targetId = settings.value(QStringLiteral("computeTargetId")).toString();
+  if (targetId.isEmpty())
+    targetId = defaultComputeTargetId(targets);
+  return computeTargetById(targets, targetId);
 }
 
 QStringList installRootCandidates(const QString &rootKey) {
@@ -57,20 +119,68 @@ QStringList installRootCandidates(const QString &rootKey) {
   if (!appRoot.isEmpty())
     roots << appRoot;
 
+  // Prefer LocalAppData (primary Windows install root for large GGUF models
+  // like Nemotron), then Roaming APPDATA for older installs.
+  const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
+  if (!localAppData.isEmpty())
+    roots << QDir(localAppData).filePath(QStringLiteral("QuickSTT"));
+
   const QString appData = qEnvironmentVariable("APPDATA");
   if (!appData.isEmpty())
     roots << QDir(appData).filePath(QStringLiteral("QuickSTT"));
 
   QStringList expanded;
   for (const QString &root : roots) {
-    const QString child = (rootKey == QStringLiteral("models"))
-                              ? QStringLiteral("models")
-                              : QStringLiteral("whisper");
-    const QString expandedRoot = QDir::cleanPath(QDir(root).filePath(child));
+    Q_UNUSED(rootKey);
+    const QString expandedRoot =
+        QDir::cleanPath(QDir(root).filePath(QStringLiteral("models")));
     if (!expanded.contains(expandedRoot))
       expanded << expandedRoot;
   }
   return expanded;
+}
+
+bool copyDirectoryIfMissing(const QString &sourcePath, const QString &targetPath) {
+  const QFileInfo sourceInfo(sourcePath);
+  if (!sourceInfo.exists())
+    return true;
+
+  if (sourceInfo.isDir()) {
+    QDir().mkpath(targetPath);
+    const QFileInfoList entries =
+        QDir(sourcePath).entryInfoList(QDir::NoDotAndDotDot | QDir::AllEntries);
+    for (const QFileInfo &entry : entries) {
+      const QString targetEntry = QDir(targetPath).filePath(entry.fileName());
+      if (!copyDirectoryIfMissing(entry.absoluteFilePath(), targetEntry))
+        return false;
+    }
+    return true;
+  }
+
+  if (QFileInfo::exists(targetPath))
+    return true;
+
+  QDir().mkpath(QFileInfo(targetPath).absolutePath());
+  return QFile::copy(sourcePath, targetPath);
+}
+
+void migrateLegacyQuickSttData(const QString &legacyRoot, const QString &targetRoot) {
+  if (legacyRoot.isEmpty() || targetRoot.isEmpty())
+    return;
+
+  const QString cleanLegacy = QDir::cleanPath(legacyRoot);
+  const QString cleanTarget = QDir::cleanPath(targetRoot);
+  if (cleanLegacy == cleanTarget || !QFileInfo::exists(cleanLegacy))
+    return;
+
+  for (const QString &child :
+       {QStringLiteral("models"), QStringLiteral("services")}) {
+    const QString legacyChild = QDir(cleanLegacy).filePath(child);
+    if (!QFileInfo::exists(legacyChild))
+      continue;
+    const QString targetChild = QDir(cleanTarget).filePath(child);
+    copyDirectoryIfMissing(legacyChild, targetChild);
+  }
 }
 
 LocalModelDescriptor makeVoskDescriptor(const QString &displayName,
@@ -95,81 +205,64 @@ LocalModelDescriptor makeVoskDescriptor(const QString &displayName,
   return item;
 }
 
-LocalModelDescriptor makeWhisperCppDescriptor(const QString &displayName,
-                                              const QString &backendKey,
-                                              const QString &variantKey,
-                                              const QString &accelerationLabel,
-                                              const QString &packageId,
-                                              const QString &runtimePackageId,
-                                              const QStringList &extraPackageIds,
-                                              int modelSizeMb,
-                                              int runtimeSizeMb,
-                                              int minMemoryMb,
-                                              int preferredMemoryMb,
-                                              bool requiresGpu) {
+LocalModelDescriptor makeSherpaDescriptor(const QString &displayName,
+                                          const QString &engineFamily,
+                                          const QString &variantKey,
+                                          const QString &packageId,
+                                          const QString &installedPath,
+                                          int sizeMb, int minRamMb,
+                                          const QString &description) {
   LocalModelDescriptor item;
   item.id = cleanIdPart(displayName);
   item.displayName = displayName;
-  item.engineFamily = QStringLiteral("whisper.cpp");
-  item.accelerationLabel = accelerationLabel;
-  item.description =
-      QStringLiteral("Optional whisper.cpp package for %1 inference.")
-          .arg(accelerationLabel);
-  item.widgetHint = QStringLiteral("Widget-ready after install");
-  item.backendKey = backendKey;
+  item.engineFamily = engineFamily;
+  item.accelerationLabel = QStringLiteral("Shared ONNX Runtime");
+  item.description = description;
+  item.widgetHint = QStringLiteral("Uses Vosk wake base");
+  item.backendKey = QStringLiteral("cpu");
   item.variantKey = variantKey;
   item.runtimeExecutablePath =
-      QStringLiteral("runtimes/whisper_cpp/%1/whisper-cli.exe").arg(backendKey);
-  item.installedPath = QStringLiteral("models/whisper_cpp/%1/ggml-%2.bin")
-                           .arg(variantKey, variantKey == QStringLiteral("turbo")
-                                                ? QStringLiteral("large-v3-turbo")
-                                                : variantKey);
-  item.runnerModelId = (variantKey == QStringLiteral("turbo"))
-                           ? QStringLiteral("large-v3-turbo")
-                           : variantKey;
+      QStringLiteral("runtimes/sherpa_onnx/cpu/bin/sherpa-onnx-offline.exe");
+  item.installedPath = installedPath;
+  item.runnerModelId = variantKey;
   item.packageId = packageId;
-  item.runtimePackageId = runtimePackageId;
-  item.extraPackageIds = extraPackageIds;
-  item.modelSizeMb = modelSizeMb;
-  item.runtimeSizeMb = runtimeSizeMb;
-  item.minRecommendedMemoryMb = minMemoryMb;
-  item.preferredMemoryMb = preferredMemoryMb;
+  item.runtimePackageId = QStringLiteral("rt_sherpa_onnx_cpu");
+  item.modelSizeMb = sizeMb;
+  item.runtimeSizeMb = 22;
+  item.minRecommendedMemoryMb = minRamMb;
+  item.preferredMemoryMb = minRamMb + 1024;
   item.widgetSelectable = true;
   item.directDownload = true;
-  item.requiresGpu = requiresGpu;
   return item;
 }
 
-LocalModelDescriptor makeFasterWhisperDescriptor(
-    const QString &displayName, const QString &backendKey,
-    const QString &variantKey, const QString &accelerationLabel,
-    const QString &packageId, int modelSizeMb, int runtimeSizeMb,
-    int minMemoryMb, int preferredMemoryMb, bool requiresGpu) {
+LocalModelDescriptor makeWhisperCppDescriptor(const QString &displayName,
+                                               const QString &variantKey,
+                                               const QString &packageId,
+                                               const QString &installedPath,
+                                               int sizeMb, int minRamMb,
+                                               const QString &description) {
   LocalModelDescriptor item;
   item.id = cleanIdPart(displayName);
   item.displayName = displayName;
-  item.engineFamily = QStringLiteral("faster-whisper");
-  item.accelerationLabel = accelerationLabel;
-  item.description =
-      QStringLiteral("Optional faster-whisper package using a standalone CTranslate2 runner for %1.")
-          .arg(accelerationLabel);
-  item.widgetHint = QStringLiteral("Widget-ready after install");
-  item.backendKey = backendKey;
+  item.engineFamily = QStringLiteral("whisper_cpp");
+  item.accelerationLabel = QStringLiteral("whisper.cpp CPU");
+  item.description = description;
+  item.widgetHint = QStringLiteral("Uses Vosk wake base");
+  item.backendKey = QStringLiteral("cpu");
   item.variantKey = variantKey;
   item.runtimeExecutablePath =
-      QStringLiteral("runtimes/faster_whisper/faster_whisper_runner.exe");
-  item.installedPath =
-      QStringLiteral("models/faster_whisper/%1/model.bin").arg(variantKey);
+      QStringLiteral("runtimes/whisper_cpp/cpu/whisper-cli.exe");
+  item.installedPath = installedPath;
   item.runnerModelId = variantKey;
   item.packageId = packageId;
-  item.runtimePackageId = QStringLiteral("rt_faster_whisper");
-  item.modelSizeMb = modelSizeMb;
-  item.runtimeSizeMb = runtimeSizeMb;
-  item.minRecommendedMemoryMb = minMemoryMb;
-  item.preferredMemoryMb = preferredMemoryMb;
+  item.runtimePackageId = QStringLiteral("rt_whisper_cpp_cpu");
+  item.modelSizeMb = sizeMb;
+  item.runtimeSizeMb = 8;
+  item.minRecommendedMemoryMb = minRamMb;
+  item.preferredMemoryMb = minRamMb + 1024;
   item.widgetSelectable = true;
   item.directDownload = true;
-  item.requiresGpu = requiresGpu;
   return item;
 }
 
@@ -219,126 +312,119 @@ QVector<LocalModelDescriptor> allDescriptors() {
     items << makeVoskDescriptor(QStringLiteral("Vosk Small Ja"),
                                 QStringLiteral("pkg_vosk_small_ja"), 90, 1536,
                                 false);
+    items << makeSherpaDescriptor(
+        QStringLiteral("Moonshine v2 Tiny En"),
+        QStringLiteral("moonshine_v2"), QStringLiteral("moonshine_v2_tiny_en"),
+        QStringLiteral("pkg_moonshine_v2_tiny_en"),
+        QStringLiteral("moonshine_v2/tiny_en"), 43, 1536,
+        QStringLiteral(
+            "Moonshine v2 tiny-tier English CPU recognizer via sherpa-onnx."));
+    items << makeSherpaDescriptor(
+        QStringLiteral("Moonshine v2 Base En"),
+        QStringLiteral("moonshine_v2"), QStringLiteral("moonshine_v2_base_en"),
+        QStringLiteral("pkg_moonshine_v2_base_en"),
+        QStringLiteral("moonshine_v2/base_en"), 135, 2048,
+        QStringLiteral(
+            "Moonshine v2 base-tier English CPU recognizer via sherpa-onnx."));
+    {
+      LocalModelDescriptor parakeet = makeSherpaDescriptor(
+          QStringLiteral("NVIDIA Parakeet TDT 0.6B v3 INT8 (ONNX/Rust)"),
+          QStringLiteral("nemo_transducer"),
+          QStringLiteral("nemo_fastconformer_tdt_0_6b_v3_int8"),
+          QStringLiteral("pkg_nemo_tdt_0_6b_v3_int8"),
+          QStringLiteral("nemo/tdt_0_6b_v3_int8"), 640, 4096,
+          QStringLiteral(
+              "NVIDIA Parakeet transducer recognizer with a shared INT8 ONNX model package via Rust engine."));
+      // Direct PCM worker used by both the C++ pill (file) and Ctrl+Space popup.
+      parakeet.runtimeExecutablePath =
+          QStringLiteral("tools/parakeet/parakeet_engine.exe");
+      parakeet.supportsBatchFile = true;
+      parakeet.supportsStreaming = false; // utterance batch today; streaming later
+      parakeet.supportsDirectPcm = true;
+      parakeet.usesPersistentWorker = true;
+      parakeet.widgetHint = QStringLiteral("Native direct PCM worker");
+      items << parakeet;
+    }
+    {
+      // Nemotron 3.5 ASR Streaming — EXACT same stack as Handy:
+      //   model:   handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf (Q8_0)
+      //   runtime: transcribe.cpp (tools/nemotron/transcribe.dll + ggml)
+      LocalModelDescriptor nemotron = makeSherpaDescriptor(
+          QStringLiteral("NVIDIA Nemotron 3.5 ASR Streaming 0.6B"),
+          QStringLiteral("nemotron_streaming"),
+          QStringLiteral("nemotron_3_5_asr_streaming_0_6b"),
+          QStringLiteral("pkg_nemotron_3_5_asr_streaming_0_6b"),
+          QStringLiteral(
+              "nemotron/nemotron-3.5-asr-streaming-0.6b/"
+              "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"),
+          716, 4096,
+          QStringLiteral(
+              "Handy's Nemotron 3.5 multilingual streaming ASR (0.6B GGUF via "
+              "transcribe.cpp). Ctrl+Space uses live partials; the main pill "
+              "uses full-utterance finalize."));
+      nemotron.runtimeExecutablePath =
+          QStringLiteral("tools/nemotron/nemotron_engine.exe");
+      nemotron.accelerationLabel = QStringLiteral("transcribe.cpp (Handy)");
+      nemotron.supportsBatchFile = true;
+      nemotron.supportsStreaming = true;
+      nemotron.supportsDirectPcm = true;
+      nemotron.usesPersistentWorker = true;
+      nemotron.widgetSelectable = true;
+      nemotron.directDownload = true;
+      nemotron.widgetHint = QStringLiteral("Streaming · Handy Live");
+      items << nemotron;
+    }
 
+    items << makeSherpaDescriptor(
+        QStringLiteral("NVIDIA Parakeet CTC 110M INT8"),
+        QStringLiteral("nemo_ctc"),
+        QStringLiteral("nemo_fastconformer_ctc_110m_int8"),
+        QStringLiteral("pkg_nemo_ctc_110m_int8"),
+        QStringLiteral("nemo/ctc_110m_int8"), 126, 2048,
+        QStringLiteral(
+            "NVIDIA Parakeet CTC recognizer with a shared INT8 ONNX model package via sherpa-onnx."));
     items << makeWhisperCppDescriptor(
-        QStringLiteral("whisper.cpp Tiny_cpu"), QStringLiteral("cpu"),
-        QStringLiteral("tiny"), QStringLiteral("CPU"),
-        QStringLiteral("pkg_whisper_cpp_tiny"),
-        QStringLiteral("rt_whisper_cpp_cpu"), {}, 75, 16, 2048, 4096, false);
+        QStringLiteral("Whisper Small En Q8"),
+        QStringLiteral("whisper_small_en_q8"),
+        QStringLiteral("pkg_whisper_small_en_q8"),
+        QStringLiteral("whisper_cpp/small_en_q8"), 264, 2048,
+        QStringLiteral(
+            "OpenAI Whisper small.en model in GGML INT8 format via whisper.cpp. High accuracy English-only recognizer."));
     items << makeWhisperCppDescriptor(
-        QStringLiteral("whisper.cpp Small_cpu"), QStringLiteral("cpu"),
-        QStringLiteral("small"), QStringLiteral("CPU"),
-        QStringLiteral("pkg_whisper_cpp_small"),
-        QStringLiteral("rt_whisper_cpp_cpu"), {}, 466, 16, 4096, 8192, false);
+        QStringLiteral("Whisper Small En Q5"),
+        QStringLiteral("whisper_small_en_q5"),
+        QStringLiteral("pkg_whisper_small_en_q5"),
+        QStringLiteral("whisper_cpp/small_en_q5"), 190, 1536,
+        QStringLiteral(
+            "OpenAI Whisper small.en model in GGML Q5 format via whisper.cpp. Fast English-only recognizer with near-Q8 accuracy."));
     items << makeWhisperCppDescriptor(
-        QStringLiteral("whisper.cpp Turbo_cpu"), QStringLiteral("cpu"),
-        QStringLiteral("turbo"), QStringLiteral("CPU"),
-        QStringLiteral("pkg_whisper_cpp_turbo"),
-        QStringLiteral("rt_whisper_cpp_cpu"), {}, 1600, 16, 8192, 12288,
-        false);
-
+        QStringLiteral("Whisper Tiny En Q8"),
+        QStringLiteral("whisper_tiny_en_q8"),
+        QStringLiteral("pkg_whisper_tiny_en_q8"),
+        QStringLiteral("whisper_cpp/tiny_en_q8"), 44, 512,
+        QStringLiteral(
+            "OpenAI Whisper tiny.en model in GGML INT8 format via whisper.cpp. Ultra-fast English-only recognizer."));
     items << makeWhisperCppDescriptor(
-        QStringLiteral("whisper.cpp Tiny_nvidia_cuda"),
-        QStringLiteral("nvidia_cuda"), QStringLiteral("tiny"),
-        QStringLiteral("NVIDIA CUDA"),
-        QStringLiteral("pkg_whisper_cpp_tiny"),
-        QStringLiteral("rt_whisper_cpp_nvidia"), {}, 75, 458, 2048, 4096,
-        true);
+        QStringLiteral("Whisper Tiny En Q5"),
+        QStringLiteral("whisper_tiny_en_q5"),
+        QStringLiteral("pkg_whisper_tiny_en_q5"),
+        QStringLiteral("whisper_cpp/tiny_en_q5"), 32, 512,
+        QStringLiteral(
+            "OpenAI Whisper tiny.en model in GGML Q5 format via whisper.cpp. Fastest English-only recognizer."));
     items << makeWhisperCppDescriptor(
-        QStringLiteral("whisper.cpp Small_nvidia_cuda"),
-        QStringLiteral("nvidia_cuda"), QStringLiteral("small"),
-        QStringLiteral("NVIDIA CUDA"),
-        QStringLiteral("pkg_whisper_cpp_small"),
-        QStringLiteral("rt_whisper_cpp_nvidia"), {}, 466, 458, 6144, 8192,
-        true);
+        QStringLiteral("Whisper Base En Q8"),
+        QStringLiteral("whisper_base_en_q8"),
+        QStringLiteral("pkg_whisper_base_en_q8"),
+        QStringLiteral("whisper_cpp/base_en_q8"), 74, 1024,
+        QStringLiteral(
+            "OpenAI Whisper base.en model in GGML INT8 format via whisper.cpp. Good balance of speed and accuracy."));
     items << makeWhisperCppDescriptor(
-        QStringLiteral("whisper.cpp Turbo_nvidia_cuda"),
-        QStringLiteral("nvidia_cuda"), QStringLiteral("turbo"),
-        QStringLiteral("NVIDIA CUDA"),
-        QStringLiteral("pkg_whisper_cpp_turbo"),
-        QStringLiteral("rt_whisper_cpp_nvidia"), {}, 1600, 458, 10240, 12288,
-        true);
-
-    items << makeWhisperCppDescriptor(
-        QStringLiteral("whisper.cpp Tiny_intel_openvino"),
-        QStringLiteral("intel_openvino"), QStringLiteral("tiny"),
-        QStringLiteral("Intel OpenVINO GPU"),
-        QStringLiteral("pkg_whisper_cpp_tiny"),
-        QStringLiteral("rt_whisper_cpp_intel"),
-        {QStringLiteral("pkg_whisper_cpp_tiny_intel_encoder")}, 75, 96, 2048,
-        4096, true);
-    items << makeWhisperCppDescriptor(
-        QStringLiteral("whisper.cpp Small_intel_openvino"),
-        QStringLiteral("intel_openvino"), QStringLiteral("small"),
-        QStringLiteral("Intel OpenVINO GPU"),
-        QStringLiteral("pkg_whisper_cpp_small"),
-        QStringLiteral("rt_whisper_cpp_intel"),
-        {QStringLiteral("pkg_whisper_cpp_small_intel_encoder")}, 466, 96, 4096,
-        6144, true);
-    items << makeWhisperCppDescriptor(
-        QStringLiteral("whisper.cpp Turbo_intel_openvino"),
-        QStringLiteral("intel_openvino"), QStringLiteral("turbo"),
-        QStringLiteral("Intel OpenVINO GPU"),
-        QStringLiteral("pkg_whisper_cpp_turbo"),
-        QStringLiteral("rt_whisper_cpp_intel"),
-        {QStringLiteral("pkg_whisper_cpp_turbo_intel_encoder")}, 1600, 96, 6144,
-        8192, true);
-
-    items << makeWhisperCppDescriptor(
-        QStringLiteral("whisper.cpp Tiny_amd_vulkan"),
-        QStringLiteral("amd_vulkan"), QStringLiteral("tiny"),
-        QStringLiteral("AMD Vulkan GPU"),
-        QStringLiteral("pkg_whisper_cpp_tiny"),
-        QStringLiteral("rt_whisper_cpp_vulkan"), {}, 75, 40, 2048, 4096,
-        true);
-    items << makeWhisperCppDescriptor(
-        QStringLiteral("whisper.cpp Small_amd_vulkan"),
-        QStringLiteral("amd_vulkan"), QStringLiteral("small"),
-        QStringLiteral("AMD Vulkan GPU"),
-        QStringLiteral("pkg_whisper_cpp_small"),
-        QStringLiteral("rt_whisper_cpp_vulkan"), {}, 466, 40, 4096, 8192,
-        true);
-    items << makeWhisperCppDescriptor(
-        QStringLiteral("whisper.cpp Turbo_amd_vulkan"),
-        QStringLiteral("amd_vulkan"), QStringLiteral("turbo"),
-        QStringLiteral("AMD Vulkan GPU"),
-        QStringLiteral("pkg_whisper_cpp_turbo"),
-        QStringLiteral("rt_whisper_cpp_vulkan"), {}, 1600, 40, 8192, 12288,
-        true);
-
-    items << makeFasterWhisperDescriptor(
-        QStringLiteral("faster-whisper Tiny_cpu"), QStringLiteral("cpu"),
-        QStringLiteral("tiny"), QStringLiteral("CPU / CTranslate2"),
-        QStringLiteral("pkg_faster_whisper_tiny"), 75, 110, 2048, 4096,
-        false);
-    items << makeFasterWhisperDescriptor(
-        QStringLiteral("faster-whisper Small_cpu"), QStringLiteral("cpu"),
-        QStringLiteral("small"), QStringLiteral("CPU / CTranslate2"),
-        QStringLiteral("pkg_faster_whisper_small"), 480, 110, 4096, 8192,
-        false);
-    items << makeFasterWhisperDescriptor(
-        QStringLiteral("faster-whisper Turbo_cpu"), QStringLiteral("cpu"),
-        QStringLiteral("turbo"), QStringLiteral("CPU / CTranslate2"),
-        QStringLiteral("pkg_faster_whisper_turbo"), 1550, 110, 6144, 12288,
-        false);
-
-    items << makeFasterWhisperDescriptor(
-        QStringLiteral("faster-whisper Tiny_nvidia_cuda"),
-        QStringLiteral("nvidia_cuda"), QStringLiteral("tiny"),
-        QStringLiteral("NVIDIA CUDA / CTranslate2"),
-        QStringLiteral("pkg_faster_whisper_tiny"), 75, 110, 2048, 4096, true);
-    items << makeFasterWhisperDescriptor(
-        QStringLiteral("faster-whisper Small_nvidia_cuda"),
-        QStringLiteral("nvidia_cuda"), QStringLiteral("small"),
-        QStringLiteral("NVIDIA CUDA / CTranslate2"),
-        QStringLiteral("pkg_faster_whisper_small"), 480, 110, 4096, 8192,
-        true);
-    items << makeFasterWhisperDescriptor(
-        QStringLiteral("faster-whisper Turbo_nvidia_cuda"),
-        QStringLiteral("nvidia_cuda"), QStringLiteral("turbo"),
-        QStringLiteral("NVIDIA CUDA / CTranslate2"),
-        QStringLiteral("pkg_faster_whisper_turbo"), 1550, 110, 6144, 12288,
-        true);
+        QStringLiteral("Whisper Large-v3 Turbo Q8"),
+        QStringLiteral("whisper_large_v3_turbo_q8"),
+        QStringLiteral("pkg_whisper_large_v3_turbo_q8"),
+        QStringLiteral("whisper_cpp/large_v3_turbo_q8"), 1500, 8192,
+        QStringLiteral(
+            "OpenAI Whisper large-v3-turbo model in GGML Q8_0 format via whisper.cpp. Highest accuracy English-only recognizer."));
 
     return items;
   }();
@@ -381,138 +467,145 @@ QVector<LocalModelPackageInfo> allPackages() {
        QStringLiteral("models"), QString(),
        {QStringLiteral("vosk-model-cn-0.22")},
        {QStringLiteral("vosk-model-cn-0.22")}, true},
-
+      {QStringLiteral("rt_sherpa_onnx_cpu"),
+       QStringLiteral("sherpa-onnx CPU Runtime"),
+       QStringLiteral("models/runtimes/sherpa_onnx_cpu_runtime.tar.bz2"),
+       QStringLiteral("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                      "v1.12.34/"
+                      "sherpa-onnx-v1.12.34-win-x64-shared-MT-Release-no-tts."
+                      "tar.bz2"),
+       QStringLiteral("models"), QStringLiteral("runtimes/sherpa_onnx/cpu"),
+       {QStringLiteral("runtimes/sherpa_onnx/cpu/bin/sherpa-onnx-offline.exe")},
+       {QStringLiteral("runtimes/sherpa_onnx/cpu")}, true},
+      {QStringLiteral("rt_sherpa_onnx_cuda"),
+       QStringLiteral("sherpa-onnx CUDA Runtime"),
+       QStringLiteral("models/runtimes/sherpa_onnx_cuda_runtime.tar.bz2"),
+       QStringLiteral("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                      "v1.12.34/"
+                      "sherpa-onnx-v1.12.34-win-x64-cuda.tar.bz2"),
+       QStringLiteral("models"), QStringLiteral("runtimes/sherpa_onnx/cuda"),
+       {QStringLiteral("runtimes/sherpa_onnx/cuda/bin/sherpa-onnx-offline.exe")},
+       {QStringLiteral("runtimes/sherpa_onnx/cuda")}, true},
+      {QStringLiteral("pkg_moonshine_v2_tiny_en"),
+       QStringLiteral("Moonshine v2 Tiny En"),
+       QStringLiteral("models/sherpa_onnx/moonshine_v2_tiny_en.tar.bz2"),
+       QStringLiteral("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                      "asr-models/"
+                      "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar."
+                      "bz2"),
+       QStringLiteral("models"), QStringLiteral("moonshine_v2/tiny_en"),
+       {QStringLiteral("moonshine_v2/tiny_en/encoder_model.ort"),
+        QStringLiteral("moonshine_v2/tiny_en/decoder_model_merged.ort"),
+        QStringLiteral("moonshine_v2/tiny_en/tokens.txt")},
+       {QStringLiteral("moonshine_v2/tiny_en")}, true},
+      {QStringLiteral("pkg_moonshine_v2_base_en"),
+       QStringLiteral("Moonshine v2 Base En"),
+       QStringLiteral("models/sherpa_onnx/moonshine_v2_base_en.tar.bz2"),
+       QStringLiteral("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                      "asr-models/"
+                      "sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar."
+                      "bz2"),
+       QStringLiteral("models"), QStringLiteral("moonshine_v2/base_en"),
+       {QStringLiteral("moonshine_v2/base_en/encoder_model.ort"),
+        QStringLiteral("moonshine_v2/base_en/decoder_model_merged.ort"),
+        QStringLiteral("moonshine_v2/base_en/tokens.txt")},
+       {QStringLiteral("moonshine_v2/base_en")}, true},
+      {QStringLiteral("pkg_nemo_tdt_0_6b_v3_int8"),
+       QStringLiteral("NVIDIA Parakeet TDT 0.6B v3 INT8 (ONNX/Rust)"),
+       QStringLiteral("models/sherpa_onnx/nemo_tdt_0_6b_v3_int8.tar.bz2"),
+       QStringLiteral("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                      "asr-models/"
+                      "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2"),
+       QStringLiteral("models"), QStringLiteral("nemo/tdt_0_6b_v3_int8"),
+       {QStringLiteral("nemo/tdt_0_6b_v3_int8/encoder.int8.onnx"),
+        QStringLiteral("nemo/tdt_0_6b_v3_int8/decoder.int8.onnx"),
+        QStringLiteral("nemo/tdt_0_6b_v3_int8/joiner.int8.onnx"),
+        QStringLiteral("nemo/tdt_0_6b_v3_int8/tokens.txt")},
+       {QStringLiteral("nemo/tdt_0_6b_v3_int8")}, true},
+      {QStringLiteral("pkg_nemo_ctc_110m_int8"),
+       QStringLiteral("NVIDIA Parakeet CTC 110M INT8"),
+       QStringLiteral("models/sherpa_onnx/nemo_ctc_110m_int8.tar.bz2"),
+       QStringLiteral("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                      "asr-models/"
+                      "sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8."
+                      "tar.bz2"),
+       QStringLiteral("models"), QStringLiteral("nemo/ctc_110m_int8"),
+       {QStringLiteral("nemo/ctc_110m_int8/model.int8.onnx"),
+        QStringLiteral("nemo/ctc_110m_int8/tokens.txt")},
+       {QStringLiteral("nemo/ctc_110m_int8")}, true},
       {QStringLiteral("rt_whisper_cpp_cpu"),
        QStringLiteral("whisper.cpp CPU Runtime"),
        QStringLiteral("models/runtimes/whisper_cpp_cpu_runtime.zip"),
-       QStringLiteral(
-           "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-x64.zip"),
-       QStringLiteral("whisper"),
-       QStringLiteral("runtimes/whisper_cpp/cpu"),
+       QStringLiteral("https://github.com/ggml-org/whisper.cpp/releases/"
+                      "download/v1.8.4/whisper-bin-x64.zip"),
+       QStringLiteral("models"), QStringLiteral("runtimes/whisper_cpp/cpu"),
        {QStringLiteral("runtimes/whisper_cpp/cpu/whisper-cli.exe")},
        {QStringLiteral("runtimes/whisper_cpp/cpu")}, true},
-      {QStringLiteral("rt_whisper_cpp_nvidia"),
-       QStringLiteral("whisper.cpp NVIDIA Runtime"),
-       QStringLiteral("models/runtimes/whisper_cpp_nvidia_runtime.zip"),
+      {QStringLiteral("pkg_whisper_small_en_q8"),
+       QStringLiteral("Whisper Small En Q8"),
+       QString(),
+       QStringLiteral("https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+                      "main/ggml-small.en-q8_0.bin"),
+       QStringLiteral("models"), QStringLiteral("whisper_cpp/small_en_q8"),
+       {QStringLiteral("whisper_cpp/small_en_q8/ggml-small.en-q8_0.bin")},
+       {QStringLiteral("whisper_cpp/small_en_q8")}, false},
+      {QStringLiteral("pkg_whisper_small_en_q5"),
+       QStringLiteral("Whisper Small En Q5"),
+       QString(),
+       QStringLiteral("https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+                      "main/ggml-small.en-q5_1.bin"),
+       QStringLiteral("models"), QStringLiteral("whisper_cpp/small_en_q5"),
+       {QStringLiteral("whisper_cpp/small_en_q5/ggml-small.en-q5_1.bin")},
+       {QStringLiteral("whisper_cpp/small_en_q5")}, false},
+      {QStringLiteral("pkg_whisper_tiny_en_q8"),
+       QStringLiteral("Whisper Tiny En Q8"),
+       QString(),
+       QStringLiteral("https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+                      "main/ggml-tiny.en-q8_0.bin"),
+       QStringLiteral("models"), QStringLiteral("whisper_cpp/tiny_en_q8"),
+       {QStringLiteral("whisper_cpp/tiny_en_q8/ggml-tiny.en-q8_0.bin")},
+       {QStringLiteral("whisper_cpp/tiny_en_q8")}, false},
+      {QStringLiteral("pkg_whisper_base_en_q8"),
+       QStringLiteral("Whisper Base En Q8"),
+       QString(),
+       QStringLiteral("https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+                      "main/ggml-base.en-q8_0.bin"),
+       QStringLiteral("models"), QStringLiteral("whisper_cpp/base_en_q8"),
+       {QStringLiteral("whisper_cpp/base_en_q8/ggml-base.en-q8_0.bin")},
+       {QStringLiteral("whisper_cpp/base_en_q8")}, false},
+      {QStringLiteral("pkg_whisper_large_v3_turbo_q8"),
+       QStringLiteral("Whisper Large-v3 Turbo Q8"),
+       QString(),
+       QStringLiteral("https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+                      "main/ggml-large-v3-turbo-q8_0.bin"),
+       QStringLiteral("models"), QStringLiteral("whisper_cpp/large_v3_turbo_q8"),
+       {QStringLiteral("whisper_cpp/large_v3_turbo_q8/ggml-large-v3-turbo-q8_0.bin")},
+       {QStringLiteral("whisper_cpp/large_v3_turbo_q8")}, false},
+      {QStringLiteral("pkg_whisper_tiny_en_q5"),
+       QStringLiteral("Whisper Tiny En Q5"),
+       QString(),
+       QStringLiteral("https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+                      "main/ggml-tiny.en-q5_1.bin"),
+       QStringLiteral("models"), QStringLiteral("whisper_cpp/tiny_en_q5"),
+       {QStringLiteral("whisper_cpp/tiny_en_q5/ggml-tiny.en-q5_1.bin")},
+       {QStringLiteral("whisper_cpp/tiny_en_q5")}, false},
+      // Handy Nemotron 3.5 — direct GGUF from handy-computer (same as Handy app).
+      // LocalModelManager special-cases this package id to run
+      // tools/nemotron/fetch_and_convert.py (HF hub download, resumable).
+      {QStringLiteral("pkg_nemotron_3_5_asr_streaming_0_6b"),
+       QStringLiteral("NVIDIA Nemotron 3.5 ASR Streaming 0.6B"),
+       QString(),
        QStringLiteral(
-           "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-cublas-12.4.0-bin-x64.zip"),
-       QStringLiteral("whisper"),
-       QStringLiteral("runtimes/whisper_cpp/nvidia_cuda"),
-       {QStringLiteral("runtimes/whisper_cpp/nvidia_cuda/whisper-cli.exe")},
-       {QStringLiteral("runtimes/whisper_cpp/nvidia_cuda")}, true},
-      {QStringLiteral("rt_whisper_cpp_intel"),
-       QStringLiteral("whisper.cpp Intel OpenVINO Runtime"),
-       QStringLiteral("models/runtimes/whisper_cpp_intel_openvino_runtime.zip"),
-       QString(), QStringLiteral("whisper"),
-       QStringLiteral("runtimes/whisper_cpp/intel_openvino"),
+           "https://huggingface.co/handy-computer/"
+           "nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/"
+           "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"),
+       QStringLiteral("models"),
+       QStringLiteral("nemotron/nemotron-3.5-asr-streaming-0.6b"),
        {QStringLiteral(
-           "runtimes/whisper_cpp/intel_openvino/whisper-cli.exe")},
-       {QStringLiteral("runtimes/whisper_cpp/intel_openvino")}, true},
-      {QStringLiteral("rt_whisper_cpp_vulkan"),
-       QStringLiteral("whisper.cpp Vulkan Runtime"),
-       QStringLiteral("models/runtimes/whisper_cpp_vulkan_runtime.zip"),
-       QString(), QStringLiteral("whisper"),
-       QStringLiteral("runtimes/whisper_cpp/amd_vulkan"),
-       {QStringLiteral("runtimes/whisper_cpp/amd_vulkan/whisper-cli.exe")},
-       {QStringLiteral("runtimes/whisper_cpp/amd_vulkan")}, true},
+           "nemotron/nemotron-3.5-asr-streaming-0.6b/"
+           "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf")},
+       {QStringLiteral("nemotron/nemotron-3.5-asr-streaming-0.6b")}, false},
 
-      {QStringLiteral("pkg_whisper_cpp_tiny"),
-       QStringLiteral("whisper.cpp Tiny Model"),
-       QStringLiteral("models/whisper_cpp/ggml-tiny.bin"),
-       QStringLiteral(
-           "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"),
-       QStringLiteral("whisper"), QString(),
-       {QStringLiteral("models/whisper_cpp/tiny/ggml-tiny.bin")},
-       {QStringLiteral("models/whisper_cpp/tiny/ggml-tiny.bin")}, false},
-      {QStringLiteral("pkg_whisper_cpp_small"),
-       QStringLiteral("whisper.cpp Small Model"),
-       QStringLiteral("models/whisper_cpp/ggml-small.bin"),
-       QStringLiteral(
-           "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"),
-       QStringLiteral("whisper"), QString(),
-       {QStringLiteral("models/whisper_cpp/small/ggml-small.bin")},
-       {QStringLiteral("models/whisper_cpp/small/ggml-small.bin")}, false},
-      {QStringLiteral("pkg_whisper_cpp_turbo"),
-       QStringLiteral("whisper.cpp Turbo Model"),
-       QStringLiteral("models/whisper_cpp/ggml-large-v3-turbo.bin"),
-       QStringLiteral(
-           "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"),
-       QStringLiteral("whisper"), QString(),
-       {QStringLiteral(
-           "models/whisper_cpp/turbo/ggml-large-v3-turbo.bin")},
-       {QStringLiteral(
-           "models/whisper_cpp/turbo/ggml-large-v3-turbo.bin")},
-       false},
-
-      {QStringLiteral("pkg_whisper_cpp_tiny_intel_encoder"),
-       QStringLiteral("whisper.cpp Tiny Intel Encoder"),
-       QStringLiteral(
-           "models/whisper_cpp/openvino/ggml-tiny-encoder-openvino.zip"),
-       QStringLiteral(
-           "https://huggingface.co/Whisper-Pascal/whisper-openvino/resolve/main/ggml-tiny-encoder-openvino.zip"),
-       QStringLiteral("whisper"),
-       QStringLiteral("models/whisper_cpp/tiny"),
-       {QStringLiteral(
-           "models/whisper_cpp/tiny/ggml-tiny-encoder-openvino.xml")},
-       {QStringLiteral("models/whisper_cpp/tiny/ggml-tiny-encoder-openvino.bin"),
-        QStringLiteral(
-            "models/whisper_cpp/tiny/ggml-tiny-encoder-openvino.xml")},
-       true},
-      {QStringLiteral("pkg_whisper_cpp_small_intel_encoder"),
-       QStringLiteral("whisper.cpp Small Intel Encoder"),
-       QStringLiteral(
-           "models/whisper_cpp/openvino/ggml-small-encoder-openvino.zip"),
-       QStringLiteral(
-           "https://huggingface.co/Whisper-Pascal/whisper-openvino/resolve/main/ggml-small-encoder-openvino.zip"),
-       QStringLiteral("whisper"),
-       QStringLiteral("models/whisper_cpp/small"),
-       {QStringLiteral(
-           "models/whisper_cpp/small/ggml-small-encoder-openvino.xml")},
-       {QStringLiteral("models/whisper_cpp/small/ggml-small-encoder-openvino.bin"),
-        QStringLiteral(
-            "models/whisper_cpp/small/ggml-small-encoder-openvino.xml")},
-       true},
-      {QStringLiteral("pkg_whisper_cpp_turbo_intel_encoder"),
-       QStringLiteral("whisper.cpp Turbo Intel Encoder"),
-       QStringLiteral(
-           "models/whisper_cpp/openvino/ggml-large-v3-turbo-encoder-openvino.zip"),
-       QStringLiteral(
-           "https://huggingface.co/Whisper-Pascal/whisper-openvino/resolve/main/ggml-large-v3-turbo-encoder-openvino.zip"),
-       QStringLiteral("whisper"),
-       QStringLiteral("models/whisper_cpp/turbo"),
-       {QStringLiteral(
-           "models/whisper_cpp/turbo/ggml-large-v3-turbo-encoder-openvino.xml")},
-       {QStringLiteral(
-            "models/whisper_cpp/turbo/ggml-large-v3-turbo-encoder-openvino.bin"),
-        QStringLiteral(
-            "models/whisper_cpp/turbo/ggml-large-v3-turbo-encoder-openvino.xml")},
-       true},
-
-      {QStringLiteral("rt_faster_whisper"),
-       QStringLiteral("faster-whisper Runtime"),
-       QStringLiteral("models/runtimes/faster_whisper_runtime.zip"), QString(),
-       QStringLiteral("whisper"),
-       QStringLiteral("runtimes/faster_whisper"),
-       {QStringLiteral("runtimes/faster_whisper/faster_whisper_runner.exe")},
-       {QStringLiteral("runtimes/faster_whisper")}, true},
-      {QStringLiteral("pkg_faster_whisper_tiny"),
-       QStringLiteral("faster-whisper Tiny Model"),
-       QStringLiteral("models/faster_whisper/tiny.zip"), QString(),
-       QStringLiteral("whisper"), QStringLiteral("models/faster_whisper/tiny"),
-       {QStringLiteral("models/faster_whisper/tiny/model.bin")},
-       {QStringLiteral("models/faster_whisper/tiny")}, true},
-      {QStringLiteral("pkg_faster_whisper_small"),
-       QStringLiteral("faster-whisper Small Model"),
-       QStringLiteral("models/faster_whisper/small.zip"), QString(),
-       QStringLiteral("whisper"), QStringLiteral("models/faster_whisper/small"),
-       {QStringLiteral("models/faster_whisper/small/model.bin")},
-       {QStringLiteral("models/faster_whisper/small")}, true},
-      {QStringLiteral("pkg_faster_whisper_turbo"),
-       QStringLiteral("faster-whisper Turbo Model"),
-       QStringLiteral("models/faster_whisper/turbo.zip"), QString(),
-       QStringLiteral("whisper"), QStringLiteral("models/faster_whisper/turbo"),
-       {QStringLiteral("models/faster_whisper/turbo/model.bin")},
-       {QStringLiteral("models/faster_whisper/turbo")}, true},
   };
   return packages;
 }
@@ -533,6 +626,101 @@ bool packageInstalled(const LocalModelPackageInfo &package) {
       return true;
   }
   return false;
+}
+
+bool descriptorUsesSherpaRuntime(const LocalModelDescriptor &descriptor) {
+  return !descriptor.displayName.isEmpty() &&
+         descriptor.engineFamily != QStringLiteral("vosk") &&
+         descriptor.engineFamily != QStringLiteral("whisper_cpp") &&
+         descriptor.engineFamily != QStringLiteral("nemotron_streaming");
+}
+
+QStringList descriptorAvailableBackends(const LocalModelDescriptor &descriptor) {
+  QStringList backends;
+  if (descriptor.displayName.isEmpty())
+    return backends;
+
+  backends << QStringLiteral("cpu");
+  if (!descriptorUsesSherpaRuntime(descriptor))
+    return backends;
+
+  const ComputeTargetInfo target = selectedComputeTarget();
+  if (targetBackendId(target) == QStringLiteral("nvidia_cuda") &&
+      target.localAccelerationDetected) {
+    backends << QStringLiteral("nvidia_cuda");
+  }
+  return backends;
+}
+
+QString descriptorRequestedBackend(const LocalModelDescriptor &descriptor) {
+  if (descriptor.displayName.isEmpty())
+    return QStringLiteral("cpu");
+
+  QSettings settings(QStringLiteral("QuickSTT"), QStringLiteral("Config"));
+  const QString settingKey = modelBackendSettingKey(descriptor.displayName);
+  if (settings.contains(settingKey)) {
+    return normalizeBackendKey(settings.value(settingKey).toString());
+  }
+
+  if (!descriptorUsesSherpaRuntime(descriptor))
+    return QStringLiteral("cpu");
+
+  const ComputeTargetInfo target = selectedComputeTarget();
+  const QString preferredBackend = normalizeBackendKey(targetBackendId(target));
+  const QStringList availableBackends = descriptorAvailableBackends(descriptor);
+  if (availableBackends.contains(preferredBackend)) {
+    const QString runtimePackageId =
+        preferredBackend == QStringLiteral("nvidia_cuda")
+            ? QStringLiteral("rt_sherpa_onnx_cuda")
+            : QStringLiteral("rt_sherpa_onnx_cpu");
+    if (runtimePackageId.isEmpty() ||
+        packageInstalled(localModelPackage(runtimePackageId))) {
+      return preferredBackend;
+    }
+  }
+
+  return QStringLiteral("cpu");
+}
+
+QString descriptorEffectiveBackend(const LocalModelDescriptor &descriptor) {
+  const QStringList available = descriptorAvailableBackends(descriptor);
+  const QString requested = descriptorRequestedBackend(descriptor);
+  return available.contains(requested) ? requested : QStringLiteral("cpu");
+}
+
+QString runtimePackageIdForBackend(const LocalModelDescriptor &descriptor,
+                                   const QString &backendKey) {
+  if (!descriptorUsesSherpaRuntime(descriptor))
+    return descriptor.runtimePackageId;
+
+  const QString normalized = normalizeBackendKey(backendKey);
+  if (normalized == QStringLiteral("nvidia_cuda"))
+    return QStringLiteral("rt_sherpa_onnx_cuda");
+  return QStringLiteral("rt_sherpa_onnx_cpu");
+}
+
+QString runtimeExecutableForBackend(const LocalModelDescriptor &descriptor,
+                                    const QString &backendKey) {
+  if (!descriptorUsesSherpaRuntime(descriptor))
+    return descriptor.runtimeExecutablePath;
+
+  const QString normalized = normalizeBackendKey(backendKey);
+  if (normalized == QStringLiteral("nvidia_cuda")) {
+    return QStringLiteral("runtimes/sherpa_onnx/cuda/bin/sherpa-onnx-offline.exe");
+  }
+  return QStringLiteral("runtimes/sherpa_onnx/cpu/bin/sherpa-onnx-offline.exe");
+}
+
+bool modelPayloadInstalled(const LocalModelDescriptor &descriptor) {
+  if (descriptor.displayName.isEmpty() || descriptor.packageId.isEmpty())
+    return false;
+  if (!packageInstalled(localModelPackage(descriptor.packageId)))
+    return false;
+  for (const QString &extraPackageId : descriptor.extraPackageIds) {
+    if (!packageInstalled(localModelPackage(extraPackageId)))
+      return false;
+  }
+  return true;
 }
 
 } // namespace
@@ -571,18 +759,18 @@ QVector<ComputeTargetInfo> detectComputeTargets() {
       case 0x10DE:
         target.vendorName = QStringLiteral("NVIDIA");
         target.backendLabel = QStringLiteral("CUDA");
-        target.whisperGpuSupported = true;
+        target.localAccelerationDetected = true;
         break;
       case 0x8086:
         target.vendorName = QStringLiteral("Intel");
         target.backendLabel = QStringLiteral("OpenVINO GPU");
-        target.whisperGpuSupported = true;
+        target.localAccelerationDetected = true;
         break;
       case 0x1002:
       case 0x1022:
         target.vendorName = QStringLiteral("AMD");
         target.backendLabel = QStringLiteral("Vulkan GPU");
-        target.whisperGpuSupported = true;
+        target.localAccelerationDetected = true;
         break;
       default:
         target.vendorName = QStringLiteral("Vendor 0x%1")
@@ -604,7 +792,7 @@ QVector<ComputeTargetInfo> detectComputeTargets() {
   cpuTarget.id = QStringLiteral("cpu");
   cpuTarget.displayName = QStringLiteral("CPU Fallback");
   cpuTarget.vendorName = QStringLiteral("System CPU");
-  cpuTarget.backendLabel = QStringLiteral("whisper.cpp CPU / faster-whisper CPU");
+  cpuTarget.backendLabel = QStringLiteral("Native Vosk CPU");
   cpuTarget.systemMemoryMb = int(memoryStatus.ullTotalPhys / (1024ull * 1024ull));
   cpuTarget.isCpuFallback = true;
   targets << cpuTarget;
@@ -613,7 +801,7 @@ QVector<ComputeTargetInfo> detectComputeTargets() {
 
 QString defaultComputeTargetId(const QVector<ComputeTargetInfo> &targets) {
   for (const ComputeTargetInfo &target : targets) {
-    if (!target.isCpuFallback && target.whisperGpuSupported)
+    if (!target.isCpuFallback && target.localAccelerationDetected)
       return target.id;
   }
   for (const ComputeTargetInfo &target : targets) {
@@ -659,57 +847,29 @@ QString computeTargetRecommendationText(const ComputeTargetInfo &target) {
     return QStringLiteral("GPU detection is unavailable on this system.");
   if (target.isCpuFallback) {
     return QStringLiteral(
-        "CPU-only whisper.cpp and faster-whisper packages are available. Tiny is the safest default; Small and Turbo need more RAM.");
+        "CPU mode supports built-in Vosk plus on-demand sherpa-onnx local models.");
   }
-  if (!target.whisperGpuSupported) {
+  if (!target.localAccelerationDetected) {
     return QStringLiteral(
-        "This GPU is detected, but only CPU whisper packages are enabled for it right now.");
+        "This GPU is detected, but local downloads in this build run on CPU.");
   }
   if (targetBackendId(target) == QStringLiteral("intel_openvino")) {
-    if (targetUsableMemoryMb(target) >= 6144) {
-      return QStringLiteral(
-          "Recommended: whisper.cpp Small_intel_openvino. Tiny is safe. Turbo may work if the driver and VRAM budget hold.");
-    }
     return QStringLiteral(
-        "Recommended: whisper.cpp Tiny_intel_openvino. Small may work with reduced headroom.");
+        "Intel GPU detected. Sherpa-onnx models run on CPU, but the OpenVINO GPU model "
+        "(NVIDIA Parakeet CTC 110M OpenVINO GPU) runs natively on the Intel GPU.");
   }
   if (targetBackendId(target) == QStringLiteral("amd_vulkan")) {
-    if (targetUsableMemoryMb(target) >= 8192) {
-      return QStringLiteral(
-          "Recommended: whisper.cpp Small_amd_vulkan. Tiny is safe. Turbo may work if the Vulkan driver and VRAM budget hold.");
-    }
     return QStringLiteral(
-        "Recommended: whisper.cpp Tiny_amd_vulkan. Small may work with reduced headroom.");
-  }
-  if (target.dedicatedVramMb >= 10240) {
-    return QStringLiteral(
-        "Recommended: whisper.cpp Turbo_nvidia_cuda or faster-whisper Turbo_nvidia_cuda. Tiny and Small should also fit comfortably.");
-  }
-  if (target.dedicatedVramMb >= 6144) {
-    return QStringLiteral(
-        "Recommended: whisper.cpp Small_nvidia_cuda or faster-whisper Small_nvidia_cuda. Tiny is safe. Turbo may be heavy.");
+        "AMD GPU detection is available, but the current local engine path remains CPU-only.");
   }
   return QStringLiteral(
-      "Recommended: whisper.cpp Tiny_nvidia_cuda or faster-whisper Tiny_nvidia_cuda. Small may work with reduced headroom.");
+      "NVIDIA GPU detection is available. Optional sherpa-onnx CUDA runtimes can be downloaded without re-downloading the model.");
 }
 
 QVector<LocalModelDescriptor>
 localDashboardCatalogForTarget(const ComputeTargetInfo &target) {
-  QVector<LocalModelDescriptor> filtered;
-  const QString backend = targetBackendId(target);
-  for (const LocalModelDescriptor &descriptor : allDescriptors()) {
-    if (descriptor.engineFamily == QStringLiteral("vosk")) {
-      filtered << descriptor;
-      continue;
-    }
-    if (descriptor.backendKey == QStringLiteral("cpu")) {
-      filtered << descriptor;
-      continue;
-    }
-    if (descriptor.backendKey == backend)
-      filtered << descriptor;
-  }
-  return filtered;
+  Q_UNUSED(target);
+  return allDescriptors();
 }
 
 QStringList localDashboardCatalogNames(const ComputeTargetInfo &target) {
@@ -723,12 +883,6 @@ bool isKnownLocalModel(const QString &modelName) {
   return !localModelDescriptor(modelName).displayName.isEmpty();
 }
 
-bool isWhisperLocalModel(const QString &modelName) {
-  const QString family = localModelDescriptor(modelName).engineFamily;
-  return family == QStringLiteral("whisper.cpp") ||
-         family == QStringLiteral("faster-whisper");
-}
-
 bool localModelWidgetSelectable(const QString &modelName) {
   return localModelDescriptor(modelName).widgetSelectable;
 }
@@ -739,41 +893,140 @@ bool localModelSupportsDirectDownload(const QString &modelName) {
 
 bool localModelSupportsRuntimeNow(const QString &modelName) {
   const LocalModelDescriptor descriptor = localModelDescriptor(modelName);
-  return descriptor.engineFamily == QStringLiteral("vosk") ||
-         descriptor.engineFamily == QStringLiteral("whisper.cpp") ||
-         descriptor.engineFamily == QStringLiteral("faster-whisper");
+  return descriptor.engineFamily == QStringLiteral("vosk");
 }
 
-bool localModelRequiresFrontendTranscription(const QString &modelName) {
-  const QString family = localModelDescriptor(modelName).engineFamily;
-  return family == QStringLiteral("whisper.cpp") ||
-         family == QStringLiteral("faster-whisper");
+bool localModelUsesFrontendTranscriber(const QString &modelName) {
+  const LocalModelDescriptor descriptor = localModelDescriptor(modelName);
+  if (descriptor.displayName.isEmpty() || descriptor.engineFamily == QStringLiteral("vosk"))
+    return false;
+  return !localModelUsesNativeDirectPipeline(modelName);
+}
+
+bool localModelSupportsStreaming(const QString &modelName) {
+  return localModelDescriptor(modelName).supportsStreaming;
+}
+
+bool localModelSupportsDirectPcm(const QString &modelName) {
+  return localModelDescriptor(modelName).supportsDirectPcm;
+}
+
+bool localModelUsesPersistentWorker(const QString &modelName) {
+  return localModelDescriptor(modelName).usesPersistentWorker;
+}
+
+bool localModelUsesNativeDirectPipeline(const QString &modelName) {
+  const LocalModelDescriptor d = localModelDescriptor(modelName);
+  if (d.displayName.isEmpty())
+    return false;
+  if (!d.supportsDirectPcm || !d.usesPersistentWorker)
+    return false;
+
+  // Parakeet TDT is the shipped direct-PCM worker today.
+  if (d.engineFamily == QStringLiteral("nemo_transducer") ||
+      d.displayName.contains(QStringLiteral("Parakeet TDT"),
+                             Qt::CaseInsensitive)) {
+    return true;
+  }
+
+  // Nemotron (and future streaming workers): only when BOTH the engine binary
+  // AND the model GGUF weights payload are actually present.
+  if (d.engineFamily == QStringLiteral("nemotron_streaming") &&
+      !d.runtimeExecutablePath.isEmpty()) {
+    const QString exe = QDir(QCoreApplication::applicationDirPath())
+                            .filePath(d.runtimeExecutablePath);
+    return QFileInfo::exists(exe) && modelPayloadInstalled(d);
+  }
+
+  return false;
 }
 
 bool isLocalModelInstalled(const QString &modelName) {
   const LocalModelDescriptor descriptor = localModelDescriptor(modelName);
-  if (descriptor.displayName.isEmpty() || descriptor.packageId.isEmpty())
+  if (!modelPayloadInstalled(descriptor))
     return false;
 
-  if (!packageInstalled(localModelPackage(descriptor.packageId)))
-    return false;
+  const QString runtimePackageId = localModelRuntimePackageId(modelName);
+  return runtimePackageId.isEmpty() ||
+         packageInstalled(localModelPackage(runtimePackageId));
+}
 
-  if (!descriptor.runtimePackageId.isEmpty() &&
-      !packageInstalled(localModelPackage(descriptor.runtimePackageId))) {
-    return false;
+QStringList localModelAvailableBackendKeys(const QString &modelName) {
+  return descriptorAvailableBackends(localModelDescriptor(modelName));
+}
+
+QString localModelBackendLabelForKey(const QString &backendKey) {
+  return backendLabel(backendKey);
+}
+
+QString localModelSelectedBackendKey(const QString &modelName) {
+  return descriptorEffectiveBackend(localModelDescriptor(modelName));
+}
+
+void setLocalModelSelectedBackendKey(const QString &modelName,
+                                     const QString &backendKey) {
+  const LocalModelDescriptor descriptor = localModelDescriptor(modelName);
+  if (descriptor.displayName.isEmpty())
+    return;
+
+  const QString normalized = normalizeBackendKey(backendKey);
+  const QString effective =
+      descriptorAvailableBackends(descriptor).contains(normalized)
+          ? normalized
+          : QStringLiteral("cpu");
+  QSettings settings(QStringLiteral("QuickSTT"), QStringLiteral("Config"));
+  settings.setValue(modelBackendSettingKey(descriptor.displayName), effective);
+}
+
+QString localModelBackendStatusText(const QString &modelName) {
+  const LocalModelDescriptor descriptor = localModelDescriptor(modelName);
+  if (descriptor.displayName.isEmpty())
+    return QStringLiteral("Unknown local model.");
+  if (!descriptorUsesSherpaRuntime(descriptor))
+    return QStringLiteral("This model uses the built-in CPU runtime only.");
+
+  const QString backendKey = localModelSelectedBackendKey(modelName);
+  const QString runtimePackageId = runtimePackageIdForBackend(descriptor, backendKey);
+  const bool modelInstalled = modelPayloadInstalled(descriptor);
+  const bool runtimeInstalled =
+      runtimePackageId.isEmpty() ||
+      packageInstalled(localModelPackage(runtimePackageId));
+
+  QStringList lines;
+  lines << QStringLiteral("Selected backend: %1")
+               .arg(localModelBackendLabelForKey(backendKey));
+  lines << QStringLiteral(
+               "Shared ONNX model files are reused across backend runtimes. Switching backend downloads only the runtime dependency.");
+
+  if (modelInstalled && runtimeInstalled) {
+    lines << QStringLiteral("%1 is ready for %2.")
+                 .arg(descriptor.displayName,
+                      localModelBackendLabelForKey(backendKey));
+  } else if (modelInstalled) {
+    lines << QStringLiteral(
+                 "Model files are already installed. Download the %1 runtime only.")
+                 .arg(localModelBackendLabelForKey(backendKey));
+  } else {
+    lines << QStringLiteral(
+                 "The first download installs the shared model package plus the selected backend runtime.");
   }
 
-  for (const QString &extraPackageId : descriptor.extraPackageIds) {
-    if (!packageInstalled(localModelPackage(extraPackageId)))
-      return false;
+  const ComputeTargetInfo target = selectedComputeTarget();
+  if (targetBackendId(target) == QStringLiteral("intel_openvino")) {
+    lines << QStringLiteral(
+                 "Intel OpenVINO is not exposed by the current sherpa-onnx Windows runtime, so Intel systems stay on CPU for these models.");
   }
-  return true;
+  return lines.join(QLatin1Char('\n'));
 }
 
 QString localModelStateText(const QString &modelName, bool installed) {
   const LocalModelDescriptor descriptor = localModelDescriptor(modelName);
   if (installed)
     return QStringLiteral("[Installed]");
+  if (modelPayloadInstalled(descriptor) &&
+      !localModelRuntimePackageId(modelName).isEmpty()) {
+    return QStringLiteral("[DL RT]");
+  }
   if (descriptor.directDownload)
     return QStringLiteral("[DL]");
   if (descriptor.widgetSelectable)
@@ -786,19 +1039,17 @@ QString localModelTooltip(const QString &modelName, bool installed) {
   if (descriptor.displayName.isEmpty())
     return QStringLiteral("Unknown local model.");
   if (installed)
-    return QStringLiteral("%1 is installed.").arg(modelName);
-  if (descriptor.engineFamily == QStringLiteral("whisper.cpp")) {
+    return QStringLiteral("%1 is installed for %2.")
+        .arg(modelName, localModelBackendLabelForKey(localModelSelectedBackendKey(modelName)));
+  if (modelPayloadInstalled(descriptor)) {
     return QStringLiteral(
-               "%1 downloads the optional whisper.cpp model plus its runtime dependencies.")
-        .arg(modelName);
-  }
-  if (descriptor.engineFamily == QStringLiteral("faster-whisper")) {
-    return QStringLiteral(
-               "%1 downloads the optional faster-whisper model plus its standalone runner.")
-        .arg(modelName);
+               "%1 model files are already installed. Download the selected %2 runtime only.")
+        .arg(modelName, localModelBackendLabelForKey(localModelSelectedBackendKey(modelName)));
   }
   if (descriptor.directDownload)
-    return QStringLiteral("%1 can be downloaded directly.").arg(modelName);
+    return QStringLiteral(
+               "%1 is optional and can be downloaded on demand from the QuickSTT server.")
+        .arg(modelName);
   return QStringLiteral("%1 is not available in this build.").arg(modelName);
 }
 
@@ -838,18 +1089,40 @@ QString localModelDetailsText(const QString &modelName,
   if (descriptor.displayName.isEmpty())
     return QStringLiteral("Select a local model to view its details.");
 
+  const QString backendKey = localModelSelectedBackendKey(modelName);
+  const QStringList backendLabels = [&]() {
+    QStringList labels;
+    for (const QString &key : localModelAvailableBackendKeys(modelName))
+      labels << localModelBackendLabelForKey(key);
+    return labels;
+  }();
+
   QStringList lines;
   lines << descriptor.displayName;
   lines << QStringLiteral("Engine: %1").arg(descriptor.engineFamily);
-  lines << QStringLiteral("Backend: %1").arg(descriptor.accelerationLabel);
+  lines << QStringLiteral("Backend: %1")
+               .arg(descriptorUsesSherpaRuntime(descriptor)
+                        ? localModelBackendLabelForKey(backendKey)
+                        : descriptor.accelerationLabel);
   lines << descriptor.description;
+  if (descriptor.directDownload) {
+    lines << QStringLiteral(
+        "Delivery: Optional on-demand download from the QuickSTT server.");
+  }
+  if (descriptorUsesSherpaRuntime(descriptor)) {
+    lines << QStringLiteral("Available backends on this device: %1")
+                 .arg(backendLabels.join(QStringLiteral(", ")));
+    lines << QStringLiteral(
+        "Shared model behavior: The ONNX model package is installed once. Switching backend downloads only the matching runtime dependency.");
+  }
   lines << QStringLiteral("Model package size: %1")
                .arg(formatMemoryMb(descriptor.modelSizeMb));
-  if (descriptor.runtimeSizeMb > 0) {
+  if (descriptor.runtimeSizeMb > 0 && !localModelRuntimePackageId(modelName).isEmpty()) {
     lines << QStringLiteral("Runtime package size: %1")
                  .arg(formatMemoryMb(descriptor.runtimeSizeMb));
   }
   lines << localModelRecommendationText(modelName, target);
+  lines << localModelBackendStatusText(modelName);
   lines << QStringLiteral("Widget use today: %1")
                .arg(descriptor.widgetSelectable ? QStringLiteral("Supported")
                                                 : QStringLiteral("Not supported"));
@@ -859,18 +1132,29 @@ QString localModelDetailsText(const QString &modelName,
 QString localModelDisplayState(const QString &modelName, bool installed,
                                bool widgetChecked) {
   QString text = modelName + QLatin1Char(' ') + localModelStateText(modelName, installed);
+  if (localModelUsesFrontendTranscriber(modelName))
+    text += QStringLiteral(" [%1]").arg(backendStateTag(localModelSelectedBackendKey(modelName)));
   if (widgetChecked)
     text += QStringLiteral(" [Widget]");
   return text;
 }
 
 LocalModelDescriptor localModelDescriptor(const QString &modelName) {
-  const QString trimmed = modelName.trimmed();
+  const QString trimmed = canonicalLocalModelName(modelName);
   for (const LocalModelDescriptor &descriptor : allDescriptors()) {
     if (descriptor.displayName.compare(trimmed, Qt::CaseInsensitive) == 0)
       return descriptor;
   }
   return LocalModelDescriptor();
+}
+
+QString canonicalLocalModelName(const QString &modelName) {
+  const QString trimmed = migrateLegacyModelName(modelName);
+  for (const LocalModelDescriptor &descriptor : allDescriptors()) {
+    if (descriptor.displayName.compare(trimmed, Qt::CaseInsensitive) == 0)
+      return descriptor.displayName;
+  }
+  return trimmed.isEmpty() ? QString() : QStringLiteral("Vosk Small En");
 }
 
 LocalModelPackageInfo localModelPackage(const QString &packageId) {
@@ -887,9 +1171,10 @@ QStringList localModelPackageSequence(const QString &modelName) {
   if (descriptor.displayName.isEmpty())
     return sequence;
 
-  if (!descriptor.runtimePackageId.isEmpty() &&
-      !packageInstalled(localModelPackage(descriptor.runtimePackageId))) {
-    sequence << descriptor.runtimePackageId;
+  const QString runtimePackageId = localModelRuntimePackageId(modelName);
+  if (!runtimePackageId.isEmpty() &&
+      !packageInstalled(localModelPackage(runtimePackageId))) {
+    sequence << runtimePackageId;
   }
 
   if (!packageInstalled(localModelPackage(descriptor.packageId)))
@@ -905,8 +1190,10 @@ QStringList localModelPackageSequence(const QString &modelName) {
 QStringList installedModelsSharingRuntime(const QString &runtimePackageId) {
   QStringList models;
   for (const LocalModelDescriptor &descriptor : allDescriptors()) {
-    if (descriptor.runtimePackageId == runtimePackageId &&
-        isLocalModelInstalled(descriptor.displayName)) {
+    if (descriptor.displayName.isEmpty())
+      continue;
+    if (localModelRuntimePackageId(descriptor.displayName) == runtimePackageId &&
+        modelPayloadInstalled(descriptor)) {
       models << descriptor.displayName;
     }
   }
@@ -918,7 +1205,13 @@ QString localModelInstalledPath(const QString &modelName) {
 }
 
 QString localModelRuntimeExecutablePath(const QString &modelName) {
-  return localModelDescriptor(modelName).runtimeExecutablePath;
+  const LocalModelDescriptor descriptor = localModelDescriptor(modelName);
+  return runtimeExecutableForBackend(descriptor, localModelSelectedBackendKey(modelName));
+}
+
+QString localModelRuntimePackageId(const QString &modelName) {
+  const LocalModelDescriptor descriptor = localModelDescriptor(modelName);
+  return runtimePackageIdForBackend(descriptor, localModelSelectedBackendKey(modelName));
 }
 
 QString localModelRunnerModelId(const QString &modelName) {
@@ -926,14 +1219,23 @@ QString localModelRunnerModelId(const QString &modelName) {
 }
 
 QString localModelBackendKey(const QString &modelName) {
-  return localModelDescriptor(modelName).backendKey;
+  return localModelSelectedBackendKey(modelName);
 }
 
 QString quickSttDataRoot() {
-  const QString appRoot =
-      QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("data"));
-  QDir().mkpath(appRoot);
-  return appRoot;
+  static const QString root = []() {
+    const QString legacyRoot =
+        QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("data"));
+    const QString appData = qEnvironmentVariable("APPDATA").trimmed();
+    const QString preferredRoot =
+        appData.isEmpty()
+            ? legacyRoot
+            : QDir(appData).filePath(QStringLiteral("QuickSTT"));
+    QDir().mkpath(preferredRoot);
+    migrateLegacyQuickSttData(legacyRoot, preferredRoot);
+    return preferredRoot;
+  }();
+  return root;
 }
 
 QString quickSttModelsRoot() {
@@ -943,16 +1245,9 @@ QString quickSttModelsRoot() {
   return path;
 }
 
-QString quickSttWhisperRoot() {
-  const QString path =
-      QDir(quickSttDataRoot()).filePath(QStringLiteral("whisper"));
-  QDir().mkpath(path);
-  return path;
-}
-
 QString installRootPathForKey(const QString &rootKey) {
-  return rootKey == QStringLiteral("models") ? quickSttModelsRoot()
-                                             : quickSttWhisperRoot();
+  Q_UNUSED(rootKey);
+  return quickSttModelsRoot();
 }
 
 QStringList configuredServerUrls() {
@@ -967,10 +1262,7 @@ QStringList configuredServerUrls() {
         urls << url;
     }
   }
-  if (!urls.contains(QStringLiteral("http://127.0.0.1:5000")))
-    urls << QStringLiteral("http://127.0.0.1:5000");
-  if (!urls.contains(QStringLiteral("http://localhost:5000")))
-    urls << QStringLiteral("http://localhost:5000");
+
   urls.removeAll(QString());
   urls.removeDuplicates();
   return urls;

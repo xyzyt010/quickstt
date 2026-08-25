@@ -4,7 +4,6 @@
 #include <QFile>
 #include <QSettings>
 #include <QString>
-#include <QTextStream>
 
 namespace {
 QString buildStartupCommand(QString exePath, bool background) {
@@ -22,31 +21,12 @@ QString startupFolderPath() {
   return QDir(appData).filePath("Microsoft/Windows/Start Menu/Programs/Startup");
 }
 
-void applyStartupScript(const QString &exePath, bool background, bool enabled) {
+void removeLegacyStartupScript() {
   const QString folder = startupFolderPath();
   if (folder.isEmpty())
     return;
 
-  const QString scriptPath =
-      QDir(folder).filePath("QuickSTT_Startup.cmd");
-  if (!enabled) {
-    QFile::remove(scriptPath);
-    return;
-  }
-
-  QFile file(scriptPath);
-  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-    return;
-
-  QString exe = exePath;
-  exe.replace("/", "\\");
-  QTextStream out(&file);
-  out << "@echo off\n";
-  out << "start \"\" \"" << exe << "\"";
-  if (background)
-    out << " --background";
-  out << "\n";
-  file.close();
+  QFile::remove(QDir(folder).filePath("QuickSTT_Startup.cmd"));
 }
 } // namespace
 
@@ -61,23 +41,21 @@ void applyStartupSetting(bool enabled) {
   if (enabled) {
     QString appDir = QCoreApplication::applicationDirPath();
     QString loaderPath = QDir(appDir).filePath("QuickSTT.exe");
-    QString launchPath = loaderPath;
     if (QFile::exists(loaderPath)) {
       bootSettings.setValue("QuickSTT",
                             buildStartupCommand(loaderPath, background));
     } else {
-      launchPath = QCoreApplication::applicationFilePath();
       bootSettings.setValue(
           "QuickSTT",
           buildStartupCommand(QCoreApplication::applicationFilePath(),
                               background));
     }
-    applyStartupScript(launchPath, background, true);
+    removeLegacyStartupScript();
 
     QString serverPath =
-        QDir::cleanPath(appDir + "/../QuickSTT_Server/QuickSTT_Server.exe");
+        QDir::cleanPath(appDir + "/../QuickSTT_Server/QuickSTT_Server_App.exe");
     if (!QFile::exists(serverPath)) {
-      serverPath = QDir(appDir).filePath("QuickSTT_Server.exe");
+      serverPath = QDir(appDir).filePath("QuickSTT_Server_App.exe");
     }
     if (QFile::exists(serverPath)) {
       bootSettings.setValue("QuickSTT_Server",
@@ -87,6 +65,6 @@ void applyStartupSetting(bool enabled) {
     bootSettings.remove("QuickSTT");
     bootSettings.remove("QuickSTT_App");
     bootSettings.remove("QuickSTT_Server");
-    applyStartupScript(QString(), background, false);
+    removeLegacyStartupScript();
   }
 }

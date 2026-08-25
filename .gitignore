@@ -1,58 +1,161 @@
-# Build directories
+# ── QuickSTT — Rust + C++ + Linux packaging ──
+
+# Rust
+/target/
+**/target/
+Cargo.lock
+# but keep workspace Cargo.lock for reproducibility — uncomment if you want to ignore:
+# Cargo.lock
+
+# C++ / CMake
 /build/
+build/
 /build_tmp/
-/dist/
+build-ninja/
+build_fast/
+build_tmp/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+*.cmake
+!CMakeLists.txt
 /deps/
 /ort_dist/
 /tmp_*/
 /tmp*/
-/Source/build/
-/Source/dist/
+Source/build/
+Source/dist/
 
-# Packaged outputs
-/QuickSTT_App/
-/QuickSTT_Server/
-/QuickSTT_DirectDownload/
-/QuickSTT_Portable.exe
-/third_party/package_cache/
-
-# Local runtime payloads and archives
-*.zip
-*.tar
-*.7z
-
-# Logs and transient files
-*.log
-*.tmp
-*.bak
+# Qt / MSVC
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.qbs.user.*
+*.moc
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.moc
+object_script.*.Release
+object_script.*.Debug
+*_qmlcache.qrc
 *.obj
 *.o
+*.lo
+*.slo
 *.pdb
 *.ilk
 *.idb
 *.res
+.vs/
+*.vcxproj.user
+
+# Packaged outputs (use GitHub Releases, not git)
+QuickSTT_App/
+QuickSTT_Server/
+QuickSTT_DirectDownload/
+QuickSTT_Portable.exe
+QuickSTT_*.AppImage
+quickstt_*.deb
+quickstt-*.tar.gz
+*.AppImage
+*.deb
+/dist/
+quickstt-rust/dist/
+quickstt-rust/target/
+parakeet_engine/target/
+quickstt_popup/target/
+third_party/package_cache/
+graphify-out/
+
+# Models & large binaries (never commit)
+*.gguf
+*.bin
+*.onnx
+*.tflite
+*.pv
+*.zip
+*.tar
+*.7z
+models/
+wakeword_models/
+tools/nemotron/*.gguf
+third_party/audio_preprocess/**/*.tar.gz
+stt_runtime/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs / transient
+*.log
+*.tmp
+*.bak
 startup_log.txt
 service_error.log
 error.log
 server_log.txt
 build_err.txt
 build_log.txt
+compile_err.txt
+compile_log.txt
+out.log
+err.log
 vshist.txt
-tmp_whisper_cpu_test.txt
 test_input.exe
+*.tmp
 
-# Python caches
-__pycache__/
-*.pyc
-*.pyo
-
-# Local configuration
+# Local config (user-specific)
 server_urls.txt
 published_server_urls.txt
 server_config.json
+.env
+.env.local
 
-# IDE / OS noise
-.vscode/
-.idea/
-Thumbs.db
-.DS_Store
+# Mint / Linux local
+*.deb
+*.AppImage
+.SHA256SUMS
+
+# ── Large model binaries — use Releases / HuggingFace, not git ──
+QuickSTT_App_Fresh/
+QuickSTT_App/
+QuickSTT_Server/
+QuickSTT_DirectDownload/
+new_wakeword/*.pt
+new_wakeword/*.onnx
+wakeword_models/*.pt
+wakeword_models/*.onnx
+tools/nemotron/*.gguf
+tools/nemotron/*.dll
+tools/nemotron/*.exe
+third_party/CrispASR/
+third_party/parakeet.cpp/
+third_party/transcribe.cpp/
+third_party/audio_preprocess/rnnoise/rnnoise-0.2/.libs/
+AGENTS.md
+REFRENCE_SS/*.png
+# Keep screenshots if small; uncomment to track:
+# !REFRENCE_SS/*.png
+
+# Keep important assets even though *.zip is ignored
+!quickstt-rust/assets/*.png
+!quickstt-rust/assets/*.svg
+!quickstt-rust/assets/*.ico
+!*.md

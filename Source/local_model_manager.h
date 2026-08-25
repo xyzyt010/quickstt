@@ -4,9 +4,11 @@
 #include <QObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
-#include <QProcess>
 #include <QFile>
+#include <QProcess>
 #include <QStringList>
+
+struct LocalModelPackageInfo;
 
 class LocalModelManager : public QObject {
   Q_OBJECT
@@ -35,22 +37,26 @@ private slots:
   void onReplyDownloadProgress(qint64 received, qint64 total);
   void onReplyReadyRead();
   void onReplyFinished();
-  void onCommandFinished(int exitCode, QProcess::ExitStatus exitStatus);
-  void onCommandReadyRead();
+  void onExtractionFinished(int exitCode, QProcess::ExitStatus exitStatus);
+  void onHfHelperFinished(int exitCode, QProcess::ExitStatus exitStatus);
+  void onHfHelperReadyRead();
 
 private:
   void failCurrent(const QString &errorText);
   void finishCurrent();
   void startNextPackage();
   void tryCurrentUrl();
-  bool trySpecialInstall();
-  bool extractArchive(const QString &archivePath,
-                      const QString &destinationRoot) const;
+  void startExtraction(const QString &archivePath,
+                       const QString &destinationRoot);
+  /// Handy Nemotron 3.5 GGUF: resumable HF download via Python helper.
+  bool startNemotronHfDownload(const LocalModelPackageInfo &package);
   bool removePackagePaths(const QString &packageId);
   QStringList currentPackageUrls() const;
 
   QNetworkAccessManager m_network;
   QNetworkReply *m_reply = nullptr;
+  QProcess *m_extractProcess = nullptr;
+  QProcess *m_hfHelperProcess = nullptr;
   bool m_busy = false;
   bool m_isUninstall = false;
   QString m_modelName;
@@ -59,7 +65,7 @@ private:
   int m_urlIndex = -1;
   QString m_currentDownloadFile;
   QFile *m_downloadFile = nullptr;
-  QProcess *m_commandProcess = nullptr;
+  QString m_pendingExtractionDest;
 };
 
 #endif // LOCAL_MODEL_MANAGER_H

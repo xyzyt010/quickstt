@@ -1,0 +1,188 @@
+export component PillWidget inherits Window {
+    width: 360px;
+    height: 50px;
+    background: transparent;
+
+    in property <string> model_name: "base.en";
+    in property <string> status_text: "Idling...";
+    in property <bool> is_listening: false;
+    in property <bool> is_recording: false;
+    in property <bool> show_waveform: true;
+    in property <bool> textboard_open: true;
+
+    callback toggle_recording();
+    callback toggle_textboard();
+    callback close_app();
+    callback open_dashboard();
+    callback model_clicked();
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: 25px;
+        background: #1A1A1A;
+        border-width: 0px; // In C++, QPainter draws a rounded rect with no pen
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            alignment: space-between;
+            spacing: 5px;
+
+            // 1. Red Dot
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: is_recording ? #FF2222 : (is_listening ? #550000 : #444444);
+                }
+            }
+
+            // 2. Mic Button
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    background: transparent;
+                    
+                    Path {
+                        width: 24px;
+                        height: 24px;
+                        x: 3px;
+                        y: 3px;
+                        fill: #e3e3e3;
+                        // We use the active (unslashed) mic when idle, and inactive (slashed) mic when listening
+                        commands: !is_listening ? "M395-435q-35-35-35-85v-240q0-50 35-85t85-35q50 0 85 35t35 85v240q0 50-35 85t-85 35q-50 0-85-35Zm85-205Zm-40 520v-123q-104-14-172-93t-68-184h80q0 83 58.5 141.5T480-320q83 0 141.5-58.5T680-520h80q0 105-68 184t-172 93v123h-80Zm68.5-371.5Q520-503 520-520v-240q0-17-11.5-28.5T480-800q-17 0-28.5 11.5T440-760v240q0 17 11.5 28.5T480-480q17 0 28.5-11.5Z" 
+                                                : "m710-362-58-58q14-23 21-48t7-52h80q0 44-13 83.5T710-362ZM480-594Zm112 112-72-72v-206q0-17-11.5-28.5T480-800q-17 0-28.5 11.5T440-760v126l-80-80v-46q0-50 35-85t85-35q50 0 85 35t35 85v240q0 11-2.5 20t-5.5 18ZM440-120v-123q-104-14-172-93t-68-184h80q0 83 57.5 141.5T480-320q34 0 64.5-10.5T600-360l57 57q-29 23-63.5 39T520-243v123h-80Zm352 64L56-792l56-56 736 736-56 56Z";
+                    }
+
+                    TouchArea {
+                        clicked => { toggle_recording(); }
+                        mouse-cursor: pointer;
+                    }
+                }
+            }
+
+            // 3. Model Dropdown (Simulated for now)
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 140px;
+                    height: 24px;
+                    border-radius: 12px;
+                    background: #333333;
+                    
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        alignment: space-between;
+                        
+                        Text {
+                            text: model_name;
+                            color: #DDDDDD;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        
+                        Path {
+                            width: 9px;
+                            height: 5px;
+                            y: 9.5px;
+                            stroke: #FFFFFF;
+                            stroke-width: 2.2px;
+                            commands: "M 0 0 L 4.5 4.5 L 9 0";
+                        }
+                    }
+
+                    TouchArea {
+                        clicked => { model_clicked(); }
+                        mouse-cursor: pointer;
+                    }
+                }
+            }
+
+            // 4. Status Area / Waveform
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Rectangle {
+                    height: 24px;
+                    clip: true;
+                    
+                    if !is_listening : Text {
+                        text: status_text;
+                        color: #888888;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                        x: 0;
+                        width: parent.width;
+                        height: parent.height;
+                    }
+                    
+                    // Waveform placeholder (will be driven by rust later, just showing text for now)
+                    if is_listening : Text {
+                        text: "|||||||||||||||||"; // Simulated waveform
+                        color: #888888;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                        x: 0;
+                    }
+                }
+            }
+
+            // 5. Expand Chevron
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    background: transparent;
+                    
+                    Path {
+                        width: 10px;
+                        height: 5px;
+                        x: 6px;
+                        y: 8.5px;
+                        stroke: #CCCCCC;
+                        stroke-width: 2.0px;
+                        // Chevron down if closed, up if open
+                        commands: textboard_open ? "M 0 5 L 5 0 L 10 5" : "M 0 0 L 5 5 L 10 0";
+                    }
+
+                    TouchArea {
+                        clicked => { toggle_textboard(); }
+                        mouse-cursor: pointer;
+                    }
+                }
+            }
+
+            // 6. Close Button
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 18px;
+                    height: 18px;
+                    background: transparent;
+
+                    close_touch := TouchArea {
+                        clicked => { close_app(); }
+                    }
+                    
+                    Text {
+                        text: "✕";
+                        color: close_touch.has-hover ? #FF4444 : #888888;
+                        font-size: 14px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                }
+            }
+        }
+    }
+}

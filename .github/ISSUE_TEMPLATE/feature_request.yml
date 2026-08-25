@@ -1,25 +1,26 @@
-name: Feature Request
-description: Suggest an improvement or new capability
-title: "[Feature]: "
-labels:
-  - enhancement
+name: Feature request
+description: Suggest an improvement to QuickSTT
+title: "[Feature] "
+labels: ["enhancement"]
 body:
   - type: textarea
     id: problem
     attributes:
-      label: Problem
-      description: What problem are you trying to solve?
-    validations:
-      required: true
+      label: Problem / user impact
+      description: Who benefits and why?
+      placeholder: As a Mint user I want ...
+    validations: { required: true }
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed Solution
-      description: Describe the ideal behavior.
-    validations:
-      required: true
-  - type: textarea
-    id: context
+      label: Proposal
+      placeholder: Describe the change, including UI if relevant.
+  - type: dropdown
+    id: area
     attributes:
-      label: Additional Context
-
+      label: Area
+      options: [GUI, Audio, STT/VAD, Wakeword, Packaging, Docs, Other]
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

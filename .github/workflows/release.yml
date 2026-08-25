@@ -1,0 +1,194 @@
+name: Release
+
+on:
+  push:
+    tags: [ "v*" ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. v2.0.0-alpha.1)"
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux-deb-appimage:
+    name: Linux deb + AppImage (Ubuntu 22.04 amd64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: quickstt-rust
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config cmake protobuf-compiler \
+            libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            libasound2-dev libpulse-dev portaudio19-dev \
+            libx11-dev libxi-dev libxtst-dev libxdo-dev libssl-dev \
+            file patchelf zsync desktop-file-utils
+          cargo install cargo-deb --locked || true
+          # linuxdeploy
+          wget -q -O /tmp/linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x /tmp/linuxdeploy; sudo mv /tmp/linuxdeploy /usr/local/bin/linuxdeploy
+          wget -q -O /tmp/gtk-plugin.sh https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
+          chmod +x /tmp/gtk-plugin.sh; sudo mv /tmp/gtk-plugin.sh /usr/local/bin/linuxdeploy-plugin-gtk.sh
+      - name: Cargo build --release
+        working-directory: quickstt-rust
+        run: cargo build --release
+      - name: CMake stt_service
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target stt_service_native -j"$(nproc)" || true
+          ls -lh build/stt_service 2>/dev/null || true
+          cp -f build/stt_service quickstt-rust/target/release/stt_service 2>/dev/null || true
+      - name: cargo deb
+        working-directory: quickstt-rust
+        run: |
+          cargo deb --no-build -p quickstt-gui
+          ls -lh target/debian/*.deb
+          mkdir -p dist
+          cp -f target/debian/*.deb dist/
+          dpkg-deb -I dist/*.deb | head -40
+          dpkg -c dist/*.deb | head -30
+      - name: AppImage
+        working-directory: quickstt-rust
+        run: |
+          mkdir -p dist
+          BIN="target/release/QuickSTT"
+          STT="target/release/stt_service"
+          EXTRA=""
+          [[ -f "$STT" ]] && EXTRA="-e $STT"
+          linuxdeploy --appdir dist/AppDir -e "$BIN" $EXTRA -d assets/quickstt.desktop -i assets/icon_app.png --plugin gtk --output appimage 2>&1 | tail -n 40 || true
+          if ! ls dist/*.AppImage 1>/dev/null 2>&1; then
+            tar czf "dist/quickstt-${GITHUB_REF_NAME:-local}-x86_64.tar.gz" -C target/release QuickSTT -C ../assets quickstt.desktop 2>/dev/null || true
+          fi
+          ls -lh dist/*
+      - name: SHA256SUMS
+        working-directory: quickstt-rust
+        run: |
+          cd dist
+          sha256sum *.deb *.AppImage *.tar.gz 2>/dev/null | tee SHA256SUMS
+          cat SHA256SUMS
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: |
+            quickstt-rust/dist/*.deb
+            quickstt-rust/dist/*.AppImage
+            quickstt-rust/dist/*.tar.gz
+            quickstt-rust/dist/SHA256SUMS
+
+  build-windows:
+    name: Windows Portable (Qt + Rust)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: quickstt-rust
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.6.2'
+          host: windows
+          target: desktop
+          arch: win64_msvc2019_64
+          modules: qtsvg qtmultimedia
+      - name: Cargo build (Rust GUI)
+        working-directory: quickstt-rust
+        run: cargo build -p quickstt-gui --release
+      - name: CMake Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target QuickSTT_App -j 4
+          cmake --build build --target stt_service_native -j 4
+          dir build\*.exe; dir QuickSTT_App\*.exe
+      - name: Build Portable
+        shell: pwsh
+        run: |
+          .\BuildApp.bat
+          dir QuickSTT_Portable.exe
+          dir QuickSTT_DirectDownload\SHA256SUMS.txt
+          Get-Content QuickSTT_DirectDownload\SHA256SUMS.txt | Select-Object -First 10
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: |
+            QuickSTT_Portable.exe
+            QuickSTT_DirectDownload/SHA256SUMS.txt
+            QuickSTT_DirectDownload/release_manifest.json
+            build/stt_service.exe
+            QuickSTT_App/QuickSTT_App.exe
+            quickstt-rust/target/release/QuickSTT.exe
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-linux-deb-appimage, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.tar.gz" -o -name "SHA256SUMS*" -o -name "QuickSTT_Portable.exe" -o -name "QuickSTT.exe" \) -exec cp -f {} release/ \;
+          ls -lh release/
+          (cd release && sha256sum * | tee SHA256SUMS; cat SHA256SUMS)
+      - name: Release notes
+        run: |
+          cat > /tmp/notes.md <<'NOTES'
+          ## QuickSTT ${{ github.ref_name }} — Windows & Ubuntu/Debian amd64
+
+          Floating offline voice typing, wakeword, and automation. Pill 360×50, <5 MB idle.
+
+          ### Linux Mint / Ubuntu / Debian — one-liner (amd64)
+          ```bash
+          wget -O /tmp/quickstt.deb https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/quickstt_2.0.0-alpha.1_amd64.deb
+          sudo apt install -y /tmp/quickstt.deb && quickstt &
+          ```
+          Or AppImage (no sudo):
+          ```bash
+          wget -O /tmp/QuickSTT.AppImage https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/QuickSTT-2.0.0-alpha.1-x86_64.AppImage
+          chmod +x /tmp/QuickSTT.AppImage && /tmp/QuickSTT.AppImage &
+          ```
+          Or installer script:
+          ```bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
+          ```
+
+          ### Windows — portable
+          Download `QuickSTT_Portable.exe` below and double-click. It bootstraps `QuickSTT_App.exe` + `stt_service.exe`.
+
+          ### Models
+          - Vosk small EN 0.15 (50M) · Parakeet TDT 0.6B v3 INT8 (640M) · Nemotron 3.5 Q8_0 (716M)
+          - Path Linux: `~/.local/share/QuickSTT/models/`  Windows: `%APPDATA%\QuickSTT\models\`
+          - Download via app Dashboard → Models or `tools/nemotron/fetch_and_convert.py`
+
+          ### Checksums
+          See `SHA256SUMS` in assets.
+
+          Full docs: README → docs/BUILDING.md, docs/PACKAGING.md.
+          NOTES
+          cat /tmp/notes.md
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body_path: /tmp/notes.md
+          generate_release_notes: true

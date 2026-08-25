@@ -1,0 +1,27 @@
+[Desktop Entry]
+Type=Application
+Name=QuickSTT
+GenericName=Voice Typing Widget
+Comment=Floating voice typing pill — X11 & Wayland, transparent always-on-top
+Exec=quickstt
+Icon=quickstt
+Terminal=false
+Categories=Utility;AudioVideo;Accessibility;
+Keywords=stt;voice;dictation;whisper;parakeet;nemotron;
+StartupNotify=false
+StartupWMClass=QuickSTT
+X-GNOME-Autostart-enabled=false
+X-GNOME-Autostart-Delay=2
+Actions=Show;Hide;Quit;
+
+[Desktop Action Show]
+Name=Show Widget
+Exec=quickstt --show
+
+[Desktop Action Hide]
+Name=Hide Widget
+Exec=quickstt --hide
+
+[Desktop Action Quit]
+Name=Quit
+Exec=quickstt --quit

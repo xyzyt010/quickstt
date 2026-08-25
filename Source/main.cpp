@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QIcon>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QMessageBox>
@@ -19,12 +20,30 @@ QString g_logPath = "startup_log.txt";
 constexpr auto kSingleInstanceKey = "QuickSTT_App_SingleInstance_v2";
 constexpr auto kActivationServerName = "QuickSTT_App_Activation_v2";
 
+using SetAppUserModelIdFn = HRESULT(WINAPI *)(PCWSTR);
+
 QString detectAppDir() {
   wchar_t exePath[MAX_PATH];
   DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
   if (len == 0 || len >= MAX_PATH)
     return QDir::currentPath();
   return QFileInfo(QString::fromWCharArray(exePath)).absolutePath();
+}
+
+void setExplicitAppUserModelId(const wchar_t *appId) {
+  HMODULE shell32 = LoadLibraryW(L"shell32.dll");
+  if (!shell32)
+    return;
+  const auto fn = reinterpret_cast<SetAppUserModelIdFn>(
+      GetProcAddress(shell32, "SetCurrentProcessExplicitAppUserModelID"));
+  if (fn)
+    fn(appId);
+  FreeLibrary(shell32);
+}
+
+QIcon loadPackagedAppIcon() {
+  const QString iconPath = QDir(detectAppDir()).filePath("icon_app.ico");
+  return QFileInfo::exists(iconPath) ? QIcon(iconPath) : QIcon();
 }
 
 bool notifyRunningInstance() {
@@ -56,40 +75,30 @@ int main(int argc, char *argv[]) {
   QDir::setCurrent(appDir);
   g_logPath = QDir(appDir).filePath("startup_log.txt");
 
-  // Clear old log
-  QFile(g_logPath).remove();
+  // Keep startup history for diagnostics
   qInstallMessageHandler(customMessageHandler);
 
   qDebug() << "--- APP STARTING ---";
   qDebug() << "Working directory set to" << QDir::currentPath();
 
   QApplication a(argc, argv);
+  setExplicitAppUserModelId(L"QuickSTT.App");
+  const QIcon appIcon = loadPackagedAppIcon();
+  if (!appIcon.isNull())
+    a.setWindowIcon(appIcon);
   qDebug() << "QApplication Created";
 
-  // ─── Single Instance Guard (QSharedMemory) ──────────────────────────────
-  // QSharedMemory is cross-platform and automatically cleaned up when
-  // the owning process exits, even on a crash (OS reclaims resources).
-  // Unlike mutexes, shared memory segments are always released by the OS.
-  static QSharedMemory singleInstanceGuard(QString::fromLatin1(kSingleInstanceKey));
-
-  // On some systems (e.g. after a crash on Linux), shared memory can persist.
-  // Try to attach first to clean up any stale segment, then detach.
-  if (singleInstanceGuard.attach()) {
-    singleInstanceGuard.detach();
-  }
-
-  if (!singleInstanceGuard.create(1)) {
-    // Another instance owns this shared memory segment
-    qDebug() << "Another QuickSTT instance is already running. Exiting."
-             << "(" << singleInstanceGuard.errorString() << ")";
+  // ─── Single Instance Guard (Windows Named Mutex + Socket Verification) ──
+  HANDLE hSingleInstanceMutex = CreateMutexW(NULL, TRUE, L"Local\\QuickSTT_App_SingleInstance_v3");
+  if (GetLastError() == ERROR_ALREADY_EXISTS) {
     if (notifyRunningInstance()) {
-      qDebug() << "Running instance notified to restore itself.";
-    } else {
-      qDebug() << "Failed to notify the running instance.";
+      qDebug() << "Another QuickSTT instance is active and responded. Exiting secondary launch.";
+      if (hSingleInstanceMutex) CloseHandle(hSingleInstanceMutex);
+      return 0;
     }
-    return 0;
+    qDebug() << "Mutex existed but no active instance responded on socket. Overriding stale lock...";
   }
-  qDebug() << "Single instance check passed (shared memory created).";
+  qDebug() << "Single instance check passed (Windows Mutex acquired).";
   // ─────────────────────────────────────────────────────────────────────────
 
   a.setQuitOnLastWindowClosed(false);
@@ -111,17 +120,22 @@ int main(int argc, char *argv[]) {
         socket->deleteLater();
         qDebug() << "Received external restore trigger.";
         if (widget) {
-          QMetaObject::invokeMethod(widget, "restoreFromExternalTrigger",
-                                    Qt::QueuedConnection);
+          QTimer::singleShot(0, widget, [widget]() {
+            if (!widget->isAutoShowSuppressed()) {
+              widget->restoreFromExternalTrigger();
+            } else {
+              qDebug() << "External restore suppressed — widget recently closed";
+            }
+          });
         }
       }
     });
   }
 
-  bool background = false;
+  bool background = true;
   for (int i = 1; i < argc; ++i) {
-    if (QString(argv[i]) == "--background") {
-      background = true;
+    if (QString(argv[i]) == "--show") {
+      background = false;
       break;
     }
   }
@@ -147,11 +161,16 @@ int main(int argc, char *argv[]) {
     widget = &w;
     qDebug() << "PillWidget Constructor Finished.";
 
-    if (!background || setupShown) {
-      w.show();
-      qDebug() << "Widget Show Called.";
+    if (!background) {
+      QTimer::singleShot(50, &w, [&w]() {
+        w.centerOnScreen();
+        w.show();
+        w.raise();
+        w.activateWindow();
+      });
+      qDebug() << "Widget Show Scheduled.";
     } else {
-      qDebug() << "Started in background mode.";
+      qDebug() << "Started in background/mini-widget mode.";
     }
 
     qDebug() << "Entering Event Loop...";

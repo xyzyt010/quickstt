@@ -26,6 +26,10 @@ static const std::unordered_map<std::string, std::string> OWW_BUILTIN_MAP = {
     {"hey rhasspy", "hey_rhasspy_v0.1.onnx"},
     {"timer", "timer_v0.1.onnx"},
     {"weather", "weather_v0.1.onnx"},
+    // Custom WakeWordNet ONNX models
+    {"agent", "agent.onnx"},
+    {"hem", "hem.onnx"},
+    {"jarvis", "jarvis.onnx"},
 };
 
 static inline void oww_log(const std::string &msg) {
@@ -45,7 +49,8 @@ static inline bool ort_ok(const OrtApi *api, OrtStatus *status,
 
 class NativeWakeWordDetector {
 public:
-  float threshold = 0.60f;
+  // 0.42 is wake-friendly at normal speaking volume; 0.60 forced shouting.
+  float threshold = 0.42f;
   bool active = false;
 
   struct WakeModel {
@@ -59,7 +64,7 @@ public:
   ~NativeWakeWordDetector() { cleanup(); }
 
   bool init(OrtLoader &ort, const std::string &model_dir,
-            const std::vector<std::string> &wake_words, float thresh = 0.60f) {
+            const std::vector<std::string> &wake_words, float thresh = 0.42f) {
     threshold = thresh;
     api_ = ort.api;
     if (!api_)

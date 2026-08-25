@@ -1,0 +1,17 @@
+{
+  "name": "hem",
+  "phrase": "hem",
+  "sample_rate": 16000,
+  "n_mels": 40,
+  "n_fft": 400,
+  "hop_length": 160,
+  "threshold": 0.5,
+  "input_shape": [
+    1,
+    40,
+    null
+  ],
+  "model_type": "WakeWordNet",
+  "hidden_dim": 64,
+  "num_layers": 2
+}
