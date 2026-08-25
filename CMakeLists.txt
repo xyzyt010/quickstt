@@ -54,13 +54,13 @@ set(QUICKSTT_APP_SOURCES
     Source/startup_utils.h
     Source/text_board.cpp
     Source/text_board.h
+    Source/windows_secret_store.cpp
+    Source/windows_secret_store.h
 )
 if(WIN32)
 list(APPEND QUICKSTT_APP_SOURCES
     Source/ahk_bridge.cpp
     Source/ahk_bridge.h
-    Source/windows_secret_store.cpp
-    Source/windows_secret_store.h
     resources_app.rc
 )
 endif()

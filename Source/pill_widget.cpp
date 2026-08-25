@@ -5,9 +5,7 @@
 #include "local_model_support.h"
 #include "optional_service_support.h"
 #include "startup_utils.h"
-#ifdef _WIN32
 #include "windows_secret_store.h"
-#endif
 #include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
@@ -46,6 +44,9 @@
 #include <cmath>
 #include <memory>
 #include <vector>
+#ifndef _WIN32
+#include <malloc.h>
+#endif
 #ifdef _WIN32
 #include <windows.h> // SendInput / native window icons
 #endif
@@ -1189,8 +1190,10 @@ PillWidget::~PillWidget() {
     backendHealthTimer->stop();
   if (waveformAnimationTimer)
     waveformAnimationTimer->stop();
+#ifdef _WIN32
   if (m_ahkBridge)
     m_ahkBridge->stop();
+#endif
   
   // Shut down all model processes (CrispASR, Parakeet, etc.)
   if (m_localFrontendSttManager) {
@@ -1309,7 +1312,11 @@ void PillWidget::resizeEvent(QResizeEvent *event) {
 }
 
 void PillWidget::compactWorkingSet() {
+#ifdef _WIN32
   SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+#else
+  malloc_trim(0);
+#endif
   qDebug() << "Working set compacted";
 }
 

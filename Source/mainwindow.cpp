@@ -8,9 +8,7 @@
 #include "optional_service_support.h"
 #include "setup_wizard.h"
 #include "smart_life_manager.h"
-#ifdef _WIN32
 #include "windows_secret_store.h"
-#endif
 #include "QtAwesome.h"
 #include <QButtonGroup>
 #include <QCheckBox>
