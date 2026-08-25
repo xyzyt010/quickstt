@@ -40,6 +40,7 @@ impl SttEngineConfig {
             models_root.join(format!("runtimes/whisper_cpp/cpu/whisper-cli{}", exe_ext)),
             models_root.join(format!("runtimes/whisper_cpp/whisper-cli{}", exe_ext)),
             exe_dir.join(format!("runtimes/whisper_cpp/cpu/whisper-cli{}", exe_ext)),
+            PathBuf::from(format!("/usr/lib/quickstt/tools/whisper_cpp/whisper-cli{}", exe_ext)),
             exe_dir.join(format!("whisper-cli{}", exe_ext)),
         ];
         
@@ -47,12 +48,14 @@ impl SttEngineConfig {
             models_root.join(format!("runtimes/sherpa_onnx/cpu/bin/sherpa-onnx-offline{}", exe_ext)),
             models_root.join(format!("runtimes/sherpa_onnx/sherpa-onnx-offline{}", exe_ext)),
             exe_dir.join(format!("runtimes/sherpa_onnx/cpu/bin/sherpa-onnx-offline{}", exe_ext)),
+            PathBuf::from(format!("/usr/lib/quickstt/tools/sherpa_onnx/bin/sherpa-onnx-offline{}", exe_ext)),
             exe_dir.join(format!("sherpa-onnx-offline{}", exe_ext)),
         ];
         
         let parakeet_candidates = [
             exe_dir.join(format!("tools/parakeet/parakeet_engine{}", exe_ext)),
             models_root.join(format!("runtimes/parakeet/parakeet_engine{}", exe_ext)),
+            PathBuf::from(format!("/usr/lib/quickstt/tools/parakeet/parakeet_engine{}", exe_ext)),
         ];
 
         // Vosk: libvosk.so is loaded by native stt_service; Rust-side helper binary (optional)
@@ -66,6 +69,7 @@ impl SttEngineConfig {
             exe_dir.join(format!("tools/nemotron/nemotron_engine{}", exe_ext)),
             exe_dir.join(format!("tools/nemotron/transcribe{}", exe_ext)),
             models_root.join(format!("runtimes/nemotron/nemotron_engine{}", exe_ext)),
+            PathBuf::from(format!("/usr/lib/quickstt/tools/nemotron/nemotron_engine{}", exe_ext)),
             exe_dir.join(format!("nemotron_engine{}", exe_ext)),
         ];
 
@@ -270,6 +274,7 @@ fn parakeet_engine_candidates(exe_dir: &Path) -> Vec<PathBuf> {
     let mut out = vec![
         exe_dir.join(format!("tools/parakeet/parakeet_engine{}", ext)),
         exe_dir.join(format!("parakeet_engine{}", ext)),
+        PathBuf::from(format!("/usr/lib/quickstt/tools/parakeet/parakeet_engine{}", ext)),
     ];
 
     if let Some(workspace) = exe_dir
@@ -548,9 +553,7 @@ fn transcribe_vosk(
     model_dir: &Path,
     wav_path: &Path,
 ) -> Result<String> {
-    // Vosk small en: native stt_service uses libvosk.so directly via VoskAPI::load.
-    // Rust fallback: if vosk_transcriber helper exists, invoke it; otherwise delegate
-    // to stt_service via IPC if running, else return error with install hint.
+    // 1. Optional helper binary (Windows layout)
     if let Some(cli) = &config.vosk_path {
         if cli.is_file() {
             info!("Vosk CLI: {:?} model: {:?} wav: {:?}", cli, model_dir, wav_path);
@@ -567,13 +570,131 @@ fn transcribe_vosk(
             }
         }
     }
-    // Check for model presence to give actionable error
-    if !model_dir.exists() {
-        anyhow::bail!("Vosk model not found at {:?}. Install vosk/small_en_us_0.15 via Settings → Models", model_dir);
+    // 2. Native libvosk FFI (Linux primary path; libvosk.so downloaded by
+    //    Settings → Models into runtimes/vosk/ or shipped in tools/vosk/).
+    transcribe_vosk_native(model_dir, wav_path)
+}
+
+#[cfg(target_os = "linux")]
+fn vosk_library_candidates() -> Vec<PathBuf> {
+    let models_root = crate::models::catalog::models_root();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_default();
+    vec![
+        models_root.join("runtimes/vosk/libvosk.so"),
+        exe_dir.join("tools/vosk/libvosk.so"),
+        PathBuf::from("/usr/lib/quickstt/tools/vosk/libvosk.so"),
+        exe_dir.join("libvosk.so"),
+        PathBuf::from("libvosk.so"),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn vosk_library_candidates() -> Vec<PathBuf> {
+    let models_root = crate::models::catalog::models_root();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_default();
+    vec![
+        models_root.join("runtimes/vosk/libvosk.dll"),
+        exe_dir.join("tools/vosk/vosk.dll"),
+        exe_dir.join("vosk.dll"),
+    ]
+}
+
+/// Minimal Vosk C-API binding driven through `libloading` so no build-time
+/// link dependency exists. Reads a 16 kHz mono WAV and returns the final
+/// recognition JSON's "text" field.
+fn transcribe_vosk_native(model_dir: &Path, wav_path: &Path) -> Result<String> {
+    use libloading::{Library, Symbol};
+
+    let lib_path = vosk_library_candidates()
+        .into_iter()
+        .find(|p| p.exists())
+        .context(
+            "libvosk not found — install the Vosk Small EN (50M) model from Settings → Models \
+             (the runtime library is downloaded alongside it)",
+        )?;
+    unsafe {
+        let lib = Library::new(&lib_path)
+            .with_context(|| format!("Failed to load {:?}", lib_path))?;
+
+        type ModelNew = unsafe extern "C" fn(*const std::ffi::c_char) -> *mut core::ffi::c_void;
+        type RecNew = unsafe extern "C" fn(
+            *mut core::ffi::c_void,
+            f32,
+        ) -> *mut core::ffi::c_void;
+        type AcceptWaveform = unsafe extern "C" fn(
+            *mut core::ffi::c_void,
+            *const i16,
+            i32,
+        ) -> i32;
+        type FinalResult =
+            unsafe extern "C" fn(*mut core::ffi::c_void) -> *const std::ffi::c_char;
+        type FreeRecognizer = unsafe extern "C" fn(*mut core::ffi::c_void);
+        type FreeModel = unsafe extern "C" fn(*mut core::ffi::c_void);
+
+        let model_new: Symbol<ModelNew> = lib.get(b"VoskModelNew")?;
+        let rec_new: Symbol<RecNew> = lib.get(b"VoskRecognizerNew")?;
+        let accept: Symbol<AcceptWaveform> = lib.get(b"VoskRecognizerAcceptWaveform")?;
+        let final_result: Symbol<FinalResult> = lib.get(b"VoskRecognizerFinalResult")?;
+        let rec_free: Symbol<FreeRecognizer> = lib.get(b"VoskRecognizerFree")?;
+        let model_free: Symbol<FreeModel> = lib.get(b"VoskModelFree")?;
+
+        let c_model = std::ffi::CString::new(model_dir.to_string_lossy().as_bytes())?;
+        let model_ptr = model_new(c_model.as_ptr());
+        if model_ptr.is_null() {
+            anyhow::bail!("VoskModelNew failed for {:?}", model_dir);
+        }
+        let rec_ptr = rec_new(model_ptr, 16000.0);
+        if rec_ptr.is_null() {
+            model_free(model_ptr);
+            anyhow::bail!("VoskRecognizerNew failed");
+        }
+
+        let mut reader = hound::WavReader::open(wav_path)
+            .with_context(|| format!("Failed to open wav {:?}", wav_path))?;
+        let mut chunk = Vec::with_capacity(3200);
+        let result_json: String = {
+            for sample in reader.samples::<i16>() {
+                let s = sample.unwrap_or(0);
+                chunk.push(s);
+                if chunk.len() >= 3200 {
+                    accept(rec_ptr, chunk.as_ptr(), chunk.len() as i32);
+                    chunk.clear();
+                }
+            }
+            if !chunk.is_empty() {
+                accept(rec_ptr, chunk.as_ptr(), chunk.len() as i32);
+            }
+            let res = final_result(rec_ptr);
+            if res.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(res).to_string_lossy().into_owned()
+            }
+        };
+
+        rec_free(rec_ptr);
+        model_free(model_ptr);
+
+        let parsed: serde_json::Value = serde_json::from_str(result_json.trim())
+            .unwrap_or(serde_json::json!({}));
+        Ok(parsed
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string())
     }
-    // No helper — caller can still use native stt_service (libvosk.so) path
-    // If native service is available, it will be used via orchestration layer; here fail with hint
-    anyhow::bail!("Vosk transcriber helper not found. Native stt_service with libvosk.so will handle this model when built for Linux (see Source/native/vosk_api.h Linux dlopen path).")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn transcribe_vosk_native(_model_dir: &Path, _wav_path: &Path) -> Result<String> {
+    anyhow::bail!("Native Vosk transcription unsupported on this platform")
 }
 
 fn transcribe_nemotron(

@@ -28,6 +28,11 @@ whisper-rs = { workspace = true, optional = true }
 cpal = { workspace = true, optional = true }
 dasp = { workspace = true, optional = true }
 
+# Model downloads + runtime loading
+ureq = "2.10"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+libloading = "0.8"
+
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
 

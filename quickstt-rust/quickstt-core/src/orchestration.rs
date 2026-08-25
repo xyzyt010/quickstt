@@ -4,9 +4,7 @@ use crate::settings::Settings;
 use crate::wakeword_loader;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tracing::info;
-#[cfg(feature = "audio-capture")]
-use tracing::warn;
+use tracing::{info, warn};
 
 #[cfg(feature = "audio-capture")]
 use crate::audio::capture::AudioCaptureManager;
@@ -77,6 +75,8 @@ pub enum OrchestratorCommand {
     PartialText(String),
     WakewordTriggered(f32),
     SelectModel(usize),
+    /// Download + install the model at this catalog index (background thread).
+    DownloadModel(usize),
     OffloadModel,
     ReloadModel,
     ToggleWakeword(bool),
@@ -500,6 +500,27 @@ impl AppOrchestrator {
                         let name = s.model_entries[idx].name.clone();
                         s.status_message = format!("Selected: {}", name);
                         info!("Model selected: {}", name);
+                    }
+                }
+                OrchestratorCommand::DownloadModel(idx) => {
+                    let desc = {
+                        let s = state.lock().unwrap();
+                        s.model_entries.get(idx).and_then(|e| {
+                            crate::models::catalog::all_descriptors()
+                                .into_iter()
+                                .find(|d| d.name == e.name)
+                        })
+                    };
+                    match desc {
+                        Some(d) => {
+                            // Persist selection so the widget uses it once ready.
+                            if let Ok(mut s) = state.lock() {
+                                s.selected_model = idx.min(s.model_entries.len().saturating_sub(1));
+                            }
+                            info!("Downloading model: {}", d.name);
+                            crate::models::downloader::spawn_download(d, state.clone());
+                        }
+                        None => warn!("Download requested for unknown model index {}", idx),
                     }
                 }
                 OrchestratorCommand::OffloadModel => {

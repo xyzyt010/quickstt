@@ -23,6 +23,121 @@ use muda::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 
 mod widget_platform;
 
+/// TCP port used for single-instance IPC. The first instance binds a listener
+/// on 127.0.0.1 and later invocations (`quickstt --show` etc.) forward the
+/// command here and exit.
+const IPC_PORT: u16 = 47631;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CliCommand {
+    Show,
+    Hide,
+    Toggle,
+    Dashboard,
+    Quit,
+    None,
+}
+
+fn parse_cli() -> (CliCommand, bool) {
+    let mut cmd = CliCommand::None;
+    let mut background = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--show" => cmd = CliCommand::Show,
+            "--hide" => cmd = CliCommand::Hide,
+            "--toggle" => cmd = CliCommand::Toggle,
+            "--dashboard" => cmd = CliCommand::Dashboard,
+            "--quit" => cmd = CliCommand::Quit,
+            "--background" | "-b" => background = true,
+            _ => {}
+        }
+    }
+    (cmd, background)
+}
+
+/// Try to forward a CLI command to an already-running instance. Returns true
+/// when another instance accepted the command.
+fn forward_to_running_instance(cmd: CliCommand) -> bool {
+    use std::io::Write;
+    let payload = match cmd {
+        CliCommand::Show => "SHOW\n",
+        CliCommand::Hide => "HIDE\n",
+        CliCommand::Toggle => "TOGGLE\n",
+        CliCommand::Dashboard => "DASH\n",
+        CliCommand::Quit => "QUIT\n",
+        CliCommand::None => return false,
+    };
+    if cmd == CliCommand::None {
+        return false;
+    }
+    match std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], IPC_PORT)),
+        Duration::from_millis(400),
+    ) {
+        Ok(mut stream) => {
+            let _ = stream.write_all(payload.as_bytes());
+            let _ = stream.flush();
+            info!("Forwarded {:?} to running instance", cmd);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Spawn the single-instance listener. Commands received are applied directly
+/// to the shared state / dash so the GUI picks them up on the next frame.
+fn spawn_ipc_listener(state: Arc<Mutex<AppState>>, dash: Arc<Mutex<DashboardState>>) {
+    std::thread::Builder::new()
+        .name("ipc-listener".to_string())
+        .spawn(move || {
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], IPC_PORT));
+            let Ok(listener) = std::net::TcpListener::bind(addr) else {
+                warn!("IPC port {} busy — another instance owns it", IPC_PORT);
+                return;
+            };
+            info!("IPC listener on {}", addr);
+            use std::io::Read;
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 32];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let msg = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+                match msg.as_str() {
+                    "SHOW" => {
+                        if let Ok(mut s) = state.lock() {
+                            s.widget_visible = true;
+                            if s.status_message.eq_ignore_ascii_case("Hidden") {
+                                s.status_message = "Ready".into();
+                            }
+                        }
+                    }
+                    "HIDE" => {
+                        if let Ok(mut s) = state.lock() {
+                            s.widget_visible = false;
+                            s.status_message = "Hidden".into();
+                        }
+                    }
+                    "TOGGLE" => {
+                        if let Ok(mut s) = state.lock() {
+                            s.widget_visible = !s.widget_visible;
+                        }
+                    }
+                    "DASH" => {
+                        if let Ok(mut d) = dash.lock() {
+                            d.visible = true;
+                        }
+                    }
+                    "QUIT" => {
+                        info!("Quit requested via IPC");
+                        std::process::exit(0);
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .expect("spawn ipc listener");
+}
+
 fn load_icon_data() -> Option<egui::IconData> {
     let ico_bytes = include_bytes!("../../assets/icon_app.ico");
     if let Ok(img) = image::load_from_memory_with_format(ico_bytes, image::ImageFormat::Ico) {
@@ -185,8 +300,29 @@ fn get_screen_size() -> (f32, f32) {
     }
     #[cfg(target_os = "linux")]
     {
-        // Try Wayland/X11 via winit monitor info; fallback to 1920x1080
-        // Will be overridden by egui viewport outer_rect when available
+        // Parse `xrandr --current` for the primary mode, e.g. "1920x1080*+".
+        if let Ok(out) = std::process::Command::new("xrandr").arg("--current").output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                if !line.contains('*') {
+                    continue;
+                }
+                // Line looks like: "   1920x1080     60.02*+ ..."
+                for token in line.split_whitespace() {
+                    let dims: Vec<&str> = token.split('x').collect();
+                    if dims.len() == 2 {
+                        let w = dims[0].trim().parse::<f32>().ok();
+                        let h = dims[1]
+                            .trim_end_matches(|c: char| !c.is_ascii_digit())
+                            .parse::<f32>()
+                            .ok();
+                        if let (Some(w), Some(h)) = (w, h) {
+                            return (w, h);
+                        }
+                    }
+                }
+            }
+        }
         (1920.0, 1080.0)
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -350,18 +486,21 @@ struct QuickSttApp {
 
     // System integrations
     _hotkey_manager: GlobalHotKeyManager,
+    #[cfg(not(target_os = "linux"))]
     _tray_icon: TrayIcon,
     initialized: bool,
+    positioned: bool,
     last_widget_visible: bool,
     #[cfg(target_os = "windows")]
     widget_hwnd: Option<isize>,
-    
+
     menu_dash_id: MenuId,
     menu_show_id: MenuId,
     menu_hide_id: MenuId,
     menu_quit_id: MenuId,
 
     // Hotkey event identifiers (polled in update loop)
+    id_hotkey_super_toggle: u32,
     id_hotkey_toggle_listen: u32,
     id_hotkey_show_widget: u32,
     id_hotkey_on_cmd: u32,
@@ -526,54 +665,99 @@ impl QuickSttApp {
         state: Arc<Mutex<AppState>>,
         tx_cmd: mpsc::Sender<OrchestratorCommand>,
         wakeword_handle: Option<quickstt_core::wakeword_service::WakewordHandle>,
+        dash: Arc<Mutex<DashboardState>>,
+        start_hidden: bool,
     ) -> Self {
-        let hotkey_manager = GlobalHotKeyManager::new().unwrap();
-        let hotkey_toggle = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space);
-        let id_toggle = hotkey_toggle.id();
-        hotkey_manager.register(hotkey_toggle).unwrap();
-        let hotkey_show_widget =
-            HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyH);
-        let id_show_widget_hotkey = hotkey_show_widget.id();
-        hotkey_manager.register(hotkey_show_widget).unwrap();
-        let hotkey_on_cmd = HotKey::new(Some(Modifiers::CONTROL), Code::Space);
-        let id_on_cmd = hotkey_on_cmd.id();
-        hotkey_manager.register(hotkey_on_cmd).unwrap();
+    let hotkey_manager = GlobalHotKeyManager::new().unwrap();
+    // Primary toggle: Super+Space (matches the Windows build's Win+Space).
+    let hotkey_super_space = HotKey::new(Some(Modifiers::SUPER), Code::Space);
+    let id_super_toggle = hotkey_super_space.id();
+    if let Err(e) = hotkey_manager.register(hotkey_super_space) {
+        warn!("Super+Space hotkey unavailable: {e}");
+    }
+    let hotkey_toggle = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space);
+    let id_toggle = hotkey_toggle.id();
+    if let Err(e) = hotkey_manager.register(hotkey_toggle) {
+        warn!("Ctrl+Shift+Space hotkey unavailable: {e}");
+    }
+    let hotkey_show_widget =
+        HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyH);
+    let id_show_widget_hotkey = hotkey_show_widget.id();
+    if let Err(e) = hotkey_manager.register(hotkey_show_widget) {
+        warn!("Ctrl+Shift+H hotkey unavailable: {e}");
+    }
+    let hotkey_on_cmd = HotKey::new(Some(Modifiers::CONTROL), Code::Space);
+    let id_on_cmd = hotkey_on_cmd.id();
+    if let Err(e) = hotkey_manager.register(hotkey_on_cmd) {
+        warn!("Ctrl+Space hotkey unavailable: {e}");
+    }
 
-        let icon = create_tray_icon_image();
+    let icon = create_tray_icon_image();
 
-        let dash_item = MenuItem::new("Dashboard", true, None);
-        let show_item = MenuItem::new("Show", true, None);
-        let hide_item = MenuItem::new("Hide", true, None);
-        let quit_item = MenuItem::new("Quit", true, None);
+    let dash_item = MenuItem::new("Dashboard", true, None);
+    let show_item = MenuItem::new("Show", true, None);
+    let hide_item = MenuItem::new("Hide", true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
 
-        let menu = Menu::new();
-        menu.append_items(&[
-            &dash_item,
-            &show_item,
-            &hide_item,
-            &PredefinedMenuItem::separator(),
-            &quit_item,
-        ])
-        .unwrap();
+    let menu = Menu::new();
+    menu.append_items(&[
+        &dash_item,
+        &show_item,
+        &hide_item,
+        &PredefinedMenuItem::separator(),
+        &quit_item,
+    ])
+    .unwrap();
 
-        let menu_dash_id = dash_item.id().clone();
-        let menu_show_id = show_item.id().clone();
-        let menu_hide_id = hide_item.id().clone();
-        let menu_quit_id = quit_item.id().clone();
+    let menu_dash_id = dash_item.id().clone();
+    let menu_show_id = show_item.id().clone();
+    let menu_hide_id = hide_item.id().clone();
+    let menu_quit_id = quit_item.id().clone();
 
-        let tray = TrayIconBuilder::new()
-            .with_tooltip("QuickSTT")
-            .with_icon(icon)
-            .with_menu(Box::new(menu))
-            .build()
-            .expect("tray");
+    #[cfg(target_os = "linux")]
+    {
+        // Linux: tray-icon/muda need a GTK main loop. Spawn a dedicated thread
+        // that initialises GTK, owns the TrayIcon and runs gtk::main().
+        // Menu events still arrive via the global MenuEvent channel which is
+        // polled each frame in `poll_tray_and_hotkeys`.
+        let icon_clone_icon = icon.clone();
+        std::thread::Builder::new()
+            .name("tray-gtk".to_string())
+            .spawn(move || {
+                if gtk::init().is_err() {
+                    warn!("gtk init failed — system tray unavailable");
+                    return;
+                }
+                match TrayIconBuilder::new()
+                    .with_tooltip("QuickSTT")
+                    .with_icon(icon_clone_icon)
+                    .with_menu(Box::new(menu))
+                    .build()
+                {
+                    Ok(tray) => {
+                        info!("System tray initialised");
+                        Box::leak(Box::new(tray));
+                        gtk::main();
+                    }
+                    Err(e) => warn!("Tray build failed: {e}"),
+                }
+            })
+            .expect("spawn tray thread");
+        let _ = icon; // moved clone above
+    }
+    #[cfg(not(target_os = "linux"))]
+    let tray = TrayIconBuilder::new()
+        .with_tooltip("QuickSTT")
+        .with_icon(icon)
+        .with_menu(Box::new(menu))
+        .build()
+        .expect("tray");
 
         let names = {
             let s = state.lock().unwrap();
             s.model_entries.iter().map(|m| m.name.clone()).collect()
         };
 
-        let widget_visible_init = state.lock().unwrap().widget_visible;
         let (widget_flexible_init, initial_pill_w, initial_pill_h, initial_s_from_settings) = {
             let s = state.lock().unwrap();
             let saved_w = s.settings.pill_width as f32;
@@ -594,13 +778,17 @@ impl QuickSttApp {
             )
         };
 
-        let dash = Arc::new(Mutex::new(DashboardState::from(&initial_s_from_settings)));
+        // Start hidden when launched with --background or the saved
+        // "start minimized to tray" setting is on.
+        if start_hidden || initial_s_from_settings.startup_background {
+            if let Ok(mut s) = state.lock() {
+                s.widget_visible = false;
+                s.status_message = "Hidden".into();
+            }
+        }
 
         // Set initial widget visibility from AppState
-        {
-            let mut s = state.lock().unwrap();
-            s.widget_visible = widget_visible_init;
-        }
+        let widget_visible_init = state.lock().unwrap().widget_visible;
 
         Self {
             state,
@@ -638,8 +826,10 @@ impl QuickSttApp {
             resize_anchor_size: vec2(0.0, 0.0),
             resize_anchor_topleft: pos2(0.0, 0.0),
             _hotkey_manager: hotkey_manager,
+            #[cfg(not(target_os = "linux"))]
             _tray_icon: tray,
             initialized: false,
+            positioned: false,
             last_widget_visible: widget_visible_init,
             #[cfg(target_os = "windows")]
             widget_hwnd: None,
@@ -647,6 +837,7 @@ impl QuickSttApp {
             menu_show_id,
             menu_hide_id,
             menu_quit_id,
+            id_hotkey_super_toggle: id_super_toggle,
             id_hotkey_toggle_listen: id_toggle,
             id_hotkey_show_widget: id_show_widget_hotkey,
             id_hotkey_on_cmd: id_on_cmd,
@@ -748,8 +939,10 @@ impl QuickSttApp {
                 .map(|d| d.on_command_transcription)
                 .unwrap_or(false);
 
-            if event.id == self.id_hotkey_toggle_listen {
-                // Toggle hotkey: Ctrl+Shift+Space (press to toggle)
+            if event.id == self.id_hotkey_super_toggle
+                || event.id == self.id_hotkey_toggle_listen
+            {
+                // Toggle hotkeys: Super+Space (primary) / Ctrl+Shift+Space (legacy)
                 if event.state == global_hotkey::HotKeyState::Pressed {
                     let is_listening = self
                         .state
@@ -1013,9 +1206,14 @@ impl QuickSttApp {
                                     );
                                     if response.clicked() {
                                         self.selected_model_idx = *real_idx;
-                                        let _ = self
-                                            .tx_cmd
-                                            .try_send(OrchestratorCommand::SelectModel(*real_idx));
+                                        let cmd = if entry.installed {
+                                            OrchestratorCommand::SelectModel(*real_idx)
+                                        } else {
+                                            // Picking a not-installed model kicks off
+                                            // its background download.
+                                            OrchestratorCommand::DownloadModel(*real_idx)
+                                        };
+                                        let _ = self.tx_cmd.try_send(cmd);
                                         close_popup = true;
                                     }
                                 }
@@ -1511,6 +1709,16 @@ impl eframe::App for QuickSttApp {
             self.initialized = true;
         }
 
+        // Position the pill bottom-center above the taskbar once, on the very
+        // first frame (mirrors where the C++ widget parks itself by default).
+        if !self.positioned {
+            let (sw, sh) = get_screen_size();
+            let px = ((sw - self.pill_w) / 2.0).max(0.0);
+            let py = (sh - self.pill_h - 72.0).max(0.0);
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos2(px, py)));
+            self.positioned = true;
+        }
+
         self.ensure_icons(ctx);
         self.sync_from_state();
         self.handle_events(ctx);
@@ -1954,7 +2162,32 @@ fn render_models_tab(
                                     )
                                     .clicked()
                                 {
-                                    let _ = tx.try_send(OrchestratorCommand::SelectModel(i));
+                                    let root = quickstt_core::models::catalog::models_root();
+                                    let all = quickstt_core::models::catalog::all_descriptors();
+                                    if let Some(desc) =
+                                        all.iter().find(|d| d.name == entry.name)
+                                    {
+                                        let dir = root.join(&desc.model_dir);
+                                        let _ = std::fs::remove_dir_all(&dir);
+                                        // Also drop the downloaded vosk runtime when
+                                        // uninstalling the Vosk model.
+                                        if desc.engine_family
+                                            == quickstt_core::models::catalog::EngineFamily::Vosk
+                                        {
+                                            let _ = std::fs::remove_dir_all(
+                                                root.join("runtimes/vosk"),
+                                            );
+                                        }
+                                        if let Ok(mut s) = state.lock() {
+                                            s.status_message =
+                                                format!("Removed: {}", desc.name);
+                                            for e in s.model_entries.iter_mut() {
+                                                if e.name == desc.name {
+                                                    e.installed = false;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             } else if ui
                                 .add(
@@ -1970,7 +2203,8 @@ fn render_models_tab(
                                 )
                                 .clicked()
                             {
-                                let _ = tx.try_send(OrchestratorCommand::SelectModel(i));
+                                let _ =
+                                    tx.try_send(OrchestratorCommand::DownloadModel(i));
                             }
                         });
                     });
@@ -2560,10 +2794,21 @@ fn main() -> Result<(), eframe::Error> {
     tracing_subscriber::fmt::init();
     info!("Starting QuickSTT v2.0...");
 
+    // ── Single-instance + CLI handling ──
+    let (cli_cmd, cli_background) = parse_cli();
+    if forward_to_running_instance(cli_cmd) {
+        return Ok(());
+    }
+
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (orchestrator, rx_cmd) = AppOrchestrator::new().expect("Failed to init orchestrator");
     let state = orchestrator.get_state();
     let tx_cmd = orchestrator.get_command_sender();
+
+    // Dashboard state is created up-front so the IPC listener can toggle it.
+    let initial_settings = state.lock().unwrap().settings.clone();
+    let dash = Arc::new(Mutex::new(DashboardState::from(&initial_settings)));
+    spawn_ipc_listener(state.clone(), dash.clone());
 
     // The audio control thread is spawned inside `AppOrchestrator::new()` so
     // the cpal stream + segmenter live on their own dedicated OS thread. The
@@ -2642,6 +2887,8 @@ fn main() -> Result<(), eframe::Error> {
                 state,
                 tx_cmd,
                 wakeword_handle,
+                dash,
+                cli_background,
             )))
         }),
     )

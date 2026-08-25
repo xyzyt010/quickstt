@@ -44,6 +44,15 @@ jobs:
       - name: Cargo build --release
         working-directory: quickstt-rust
         run: cargo build --release
+      - name: Build parakeet_engine (Parakeet TDT runtime)
+        working-directory: parakeet_engine
+        run: |
+          cargo build --release
+          mkdir -p ../quickstt-rust/target/release/tools/parakeet
+          cp -f target/release/parakeet_engine ../quickstt-rust/target/release/tools/parakeet/
+          file ../quickstt-rust/target/release/tools/parakeet/parakeet_engine
+      - name: Stage wakeword models for tarball
+        run: cp -r quickstt-rust/wakeword_models quickstt-rust/target/release/wakeword_models
       - name: CMake stt_service
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -69,7 +78,14 @@ jobs:
           [[ -f "$STT" ]] && EXTRA="-e $STT"
           linuxdeploy --appdir dist/AppDir -e "$BIN" $EXTRA -d assets/quickstt.desktop -i assets/icon_app.png --plugin gtk --output appimage 2>&1 | tail -n 40 || true
           if ! ls dist/*.AppImage 1>/dev/null 2>&1; then
-            tar czf "dist/quickstt-${GITHUB_REF_NAME:-local}-x86_64.tar.gz" -C target/release QuickSTT -C ../assets quickstt.desktop 2>/dev/null || true
+            FILES=(QuickSTT)
+            [[ -f target/release/stt_service ]] && FILES+=(stt_service)
+            [[ -d target/release/tools ]] && FILES+=(tools)
+            [[ -d target/release/wakeword_models ]] && FILES+=(wakeword_models)
+            echo "Packing: ${FILES[*]}"
+            tar czf "dist/quickstt-${GITHUB_REF_NAME:-local}-x86_64.tar.gz" \
+              -C target/release "${FILES[@]}" \
+              -C ../assets quickstt.desktop icon_app.png
           fi
           ls -lh dist/*
       - name: SHA256SUMS

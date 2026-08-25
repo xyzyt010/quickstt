@@ -67,6 +67,11 @@ pub fn default_models_dir() -> PathBuf {
             if primary.exists() {
                 return primary;
             }
+            // deb layout: models live under /usr/lib/quickstt
+            let system = PathBuf::from("/usr/lib/quickstt/wakeword_models");
+            if system.exists() {
+                return system;
+            }
             if exe_dir.ends_with("debug") || exe_dir.ends_with("release") {
                 if let Some(ws_root) = exe_dir.parent().and_then(|p| p.parent()) {
                     let fallback = ws_root.join("wakeword_models");

@@ -43,6 +43,7 @@ windows = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 dirs = { workspace = true }
+gtk = "0.18"
 
 [build-dependencies]
 winresource = "0.1.17"
@@ -62,4 +63,20 @@ assets = [
   ["../assets/quickstt.desktop", "usr/share/applications/quickstt.desktop", "644"],
   ["../assets/icon_app.png", "usr/share/pixmaps/quickstt.png", "644"],
   ["../assets/icon_app.png", "usr/share/icons/hicolor/256x256/apps/quickstt.png", "644"],
+  ["../target/release/tools/parakeet/parakeet_engine", "usr/lib/quickstt/tools/parakeet/parakeet_engine", "755"],
+  ["../wakeword_models/agent/config.json", "usr/lib/quickstt/wakeword_models/agent/config.json", "644"],
+  ["../wakeword_models/agent/model.onnx", "usr/lib/quickstt/wakeword_models/agent/model.onnx", "644"],
+  ["../wakeword_models/agent/model.pt", "usr/lib/quickstt/wakeword_models/agent/model.pt", "644"],
+  ["../wakeword_models/alexa/config.json", "usr/lib/quickstt/wakeword_models/alexa/config.json", "644"],
+  ["../wakeword_models/alexa/model.onnx", "usr/lib/quickstt/wakeword_models/alexa/model.onnx", "644"],
+  ["../wakeword_models/alexa/model.pt", "usr/lib/quickstt/wakeword_models/alexa/model.pt", "644"],
+  ["../wakeword_models/hem/config.json", "usr/lib/quickstt/wakeword_models/hem/config.json", "644"],
+  ["../wakeword_models/hem/model.onnx", "usr/lib/quickstt/wakeword_models/hem/model.onnx", "644"],
+  ["../wakeword_models/hem/model.pt", "usr/lib/quickstt/wakeword_models/hem/model.pt", "644"],
+  ["../wakeword_models/hey_jarvis/config.json", "usr/lib/quickstt/wakeword_models/hey_jarvis/config.json", "644"],
+  ["../wakeword_models/hey_jarvis/model.onnx", "usr/lib/quickstt/wakeword_models/hey_jarvis/model.onnx", "644"],
+  ["../wakeword_models/hey_jarvis/model.pt", "usr/lib/quickstt/wakeword_models/hey_jarvis/model.pt", "644"],
+  ["../wakeword_models/jarvis/config.json", "usr/lib/quickstt/wakeword_models/jarvis/config.json", "644"],
+  ["../wakeword_models/jarvis/model.onnx", "usr/lib/quickstt/wakeword_models/jarvis/model.onnx", "644"],
+  ["../wakeword_models/jarvis/model.pt", "usr/lib/quickstt/wakeword_models/jarvis/model.pt", "644"],
 ]
