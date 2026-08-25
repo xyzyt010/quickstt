@@ -54,12 +54,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: quickstt-rust
-      - name: cargo check (offline)
+      - name: cargo check
         working-directory: quickstt-rust
-        run: cargo check --offline
+        run: cargo check
       - name: cargo test (core)
         working-directory: quickstt-rust
-        run: cargo test -p quickstt-core --lib --offline
+        run: cargo test -p quickstt-core --lib
 
   cpp-linux:
     name: C++ stt_service (Ubuntu)

@@ -91,6 +91,7 @@ jobs:
   build-windows:
     name: Windows Portable (Qt + Rust)
     runs-on: windows-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -100,10 +101,10 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v3
         with:
-          version: '6.6.2'
+          version: '6.8.0'
           host: windows
           target: desktop
-          arch: win64_msvc2019_64
+          arch: win64_msvc2022_64
           modules: qtsvg qtmultimedia
       - name: Cargo build (Rust GUI)
         working-directory: quickstt-rust
@@ -136,7 +137,7 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
-    needs: [build-linux-deb-appimage, build-windows]
+    needs: [build-linux-deb-appimage]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:

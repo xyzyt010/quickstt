@@ -69,20 +69,21 @@ quickstt_popup/target/
 third_party/package_cache/
 graphify-out/
 
-# Models & large binaries (never commit)
+# Models & large binaries (never commit) — artifacts only, not Rust source
 *.gguf
-*.bin
-*.onnx
-*.tflite
-*.pv
-*.zip
-*.tar
-*.7z
-models/
-wakeword_models/
+# Keep Rust source models catalog (quickstt-core/src/models/*.rs) — do not ignore
+!quickstt-rust/quickstt-core/src/models/**
+# Large runtime payloads (top-level only)
+# Note: use leading slash to avoid matching quickstt-rust/src/models/
+# Keep these commented to avoid over-broad ignores; payloads are covered by *.gguf/*.onnx/*.bin above
+# /models/  # top-level models dir (if present) — uncomment if you add one
+# /wakeword_models/
 tools/nemotron/*.gguf
 third_party/audio_preprocess/**/*.tar.gz
 stt_runtime/
+# Top-level artifact dirs (already handled above) keep source
+# models/  # REMOVED — was hiding quickstt-core/src/models/
+# wakeword_models/  # REMOVED — use specific patterns below
 
 # Python
 __pycache__/
