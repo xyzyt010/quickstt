@@ -58,8 +58,8 @@ section = "utils"
 priority = "optional"
 depends = "libgtk-3-0, libayatana-appindicator3-1 | libappindicator3-1, librsvg2-2, libasound2, libpulse0, libx11-6, libxi6, libxtst6, libglib2.0-0"
 assets = [
-  ["target/release/QuickSTT", "usr/bin/quickstt", "755"],
-  ["assets/quickstt.desktop", "usr/share/applications/quickstt.desktop", "644"],
-  ["assets/icon_app.png", "usr/share/pixmaps/quickstt.png", "644"],
-  ["assets/icon_app.png", "usr/share/icons/hicolor/256x256/apps/quickstt.png", "644"],
+  ["../target/release/QuickSTT", "usr/bin/quickstt", "755"],
+  ["../assets/quickstt.desktop", "usr/share/applications/quickstt.desktop", "644"],
+  ["../assets/icon_app.png", "usr/share/pixmaps/quickstt.png", "644"],
+  ["../assets/icon_app.png", "usr/share/icons/hicolor/256x256/apps/quickstt.png", "644"],
 ]
