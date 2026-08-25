@@ -22,12 +22,9 @@ else()
 endif()
 endif()
 
-# Main Application (Legacy C++ GUI) — Windows-only; on Linux the Rust GUI (quickstt-gui) is used
-if(WIN32)
-add_executable(QuickSTT_App
+# Main Application (Legacy C++ GUI) — cross-platform: Windows native + Linux (Qt6 widgets)
+set(QUICKSTT_APP_SOURCES
     Source/main.cpp
-    Source/ahk_bridge.cpp
-    Source/ahk_bridge.h
     Source/cloud_stt_manager.cpp
     Source/cloud_stt_manager.h
     Source/android_tv_manager.cpp
@@ -56,14 +53,26 @@ add_executable(QuickSTT_App
     Source/startup_utils.h
     Source/text_board.cpp
     Source/text_board.h
+)
+if(WIN32)
+list(APPEND QUICKSTT_APP_SOURCES
+    Source/ahk_bridge.cpp
+    Source/ahk_bridge.h
     Source/windows_secret_store.cpp
     Source/windows_secret_store.h
     resources_app.rc
 )
-target_link_libraries(QuickSTT_App PRIVATE QtAwesome Qt6::Core Qt6::Widgets Qt6::Svg Qt6::Network dxgi crypt32)
+endif()
+
+if(WIN32 OR Qt6_FOUND)
+add_executable(QuickSTT_App ${QUICKSTT_APP_SOURCES})
+target_link_libraries(QuickSTT_App PRIVATE QtAwesome Qt6::Core Qt6::Widgets Qt6::Svg Qt6::Network)
+if(WIN32)
+target_link_libraries(QuickSTT_App PRIVATE dxgi crypt32)
 set_target_properties(QuickSTT_App PROPERTIES WIN32_EXECUTABLE ON)
 else()
-message(STATUS "QuickSTT_App (C++ Qt GUI) skipped on non-Windows — use cargo build -p quickstt-gui on Linux")
+set_target_properties(QuickSTT_App PROPERTIES OUTPUT_NAME "quickstt-app")
+endif()
 endif()
 
 # Make the development build runnable when started directly from Explorer.
@@ -178,7 +187,7 @@ add_custom_command(TARGET stt_service_native POST_BUILD
 endif()
 
 # Copy Resources (SVGs, DLLs, PortAudio) to Build Directory
-if(TARGET QuickSTT_App)
+if(TARGET QuickSTT_App AND WIN32)
 find_program(CARGO_EXECUTABLE NAMES cargo)
 if(CARGO_EXECUTABLE)
 add_custom_target(quickstt_popup_rust
@@ -245,6 +254,8 @@ add_custom_command(TARGET QuickSTT_App POST_BUILD
 endif()
 
 # Mirror latest build artifacts into the QuickSTT_App distribution directory
+# (Windows dev convenience only — Linux release binaries are staged by CI)
+if(WIN32)
 add_custom_command(TARGET QuickSTT_App POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_SOURCE_DIR}/QuickSTT_App"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE_DIR:QuickSTT_App>/QuickSTT_App.exe" "${CMAKE_SOURCE_DIR}/QuickSTT_App/QuickSTT_App.exe"
@@ -252,4 +263,5 @@ add_custom_command(TARGET QuickSTT_App POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE_DIR:QuickSTT_App>/quickstt_popup.exe" "${CMAKE_SOURCE_DIR}/QuickSTT_App/quickstt_popup.exe"
     COMMENT "Deploying latest binaries to QuickSTT_App distribution folder"
 )
+endif()
 endif()

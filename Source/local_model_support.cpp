@@ -7,8 +7,10 @@
 #include <QFileInfo>
 #include <QSettings>
 
+#ifdef _WIN32
 #include <windows.h>
 #include <dxgi.h>
+#endif
 
 namespace {
 
@@ -727,7 +729,7 @@ bool modelPayloadInstalled(const LocalModelDescriptor &descriptor) {
 
 QVector<ComputeTargetInfo> detectComputeTargets() {
   QVector<ComputeTargetInfo> targets;
-
+#ifdef _WIN32
   IDXGIFactory1 *factory = nullptr;
   if (SUCCEEDED(CreateDXGIFactory1(IID_IDXGIFactory1,
                                    reinterpret_cast<void **>(&factory))) &&
@@ -796,6 +798,31 @@ QVector<ComputeTargetInfo> detectComputeTargets() {
   cpuTarget.systemMemoryMb = int(memoryStatus.ullTotalPhys / (1024ull * 1024ull));
   cpuTarget.isCpuFallback = true;
   targets << cpuTarget;
+#else
+  // Linux: no DXGI — read total RAM from /proc/meminfo and expose CPU target.
+  qint64 totalKb = 0;
+  QFile meminfo(QStringLiteral("/proc/meminfo"));
+  if (meminfo.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    while (!meminfo.atEnd()) {
+      const QStringList parts =
+          QString::fromLatin1(meminfo.readLine()).split(QLatin1Char(' '),
+                                                        Qt::SkipEmptyParts);
+      if (parts.size() >= 2 && parts.first() == QLatin1String("MemTotal:")) {
+        totalKb = parts.at(1).toLongLong();
+        break;
+      }
+    }
+  }
+
+  ComputeTargetInfo cpuTarget;
+  cpuTarget.id = QStringLiteral("cpu");
+  cpuTarget.displayName = QStringLiteral("CPU Fallback");
+  cpuTarget.vendorName = QStringLiteral("System CPU");
+  cpuTarget.backendLabel = QStringLiteral("Native Vosk CPU");
+  cpuTarget.systemMemoryMb = int(totalKb / 1024);
+  cpuTarget.isCpuFallback = true;
+  targets << cpuTarget;
+#endif
   return targets;
 }
 

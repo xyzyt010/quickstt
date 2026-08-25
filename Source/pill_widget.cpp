@@ -1,9 +1,13 @@
 #include "pill_widget.h"
+#ifdef _WIN32
 #include "ahk_bridge.h"
+#endif
 #include "local_model_support.h"
 #include "optional_service_support.h"
 #include "startup_utils.h"
+#ifdef _WIN32
 #include "windows_secret_store.h"
+#endif
 #include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
@@ -42,7 +46,9 @@
 #include <cmath>
 #include <memory>
 #include <vector>
+#ifdef _WIN32
 #include <windows.h> // SendInput / native window icons
+#endif
 
 namespace {
 constexpr int kMinWaveformBarCount = 24;
@@ -124,6 +130,9 @@ float sampleWaveformLevel(const QList<float> &samples, int slotIndex,
   return qBound(0.0f, level, 1.0f);
 }
 
+#ifdef _WIN32
+// ── Voice-triggered keyboard commands (spoken "press enter", "copy", …) ──
+// Resolved to Win32 vkeys and injected via SendInput; Windows-only feature.
 QString normalizeSpecialCommandText(QString text) {
   text = text.toLower().trimmed();
   for (QChar &ch : text) {
@@ -402,6 +411,7 @@ bool tryResolveSpecialCommand(const QString &spokenText, WORD *vkey,
 
   return tryResolveFunctionKeyCommand(norm, vkey, commandName);
 }
+#endif // _WIN32
 
 QString normalizeModelName(const QString &text) {
   int suffixPos = text.indexOf(" [");
@@ -873,6 +883,7 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   updateCachedIcons(); // This calls updateTrayIcon internally
 
   qDebug() << "Setup AHK...";
+#ifdef _WIN32
   m_ahkBridge = new AhkBridge(this);
   QString appDir = QCoreApplication::applicationDirPath();
   m_ahkBridge->setPaths(
@@ -885,6 +896,9 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
             statusLabel->show();
             statusLabel->setText(currentStatusText);
           });
+#else
+  QString appDir = QCoreApplication::applicationDirPath();
+#endif
 
   qDebug() << "Setup Backend...";
   backendProcess = new QProcess(this);
@@ -990,7 +1004,11 @@ void PillWidget::startBackend() {
   QString wakeEngine = canonicalWakeEngineLabel(
       s.value("wakeEngine", "OpenWakeWord (TFLite)").toString());
 
+#ifdef Q_OS_WIN
   QString backendPath = QDir(appDir).filePath("stt_service.exe");
+#else
+  QString backendPath = QDir(appDir).filePath("stt_service");
+#endif
   qDebug() << "Starting native C++ backend (stt_service.exe) - model:" << modelStr
            << "wake:" << wakeEngine;
 
@@ -1433,6 +1451,7 @@ void PillWidget::updateTrayIcon() {
 }
 
 void PillWidget::applyNativeWindowIcons() {
+#ifdef _WIN32
   const QString icoPath = QCoreApplication::applicationDirPath() + "/icon_app.ico";
   if (!QFileInfo::exists(icoPath))
     return;
@@ -1481,6 +1500,7 @@ void PillWidget::applyNativeWindowIcons() {
                      reinterpret_cast<LPARAM>(m_bigWinIcon));
     }
   }
+#endif // _WIN32
 }
 
 void PillWidget::toggleStartup(bool e) { applyStartupSetting(e); }
@@ -1789,7 +1809,8 @@ void PillWidget::onSettingChanged(QString key, QVariant val) {
   update();
 }
 
-// ── Native Windows SendInput text typing ─────────────────────────────────────
+// ── Native text typing into the focused window ──────────────────────────────
+#ifdef _WIN32
 static void nativeSendText(const QString &text) {
   if (text.isEmpty())
     return;
@@ -1810,6 +1831,29 @@ static void nativeSendText(const QString &text) {
     SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
   }
 }
+#else
+// Linux: type via xdotool (X11). On Wayland, typing into other windows is
+// restricted by the compositor — text still lands in the Text Board.
+static void nativeSendText(const QString &text) {
+  if (text.isEmpty())
+    return;
+  QProcess *xdotool = new QProcess();
+  xdotool->setProgram(QStringLiteral("xdotool"));
+  QStringList args;
+  args << QStringLiteral("type") << QStringLiteral("--delay")
+       << QStringLiteral("0") << QStringLiteral("--") << text;
+  xdotool->setArguments(args);
+  QObject::connect(xdotool,
+                   static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(
+                       &QProcess::finished),
+                   xdotool, [xdotool](int, QProcess::ExitStatus) {
+                     qWarning() << "xdotool:"
+                                << xdotool->readAllStandardError().trimmed();
+                     xdotool->deleteLater();
+                   });
+  xdotool->start();
+}
+#endif
 
 void PillWidget::onProcessOutput() {
   while (backendProcess->canReadLine()) {
@@ -3029,6 +3073,7 @@ void PillWidget::processRecognizedText(const QString &text, bool fromCloud) {
   const bool appHasFocus = (QApplication::activeWindow() != nullptr);
   bool isCommand = false;
   QString commandName;
+#ifdef _WIN32
   if (specialCommandsEnabled) {
     WORD vkey = 0;
     WORD modifierVkey = 0;
@@ -3066,6 +3111,7 @@ void PillWidget::processRecognizedText(const QString &text, bool fromCloud) {
         textBoardWindow->appendText("COMMAND: " + commandName);
     }
   }
+#endif // _WIN32
 
   if (!isCommand) {
     if (!appHasFocus) {

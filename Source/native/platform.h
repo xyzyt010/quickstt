@@ -3,6 +3,8 @@
 // Linux/macOS: uses dlopen / dlsym / dlclose
 #pragma once
 
+#include <string>
+
 #ifdef _WIN32
   #include <windows.h>
   using platform_handle_t = HMODULE;

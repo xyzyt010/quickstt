@@ -35,6 +35,8 @@ jobs:
             libasound2-dev libpulse-dev portaudio19-dev \
             libx11-dev libxi-dev libxtst-dev libxdo-dev libssl-dev \
             libopenblas-dev \
+            qt6-base-dev qt6-svg-dev qt6-multimedia-dev \
+            libgl1-mesa-dev \
             file patchelf zsync desktop-file-utils
           cargo install cargo-deb --locked || true
           # linuxdeploy
@@ -63,12 +65,14 @@ jobs:
           cp -f /tmp/tcpp/build/bin/transcribe-cli quickstt-rust/target/release/tools/nemotron/
           file quickstt-rust/target/release/tools/nemotron/transcribe-cli
           ldd quickstt-rust/target/release/tools/nemotron/transcribe-cli | head -20
-      - name: CMake stt_service
+      - name: CMake native backend + Qt widget GUI (stt_service + quickstt-app)
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target stt_service_native -j"$(nproc)" || true
-          ls -lh build/stt_service 2>/dev/null || true
-          cp -f build/stt_service quickstt-rust/target/release/stt_service 2>/dev/null || true
+          cmake --build build --target stt_service_native QuickSTT_App -j"$(nproc)"
+          file build/stt_service build/quickstt-app
+          ldd build/quickstt-app | grep -i "not found" && exit 1 || true
+          cp -f build/stt_service quickstt-rust/target/release/stt_service
+          cp -f build/quickstt-app quickstt-rust/target/release/quickstt-app
       - name: cargo deb
         working-directory: quickstt-rust
         run: |
@@ -94,6 +98,8 @@ jobs:
             rm -rf dist/payload && mkdir -p dist/payload
             cp -f "$BIN" dist/payload/QuickSTT
             cp -f "$STT" dist/payload/stt_service 2>/dev/null || true
+            cp -f target/release/quickstt-app dist/payload/quickstt-app 2>/dev/null || true
+            cp -f target/release/stt_service dist/payload/stt_service 2>/dev/null || true
             cp -r target/release/tools dist/payload/tools 2>/dev/null || true
             cp -r target/release/wakeword_models dist/payload/wakeword_models 2>/dev/null || true
             mkdir -p dist/payload/assets
@@ -188,12 +194,15 @@ jobs:
       - name: Release notes
         run: |
           VER="${{ github.ref_name }}"
-          DEB_NAME="quickstt_2.0.0.alpha.2-1_amd64.deb"
+          # v2.0.0-alpha.5 -> quickstt_2.0.0.alpha.5-1_amd64.deb (cargo-deb mangles dashes)
+          DEB_NAME="quickstt_$(echo "${VER#v}" | sed 's/-/./')-1_amd64.deb"
+          echo "DEB_NAME=$DEB_NAME"
           cat > /tmp/notes.md <<NOTES
           ## QuickSTT ${VER} — Ubuntu/Debian amd64 (Mint 21/22)
 
           Floating offline voice typing pill — wakeword, VAD, tray, global hotkeys.
           Models download in-app: Vosk small EN 50M · Parakeet TDT 0.6B v3 INT8 · Nemotron 3.5 ASR Streaming 0.6B Q8_0 (716MB, transcribe.cpp).
+          NEW: full C++ Qt widget app included — run \`quickstt-app\` for the classic Dashboard + Pill UI (auto model suspend after idle).
 
           ### Linux Mint / Ubuntu / Debian — one-liner
           \`\`\`bash

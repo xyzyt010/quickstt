@@ -621,7 +621,10 @@ struct Settings {
   std::string porcupineAccessKey = "";
   std::string recordingDir;
   bool autoOffloadEnabled = true;
-  int autoOffloadDelaySec = 120;
+  // Minimum-time default: suspend the model as soon as it is safe (no active
+  // turn / popup / stream / inference). The engine-loop guards make delay=0
+  // stable; users can raise it via Dashboard -> OFFLOADDELAY.
+  int autoOffloadDelaySec = 0;
   bool autoModelLoad = false;
 };
 

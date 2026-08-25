@@ -13,13 +13,20 @@
 #include <QSettings>
 #include <QSharedMemory>
 #include <QTextStream>
+#ifdef Q_OS_WIN
 #include <windows.h>
+#endif
 
 namespace {
 QString g_logPath = "startup_log.txt";
 constexpr auto kSingleInstanceKey = "QuickSTT_App_SingleInstance_v2";
 constexpr auto kActivationServerName = "QuickSTT_App_Activation_v2";
 
+#if defined(Q_OS_WIN) && !defined(_WIN32)
+#error "Q_OS_WIN without _WIN32"
+#endif
+
+#ifdef _WIN32
 using SetAppUserModelIdFn = HRESULT(WINAPI *)(PCWSTR);
 
 QString detectAppDir() {
@@ -40,10 +47,16 @@ void setExplicitAppUserModelId(const wchar_t *appId) {
     fn(appId);
   FreeLibrary(shell32);
 }
+#else
+QString detectAppDir() { return QCoreApplication::applicationDirPath(); }
+#endif // _WIN32
 
 QIcon loadPackagedAppIcon() {
-  const QString iconPath = QDir(detectAppDir()).filePath("icon_app.ico");
-  return QFileInfo::exists(iconPath) ? QIcon(iconPath) : QIcon();
+  const QString dir = detectAppDir();
+  for (const char *name : {"icon_app.png", "icon_app.ico", "app_icon.svg"})
+    if (QFileInfo::exists(QDir(dir).filePath(QLatin1String(name))))
+      return QIcon(QDir(dir).filePath(QLatin1String(name)));
+  return QIcon();
 }
 
 bool notifyRunningInstance() {
@@ -82,13 +95,16 @@ int main(int argc, char *argv[]) {
   qDebug() << "Working directory set to" << QDir::currentPath();
 
   QApplication a(argc, argv);
+#ifdef _WIN32
   setExplicitAppUserModelId(L"QuickSTT.App");
+#endif
   const QIcon appIcon = loadPackagedAppIcon();
   if (!appIcon.isNull())
     a.setWindowIcon(appIcon);
   qDebug() << "QApplication Created";
 
-  // ─── Single Instance Guard (Windows Named Mutex + Socket Verification) ──
+  // ─── Single Instance Guard (Named Mutex on Windows + Socket Verification) ──
+#ifdef _WIN32
   HANDLE hSingleInstanceMutex = CreateMutexW(NULL, TRUE, L"Local\\QuickSTT_App_SingleInstance_v3");
   if (GetLastError() == ERROR_ALREADY_EXISTS) {
     if (notifyRunningInstance()) {
@@ -99,6 +115,12 @@ int main(int argc, char *argv[]) {
     qDebug() << "Mutex existed but no active instance responded on socket. Overriding stale lock...";
   }
   qDebug() << "Single instance check passed (Windows Mutex acquired).";
+#else
+  if (notifyRunningInstance()) {
+    qDebug() << "Another QuickSTT instance is active and responded. Exiting secondary launch.";
+    return 0;
+  }
+#endif
   // ─────────────────────────────────────────────────────────────────────────
 
   a.setQuitOnLastWindowClosed(false);

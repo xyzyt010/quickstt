@@ -37,7 +37,9 @@
 #include <QWheelEvent>
 #include <QWidget>
 #include <functional>
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 // Custom ComboBox to track Open/Close state for Arrow rotation
 class PillComboBox : public QComboBox {
@@ -384,8 +386,10 @@ private:
   QSvgRenderer *m_svgRenMicActive = nullptr;
   QSvgRenderer *m_svgRenMicInactive = nullptr;
   QSvgRenderer *m_svgRenApp = nullptr;
+#ifdef _WIN32
   HICON m_smallWinIcon = nullptr;
   HICON m_bigWinIcon = nullptr;
+#endif
   int m_waveformHistoryLimit = 64;
   CloudSttManager *m_cloudSttManager = nullptr;
   LocalFrontendSttManager *m_localFrontendSttManager = nullptr;

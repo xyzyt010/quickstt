@@ -8,7 +8,9 @@
 #include "optional_service_support.h"
 #include "setup_wizard.h"
 #include "smart_life_manager.h"
+#ifdef _WIN32
 #include "windows_secret_store.h"
+#endif
 #include "QtAwesome.h"
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -4805,10 +4807,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   memLayout->addWidget(autoOffloadCheck);
 
   // Timer row: "Offload after: [M] min [S] sec"
-  int savedTotalSec = 15;
+  // Fresh installs default to the minimum (instant suspend once safe);
+  // saved user settings always win.
+  int savedTotalSec = 0;
   if (s.contains("offloadSeconds")) {
     savedTotalSec = s.value("offloadSeconds", 15).toInt();
-  } else {
+  } else if (s.contains("offloadMinutes")) {
     savedTotalSec = s.value("offloadMinutes", 3).toInt() * 60;
   }
   int savedM = savedTotalSec / 60;

@@ -3,7 +3,7 @@ members = ["quickstt-core", "quickstt-gui", "quickstt-ipc", "quickstt-slint"]
 resolver = "2"
 
 [workspace.package]
-version = "2.0.0-alpha.4"
+version = "2.0.0-alpha.5"
 edition = "2021"
 authors = ["QuickSTT Team <support@quickstt.com>"]
 license = "MIT"
