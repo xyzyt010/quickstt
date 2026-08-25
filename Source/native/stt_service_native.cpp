@@ -19,6 +19,8 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <limits.h>
+#include <malloc.h>
+#include <signal.h>
 #ifndef MAX_PATH
 #define MAX_PATH 4096
 #endif
@@ -27,6 +29,7 @@ using HKEY = void*;
 #endif
 #define HKEY_CURRENT_USER ((HKEY)0)
 #define ERROR_SUCCESS 0
+#define KEY_READ 0x20019
 #define REG_MULTI_SZ 7
 #define REG_SZ 1
 #define REG_DWORD 4
@@ -42,6 +45,7 @@ inline long RegCloseKey(HKEY) { return 0; }
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cstdarg>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
@@ -442,6 +446,7 @@ struct ParakeetPipe {
   pid_t pid = -1;
   int fd_stdin = -1;
   int fd_stdout = -1;
+  void* hProc = nullptr; // Win32 parity member; unused on POSIX
   bool ready = false;
   bool modelLoaded = false;
   std::string readBuffer;
@@ -565,6 +570,7 @@ static void svc_log(const char *fmt, ...) {
   fflush(stderr);
   va_end(args);
 }
+// svc_log uses <cstdarg> (included below via the standard headers block)
 
 static void sendEvent(const std::string &type, std::string payload) {
   // Ensure payload is single-line to avoid breaking pipe protocol
@@ -2553,9 +2559,14 @@ public:
       vosk.model_free(voskModel);
       voskModel = nullptr;
     }
-    // Force aggressive Windows memory compaction to drop
+    // Force aggressive memory compaction to drop
     // the working set down below 50MB when dormant
+#ifdef _WIN32
     SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+#else
+    // POSIX: freed pages return to the OS lazily; malloc_trim tightens the heap.
+    malloc_trim(0);
+#endif
     svc_log("Vosk model offloaded & memory compacted");
     sendEvent("OFFLOADED", "Vosk model offloaded");
   }
