@@ -145,6 +145,17 @@ fn spawn_ipc_listener(state: Arc<Mutex<AppState>>, dash: Arc<Mutex<DashboardStat
 }
 
 fn load_icon_data() -> Option<egui::IconData> {
+    // Primary: render the canonical app-logo SVG (same artwork as the pill).
+    if let Some((rgba, width, height)) =
+        quickstt_gui::icons::render_app_icon_rgba(256)
+    {
+        return Some(egui::IconData {
+            rgba,
+            width,
+            height,
+        });
+    }
+    // Fallback: prebuilt ICO.
     let ico_bytes = include_bytes!("../../assets/icon_app.ico");
     if let Ok(img) = image::load_from_memory_with_format(ico_bytes, image::ImageFormat::Ico) {
         let rgba = img.to_rgba8();
@@ -516,6 +527,13 @@ struct QuickSttApp {
 }
 
 fn create_tray_icon_image() -> tray_icon::Icon {
+    // Primary: the canonical app-logo SVG rendered at tray resolution.
+    if let Some((rgba, width, height)) = quickstt_gui::icons::render_app_icon_rgba(64) {
+        if let Ok(icon) = tray_icon::Icon::from_rgba(rgba, width, height) {
+            return icon;
+        }
+    }
+    // Fallback: prebuilt ICO.
     let ico_bytes = include_bytes!("../../assets/icon_app.ico");
     if let Ok(img) = image::load_from_memory_with_format(ico_bytes, image::ImageFormat::Ico) {
         let rgba = img.to_rgba8();

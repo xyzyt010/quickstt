@@ -10,6 +10,23 @@ pub struct IconSet {
     pub app_icon: TextureHandle,
 }
 
+/// Render the app-logo SVG to raw RGBA (premultiplied) at `size`x`size`.
+/// Used for the system-tray icon and window/taskbar icons so every surface
+/// shows exactly the same artwork as the in-pill SVGs.
+pub fn render_app_icon_rgba(size: u32) -> Option<(Vec<u8>, u32, u32)> {
+    let img = render_svg(APP_ICON_SVG, size, size);
+    let [w, h] = img.size;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let rgba: Vec<u8> = img
+        .pixels
+        .iter()
+        .flat_map(|c| c.to_srgba_unmultiplied())
+        .collect();
+    Some((rgba, w as u32, h as u32))
+}
+
 impl IconSet {
     pub fn load(ctx: &egui::Context, icon_size: u32) -> Self {
         let mic_active =
