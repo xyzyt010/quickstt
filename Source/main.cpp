@@ -49,7 +49,19 @@ void setExplicitAppUserModelId(const wchar_t *appId) {
   FreeLibrary(shell32);
 }
 #else
-QString detectAppDir() { return QCoreApplication::applicationDirPath(); }
+// Must NOT use QCoreApplication::applicationDirPath() here — main() resolves
+// the app dir before the QApplication object exists.
+#include <limits.h>
+#include <unistd.h>
+
+QString detectAppDir() {
+  char exePath[PATH_MAX];
+  const ssize_t len = ::readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+  if (len <= 0)
+    return QDir::currentPath();
+  exePath[len] = '\0';
+  return QFileInfo(QString::fromLocal8Bit(exePath)).absolutePath();
+}
 #endif // _WIN32
 
 QIcon loadPackagedAppIcon() {
@@ -102,16 +114,6 @@ int main(int argc, char *argv[]) {
   QString appDir = detectAppDir();
   QDir::setCurrent(appDir);
   g_logPath = QDir(appDir).filePath("startup_log.txt");
-  // System install dirs (/usr/lib/quickstt) are read-only on Linux — keep
-  // diagnostics in the per-user data root instead.
-  if (!QFileInfo(appDir).isWritable()) {
-    const QString userLogDir = QStandardPaths::writableLocation(
-        QStandardPaths::AppDataLocation);
-    if (!userLogDir.isEmpty()) {
-      QDir().mkpath(userLogDir);
-      g_logPath = QDir(userLogDir).filePath("startup_log.txt");
-    }
-  }
 
   // Keep startup history for diagnostics
   qInstallMessageHandler(customMessageHandler);
@@ -120,6 +122,18 @@ int main(int argc, char *argv[]) {
   qDebug() << "Working directory set to" << QDir::currentPath();
 
   QApplication a(argc, argv);
+
+  // System install dirs (/usr/lib/quickstt) are read-only on Linux — keep
+  // diagnostics in the per-user data root. Resolved after QApplication exists
+  // so QStandardPaths returns the proper org/app paths.
+  if (!QFileInfo(appDir).isWritable()) {
+    const QString userLogDir = QStandardPaths::writableLocation(
+        QStandardPaths::AppDataLocation);
+    if (!userLogDir.isEmpty()) {
+      QDir().mkpath(userLogDir);
+      g_logPath = QDir(userLogDir).filePath("startup_log.txt");
+    }
+  }
 #ifdef _WIN32
   setExplicitAppUserModelId(L"QuickSTT.App");
 #endif
