@@ -584,9 +584,13 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   QTimer::singleShot(0, this, []() { applyStartupSetting(true); });
 
   setWindowOpacity(activeOpacity / 100.0);
-  setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool);
+  setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool |
+                 Qt::WindowDoesNotAcceptFocus);
   setAttribute(Qt::WA_TranslucentBackground);
   setAttribute(Qt::WA_ShowWithoutActivating);
+  setAttribute(Qt::WA_X11NetWmWindowTypeUtility);
+  // Ensure rounded corners are not clipped by the window manager even when
+  // the compositor is off: provide a fallback mask.
   setMouseTracking(true); // Needed for hover-edge resize cursors
   m_widgetFlexible = settings.value("widgetFlexible", false).toBool();
   resize(pillWidth, pillHeight);
@@ -1293,6 +1297,10 @@ void PillWidget::enterEvent(QEnterEvent *event) {
 void PillWidget::leaveEvent(QEvent *event) { QWidget::leaveEvent(event); }
 
 void PillWidget::closeEvent(QCloseEvent *event) {
+  if (m_isQuitting) {
+    event->accept();
+    return;
+  }
   if (trayIcon && trayIcon->isVisible()) {
     suppressAutoShowBriefly(12000);
     hide();
@@ -1719,6 +1727,13 @@ void PillWidget::customResize(int w, int h, int r) {
   pillHeight = h;
   pillRadius = r;
   resize(w, h);
+  // Fallback rounded-corner mask for environments where the compositor is
+  // disabled (Mint without compositing shows square window corners).
+  {
+    QPainterPath maskPath;
+    maskPath.addRoundedRect(QRectF(0, 0, w, h), r, r);
+    setMask(maskPath.toFillPolygon().toPolygon());
+  }
 
   const int leftMargin = qBound(9, w / 22, 12);
   const int dotGap = qBound(5, w / 55, 8);
@@ -1979,6 +1994,9 @@ void PillWidget::onSettingChanged(QString key, QVariant val) {
       // Use the same initialization path as startup; the former duplicate
       // setup could create competing servers/processes after a settings toggle.
       initPopupServer();
+#ifndef _WIN32
+      initLinuxHotkeysAndOverlay();
+#endif
       qDebug() << "[POPUP] Ctrl+Space enabled";
     } else {
       sendBackendCommand("PRELOAD:0\n");
@@ -2523,9 +2541,13 @@ void PillWidget::setupTray() {
   trayIcon = new QSystemTrayIcon(this);
   updateTrayIcon();
   trayMenu = new QMenu(this);
-  trayMenu->addAction("Dashboard", this, &PillWidget::openDashboard);
-  trayMenu->addAction("Show Widget", this,
-                      &PillWidget::showMainWidgetExplicitly);
+  // Use singleShot to avoid re-entrancy with the tray's own event loop on Mint/Cinnamon.
+  trayMenu->addAction("Dashboard", this, [this]() {
+    QTimer::singleShot(0, this, &PillWidget::openDashboard);
+  });
+  trayMenu->addAction("Show Widget", this, [this]() {
+    QTimer::singleShot(0, this, &PillWidget::showMainWidgetExplicitly);
+  });
   trayMenu->addAction("Hide Widget", this, [this]() {
     suppressAutoShowBriefly(12000);
     hide();
@@ -2535,13 +2557,18 @@ void PillWidget::setupTray() {
   trayIcon->show();
   connect(trayIcon, &QSystemTrayIcon::activated,
           [this](QSystemTrayIcon::ActivationReason r) {
-            if (r == QSystemTrayIcon::Trigger || r == QSystemTrayIcon::DoubleClick) {
+            // Mint Cinnamon: Trigger=left click, DoubleClick, Context=right click (menu).
+            // Only DoubleClick toggles pill; single Trigger just ensures menu is accessible.
+            if (r == QSystemTrayIcon::DoubleClick) {
               if (isVisible()) {
                 suppressAutoShowBriefly(12000);
                 hide();
               } else {
                 showMainWidgetExplicitly();
               }
+            } else if (r == QSystemTrayIcon::Trigger) {
+              if (!isVisible())
+                QTimer::singleShot(0, this, &PillWidget::showMainWidgetExplicitly);
             }
           });
 }

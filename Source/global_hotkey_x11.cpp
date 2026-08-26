@@ -54,14 +54,25 @@ GlobalHotkeyX11::GlobalHotkeyX11(QObject *parent) : QObject(parent) {
         return 0;
       });
 
+  bool anyGrabbed = false;
   for (int i = 0; i < kLockComboCount; ++i) {
     const unsigned int locks = kLockMaskCombinations[i];
-    grabKey(kToggleDictation, ControlMask | ShiftMask | locks, spaceCode);
-    grabKey(kPushToTalk, ControlMask | locks, spaceCode);
+    // Best effort: ignore BadAccess (already grabbed by IBus etc.) for individual masks.
+    if (grabKey(kToggleDictation, ControlMask | ShiftMask | locks, spaceCode))
+      anyGrabbed = true;
+    if (grabKey(kPushToTalk, ControlMask | locks, spaceCode))
+      anyGrabbed = true;
   }
   XSetErrorHandler(previousHandler);
   XSync(display, False);
 
+  if (!anyGrabbed) {
+    m_failureReason = QStringLiteral(
+        "Global hotkeys already grabbed (Mint IBus uses Ctrl+Space — disable IBus Ctrl+Space in Language Support → Keyboard input method → IBus Preferences → General → Next input method)");
+    XCloseDisplay(display);
+    m_display = nullptr;
+    return;
+  }
   m_active = true;
   m_notifier =
       new QSocketNotifier(XConnectionNumber(display), QSocketNotifier::Read,

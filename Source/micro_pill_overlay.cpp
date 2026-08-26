@@ -65,10 +65,18 @@ void typeIntoFocusedWindow(const QString &text) {
 } // namespace
 
 MicroPillOverlay::MicroPillOverlay(QWidget *parent) : QWidget(parent) {
-  setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool);
+  setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool |
+                 Qt::WindowDoesNotAcceptFocus);
   setAttribute(Qt::WA_TranslucentBackground);
   setAttribute(Qt::WA_ShowWithoutActivating);
+  setAttribute(Qt::WA_X11NetWmWindowTypeUtility);
   resize(kPillWidth, kPillHeight);
+  {
+    QPainterPath maskPath;
+    maskPath.addRoundedRect(QRectF(0, 0, kPillWidth, kPillHeight),
+                            kPillHeight / 2.0, kPillHeight / 2.0);
+    setMask(maskPath.toFillPolygon().toPolygon());
+  }
 
   m_micIcon.load(QStringLiteral(":/quickstt/app.svg"));
 
