@@ -105,3 +105,11 @@ pub const DEFAULT_SMART_LIFE_SCHEMA: &str = "tuyaSmart";
 
 /// Default Android TV settings (legacy)
 pub const DEFAULT_ANDROID_TV_AUTO_SCAN: bool = false;
+
+/// Rust GUI / Pill settings (mirrors C++ QSettings keys)
+pub const DEFAULT_ALWAYS_ON_PILL: bool = true;
+pub const DEFAULT_CTRL_SPACE_ENABLED: bool = true;
+pub const DEFAULT_CTRL_SPACE_MODE: u32 = 0; // 0 push-to-talk, 1 toggle
+pub const DEFAULT_CTRL_SPACE_OUTPUT: u32 = 0; // 0 type, 1 clipboard, 2 none
+pub const DEFAULT_ON_COMMAND_TRANSCRIPTION: bool = false;
+pub const DEFAULT_WAKE_WORD_MODE: &str = "Off";

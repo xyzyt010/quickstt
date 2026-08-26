@@ -63,10 +63,29 @@ pub struct Settings {
     pub ha_url: String,
     pub ha_token: String,
     pub android_tv_auto_scan: bool,
+    #[serde(default = "default_always_on_pill")]
+    pub always_on_pill: bool,
+    #[serde(default = "default_ctrl_space_enabled")]
+    pub ctrl_space_enabled: bool,
+    #[serde(default = "default_ctrl_space_mode")]
+    pub ctrl_space_mode: u32,
+    #[serde(default = "default_ctrl_space_output")]
+    pub ctrl_space_output: u32,
+    #[serde(default = "default_on_command_transcription")]
+    pub on_command_transcription: bool,
+    #[serde(default = "default_wake_word_mode")]
+    pub wake_word_mode: String,
     /// extra unknown keys preserved for forward compat
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, String>,
 }
+
+fn default_always_on_pill() -> bool { DEFAULT_ALWAYS_ON_PILL }
+fn default_ctrl_space_enabled() -> bool { DEFAULT_CTRL_SPACE_ENABLED }
+fn default_ctrl_space_mode() -> u32 { DEFAULT_CTRL_SPACE_MODE }
+fn default_ctrl_space_output() -> u32 { DEFAULT_CTRL_SPACE_OUTPUT }
+fn default_on_command_transcription() -> bool { DEFAULT_ON_COMMAND_TRANSCRIPTION }
+fn default_wake_word_mode() -> String { DEFAULT_WAKE_WORD_MODE.to_string() }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -115,6 +134,12 @@ impl Default for Settings {
             ha_url: String::new(),
             ha_token: String::new(),
             android_tv_auto_scan: DEFAULT_ANDROID_TV_AUTO_SCAN,
+            always_on_pill: DEFAULT_ALWAYS_ON_PILL,
+            ctrl_space_enabled: DEFAULT_CTRL_SPACE_ENABLED,
+            ctrl_space_mode: DEFAULT_CTRL_SPACE_MODE,
+            ctrl_space_output: DEFAULT_CTRL_SPACE_OUTPUT,
+            on_command_transcription: DEFAULT_ON_COMMAND_TRANSCRIPTION,
+            wake_word_mode: DEFAULT_WAKE_WORD_MODE.to_string(),
             extra: HashMap::new(),
         }
     }
@@ -250,6 +275,23 @@ impl Settings {
         settings.android_tv_auto_scan =
             read_bool(key, "androidTvAutoScan").unwrap_or(DEFAULT_ANDROID_TV_AUTO_SCAN);
 
+        // Rust GUI parity with C++ Qt: always-on pill + Ctrl+Space
+        settings.always_on_pill =
+            read_bool(key, "alwaysOnPill").unwrap_or(DEFAULT_ALWAYS_ON_PILL);
+        settings.ctrl_space_enabled =
+            read_bool(key, "ctrlSpaceEnabled").unwrap_or(DEFAULT_CTRL_SPACE_ENABLED);
+        settings.ctrl_space_mode =
+            read_dword(key, "ctrlSpaceMode").unwrap_or(DEFAULT_CTRL_SPACE_MODE);
+        settings.ctrl_space_output =
+            read_dword(key, "ctrlSpaceOutput").unwrap_or(DEFAULT_CTRL_SPACE_OUTPUT);
+        settings.on_command_transcription =
+            read_bool(key, "onCommandTranscription").unwrap_or(DEFAULT_ON_COMMAND_TRANSCRIPTION);
+        settings.wake_word_mode =
+            read_string(key, "wakeWordMode").unwrap_or_else(|| DEFAULT_WAKE_WORD_MODE.to_string());
+
+        // Migrate legacy extra keys if Registry had them as strings
+        Self::migrate_extra(&mut settings);
+
         unsafe {
             let _ = RegCloseKey(key);
         }
@@ -273,8 +315,64 @@ impl Settings {
         }
         let content = std::fs::read_to_string(&path)
             .map_err(|e| crate::error::QuickSttError::SettingsError(e.to_string()))?;
-        toml::from_str(&content)
-            .map_err(|e| crate::error::QuickSttError::SettingsError(e.to_string()))
+        let mut settings: Self = toml::from_str(&content)
+            .map_err(|e| crate::error::QuickSttError::SettingsError(e.to_string()))?;
+        Self::migrate_extra(&mut settings);
+        Ok(settings)
+    }
+
+    fn migrate_extra(settings: &mut Self) {
+        // Pull legacy keys that were previously stored in `extra` (old Rust builds)
+        // into their new typed fields so TOML round-trips correctly.
+        let mut migrated = false;
+        if let Some(v) = settings.extra.remove("alwaysOnPill") {
+            settings.always_on_pill = v.eq_ignore_ascii_case("true") || v == "1";
+            migrated = true;
+        }
+        if let Some(v) = settings.extra.remove("ctrlSpaceEnabled") {
+            settings.ctrl_space_enabled = v.eq_ignore_ascii_case("true") || v == "1";
+            migrated = true;
+        }
+        if let Some(v) = settings.extra.remove("ctrlSpaceMode") {
+            if let Ok(n) = v.parse::<u32>() {
+                settings.ctrl_space_mode = n;
+                migrated = true;
+            }
+        }
+        if let Some(v) = settings.extra.remove("ctrlSpaceOutput") {
+            if let Ok(n) = v.parse::<u32>() {
+                settings.ctrl_space_output = n;
+                migrated = true;
+            }
+        }
+        if let Some(v) = settings.extra.remove("onCommandTranscription") {
+            settings.on_command_transcription = v.eq_ignore_ascii_case("true") || v == "1";
+            migrated = true;
+        }
+        if let Some(v) = settings.extra.remove("wakeWordMode") {
+            settings.wake_word_mode = v.clone();
+            migrated = true;
+        }
+        // Also handle snake_case variants written by some helpers
+        for (k, target) in [
+            ("always_on_pill", "alwaysOnPill"),
+            ("ctrl_space_enabled", "ctrlSpaceEnabled"),
+            ("on_command_transcription", "onCommandTranscription"),
+        ] {
+            if let Some(v) = settings.extra.remove(k) {
+                let _ = target; // satisfy unused
+                migrated = true;
+                match k {
+                    "always_on_pill" => settings.always_on_pill = v.eq_ignore_ascii_case("true") || v == "1",
+                    "ctrl_space_enabled" => settings.ctrl_space_enabled = v.eq_ignore_ascii_case("true") || v == "1",
+                    "on_command_transcription" => settings.on_command_transcription = v.eq_ignore_ascii_case("true") || v == "1",
+                    _ => {}
+                }
+            }
+        }
+        if migrated {
+            let _ = settings.save_to_toml();
+        }
     }
 
     fn save_to_toml(&self) -> QuickSttResult<()> {
@@ -396,6 +494,10 @@ impl Settings {
             "smartLifeSchema" => self.smart_life_schema = value.to_string(),
             "haUrl" => self.ha_url = value.to_string(),
             "haToken" => self.ha_token = value.to_string(),
+            "alwaysOnPill" | "always_on_pill" => self.always_on_pill = value.eq_ignore_ascii_case("true") || value == "1",
+            "ctrlSpaceEnabled" | "ctrl_space_enabled" => self.ctrl_space_enabled = value.eq_ignore_ascii_case("true") || value == "1",
+            "onCommandTranscription" | "on_command_transcription" => self.on_command_transcription = value.eq_ignore_ascii_case("true") || value == "1",
+            "wakeWordMode" | "wake_word_mode" => self.wake_word_mode = value.to_string(),
             _ => { self.extra.insert(key.to_string(), value.to_string()); }
         }
     }
@@ -415,6 +517,8 @@ impl Settings {
             "offloadSeconds" => self.offload_seconds = value,
             "offloadMinutes" => self.offload_seconds = value * 60,
             "waveformSensitivity" => self.waveform_sensitivity = value,
+            "ctrlSpaceMode" | "ctrl_space_mode" => self.ctrl_space_mode = value,
+            "ctrlSpaceOutput" | "ctrl_space_output" => self.ctrl_space_output = value,
             _ => { self.extra.insert(key.to_string(), value.to_string()); }
         }
     }

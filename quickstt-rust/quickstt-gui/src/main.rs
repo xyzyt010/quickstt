@@ -698,21 +698,32 @@ impl QuickSttApp {
     if let Err(e) = hotkey_manager.register(hotkey_super_space) {
         warn!("Super+Space hotkey unavailable: {e}");
     }
-    let hotkey_toggle = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space);
-    let id_toggle = hotkey_toggle.id();
-    if let Err(e) = hotkey_manager.register(hotkey_toggle) {
-        warn!("Ctrl+Shift+Space hotkey unavailable: {e}");
-    }
+    let ctrl_enabled = state
+        .lock()
+        .map(|s| s.settings.ctrl_space_enabled)
+        .unwrap_or(true);
+    let (id_toggle, id_on_cmd) = if ctrl_enabled {
+        let hotkey_toggle = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space);
+        let id_toggle = hotkey_toggle.id();
+        if let Err(e) = hotkey_manager.register(hotkey_toggle) {
+            warn!("Ctrl+Shift+Space hotkey unavailable: {e}");
+        }
+        let hotkey_on_cmd = HotKey::new(Some(Modifiers::CONTROL), Code::Space);
+        let id_on_cmd = hotkey_on_cmd.id();
+        if let Err(e) = hotkey_manager.register(hotkey_on_cmd) {
+            warn!("Ctrl+Space hotkey unavailable (IBus may hold it — disable IBus Ctrl+Space): {e}");
+        }
+        (id_toggle, id_on_cmd)
+    } else {
+        warn!("Ctrl+Space hotkeys disabled by settings (ctrl_space_enabled=false)");
+        // Still need IDs for polling match, but they will never fire.
+        (0, 0)
+    };
     let hotkey_show_widget =
         HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyH);
     let id_show_widget_hotkey = hotkey_show_widget.id();
     if let Err(e) = hotkey_manager.register(hotkey_show_widget) {
         warn!("Ctrl+Shift+H hotkey unavailable: {e}");
-    }
-    let hotkey_on_cmd = HotKey::new(Some(Modifiers::CONTROL), Code::Space);
-    let id_on_cmd = hotkey_on_cmd.id();
-    if let Err(e) = hotkey_manager.register(hotkey_on_cmd) {
-        warn!("Ctrl+Space hotkey unavailable: {e}");
     }
 
     let icon = create_tray_icon_image();
@@ -810,9 +821,12 @@ impl QuickSttApp {
             )
         };
 
-        // Start hidden when launched with --background or the saved
-        // "start minimized to tray" setting is on.
-        if start_hidden || initial_s_from_settings.startup_background {
+        // Start hidden when launched with --background, "start minimized to tray",
+        // or always-on pill disabled (Rust parity with C++ MicroPillOverlay).
+        if start_hidden
+            || initial_s_from_settings.startup_background
+            || !initial_s_from_settings.always_on_pill
+        {
             if let Ok(mut s) = state.lock() {
                 s.widget_visible = false;
                 s.status_message = "Hidden".into();
@@ -2566,6 +2580,59 @@ fn render_general_tab(
                 let _ = quickstt_core::settings::Settings::save_dword("offloadSeconds", secs);
             }
         });
+    });
+
+    ui.add_space(12.0);
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Wakeword Activation Mode").strong().size(13.0));
+        ui.add_space(6.0);
+        egui::ComboBox::from_label("Wakeword Mode")
+            .selected_text(&s.settings.wake_word_mode)
+            .show_ui(ui, |ui| {
+                for mode in ["Off", "Always On", "On with Widget"] {
+                    if ui.selectable_value(&mut s.settings.wake_word_mode, mode.to_string(), mode).changed() {
+                        let _ = quickstt_core::settings::Settings::save_string("wakeWordMode", mode);
+                    }
+                }
+            });
+    });
+
+    ui.add_space(12.0);
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Quick Transcription (Ctrl+Space)").strong().size(13.0));
+        ui.add_space(6.0);
+        if ui.checkbox(&mut s.settings.ctrl_space_enabled, "Enable Ctrl+Space quick transcription overlay").changed() {
+            let _ = quickstt_core::settings::Settings::save_bool("ctrlSpaceEnabled", s.settings.ctrl_space_enabled);
+        }
+        if ui.checkbox(&mut s.settings.always_on_pill, "Always-on floating micro pill (docked on desktop)").changed() {
+            let _ = quickstt_core::settings::Settings::save_bool("alwaysOnPill", s.settings.always_on_pill);
+        }
+        egui::ComboBox::from_label("Activation mode")
+            .selected_text(if s.settings.ctrl_space_mode == 0 { "Push-to-Talk (hold)" } else { "Toggle (press)" })
+            .show_ui(ui, |ui| {
+                if ui.selectable_value(&mut s.settings.ctrl_space_mode, 0, "Push-to-Talk (hold)").changed() {
+                    let _ = quickstt_core::settings::Settings::save_dword("ctrlSpaceMode", 0);
+                }
+                if ui.selectable_value(&mut s.settings.ctrl_space_mode, 1, "Toggle (press)").changed() {
+                    let _ = quickstt_core::settings::Settings::save_dword("ctrlSpaceMode", 1);
+                }
+            });
+        egui::ComboBox::from_label("Output")
+            .selected_text(match s.settings.ctrl_space_output { 0 => "Type into active window", 1 => "Copy to clipboard", _ => "None" })
+            .show_ui(ui, |ui| {
+                if ui.selectable_value(&mut s.settings.ctrl_space_output, 0, "Type into active window").changed() {
+                    let _ = quickstt_core::settings::Settings::save_dword("ctrlSpaceOutput", 0);
+                }
+                if ui.selectable_value(&mut s.settings.ctrl_space_output, 1, "Copy to clipboard").changed() {
+                    let _ = quickstt_core::settings::Settings::save_dword("ctrlSpaceOutput", 1);
+                }
+                if ui.selectable_value(&mut s.settings.ctrl_space_output, 2, "None (show only)").changed() {
+                    let _ = quickstt_core::settings::Settings::save_dword("ctrlSpaceOutput", 2);
+                }
+            });
+        if ui.checkbox(&mut s.settings.on_command_transcription, "On-Command Transcription (legacy Ctrl+Space hold)").changed() {
+            let _ = quickstt_core::settings::Settings::save_bool("onCommandTranscription", s.settings.on_command_transcription);
+        }
     });
 }
 
