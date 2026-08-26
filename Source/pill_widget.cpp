@@ -17,6 +17,8 @@
 #include <QCheckBox>
 #include <QColor>
 #include <QComboBox>
+#include <QListView>
+#include <QProgressBar>
 #include <QDateTime>
 #include <QDebug>
 #include <QDialog>
@@ -641,6 +643,8 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
 
   modelCombo = new PillComboBox(this);
   modelCombo->setFocusPolicy(Qt::NoFocus);
+  // Exact Windows dropdown styling — applied verbatim on both platforms
+  // (Linux Fusion and Windows Vista styles otherwise diverge).
   modelCombo->setStyleSheet(
       "QComboBox { background-color: #333333; color: #DDDDDD; font-size: 12px; "
       "border-radius: 12px; padding-left: 10px; padding-right: 24px; "
@@ -656,6 +660,18 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   modelCombo->view()->setWindowFlags(modelCombo->view()->windowFlags() |
                                      Qt::FramelessWindowHint |
                                      Qt::NoDropShadowWindowHint);
+  // Linux: force the popup to use the same palette as Windows — without this
+  // the system theme tints the view background.
+  modelCombo->view()->window()->setAttribute(Qt::WA_TranslucentBackground);
+  if (auto *view = qobject_cast<QListView *>(modelCombo->view())) {
+    view->setStyleSheet(
+        "QListView { background-color: #2A2A2A; color: #EEEEEE; border: 1px "
+        "solid #444444; border-radius: 8px; outline: none; padding: 4px; }"
+        "QListView::item { min-height: 26px; padding: 3px 8px; border-radius: 5px; "
+        "margin: 1px 2px; }"
+        "QListView::item:selected { background-color: #0F5E9C; color: #FFFFFF; }"
+        "QListView::item:hover:!selected { background-color: #333333; }");
+  }
   QTimer::singleShot(0, this, &PillWidget::refreshModelCombo);
   connect(modelCombo, &QComboBox::currentTextChanged, this,
           &PillWidget::onModelChanged);
@@ -666,10 +682,24 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   modelDownloadBtn->setStyleSheet(
       "QPushButton { background-color: #2A2A2A; color: #E0E0E0; border: 1px "
       "solid #444; border-radius: 10px; padding: 0 6px; font-size: 10px; } "
-      "QPushButton:hover { background-color: #3A3A3A; }");
+      "QPushButton:hover { background-color: #3A3A3A; } "
+      "QPushButton:disabled { color: #777; background: #222; border-color: #333; }");
   modelDownloadBtn->setToolTip("Download selected model");
   connect(modelDownloadBtn, &QPushButton::clicked, this,
           &PillWidget::onModelDownloadClicked);
+
+  downloadProgressBar = new QProgressBar(this);
+  downloadProgressBar->setRange(0, 100);
+  downloadProgressBar->setValue(0);
+  downloadProgressBar->setTextVisible(true);
+  downloadProgressBar->setFormat("%p%");
+  downloadProgressBar->setAlignment(Qt::AlignCenter);
+  downloadProgressBar->setStyleSheet(
+      "QProgressBar { background-color: #2A2A2E; border: 1px solid #444; "
+      "border-radius: 6px; text-align: center; color: #E0E0E0; font-size: 9px; "
+      "min-height: 14px; max-height: 14px; }"
+      "QProgressBar::chunk { background-color: #0F5E9C; border-radius: 5px; }");
+  downloadProgressBar->hide();
 
   statusLabel = new StatusTextLabel(this);
   statusLabel->setStyleSheet(
@@ -802,22 +832,41 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
             update();
           });
   connect(m_localModelManager, &LocalModelManager::progressChanged, this,
-          [this](const QString &, int, const QString &statusText) {
+          [this](const QString &, int percent, const QString &statusText) {
             currentStatusText = statusText;
+            downloadProgress = percent;
             statusLabel->show();
             statusLabel->setText(statusText);
+            if (downloadProgressBar) {
+              downloadProgressBar->setValue(qBound(0, percent, 100));
+              downloadProgressBar->show();
+              downloadProgressBar->raise();
+            }
             updateModelDownloadButton();
             update();
           });
   connect(m_localModelManager, &LocalModelManager::modelInstalled, this,
           [this](const QString &) {
             isDownloading = false;
+            downloadProgress = 100;
+            if (downloadProgressBar) {
+              downloadProgressBar->setValue(100);
+              QTimer::singleShot(900, this, [this]() {
+                if (downloadProgressBar && !isDownloading)
+                  downloadProgressBar->hide();
+              });
+            }
+            currentStatusText = "Model installed — ready";
+            statusLabel->show();
+            statusLabel->setText(currentStatusText);
+            showTransientStatus(currentStatusText, 3500);
             refreshModelCombo();
             updateModelDownloadButton();
             if (dashboard) {
               QMetaObject::invokeMethod(dashboard, "onRefreshModels",
                                         Qt::QueuedConnection);
             }
+            update();
           });
 
   connect(m_localModelManager, &LocalModelManager::modelUninstalled, this,
@@ -833,9 +882,13 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   connect(m_localModelManager, &LocalModelManager::operationFailed, this,
           [this](const QString &, const QString &errorText) {
             isDownloading = false;
+            downloadProgress = 0;
+            if (downloadProgressBar)
+              downloadProgressBar->hide();
             currentStatusText = errorText;
             statusLabel->show();
             statusLabel->setText(errorText);
+            showTransientStatus(errorText, 6000);
             refreshModelCombo();
             updateModelDownloadButton();
             update();
@@ -843,7 +896,17 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   connect(m_localModelManager, &LocalModelManager::busyChanged, this,
           [this](bool busy) {
             isDownloading = busy;
+            if (!busy && downloadProgressBar)
+              downloadProgressBar->hide();
+            else if (busy && downloadProgressBar) {
+              downloadProgressBar->setValue(downloadProgress);
+              downloadProgressBar->show();
+            }
             updateModelDownloadButton();
+            if (!busy) {
+              // Download finished or failed — ensure button re-evaluates.
+              QTimer::singleShot(0, this, &PillWidget::refreshModelCombo);
+            }
           });
 
   m_optionalServiceManager = new OptionalServiceManager(this);
@@ -1716,6 +1779,16 @@ void PillWidget::customResize(int w, int h, int r) {
   while (waveformDisplayLevels.size() > m_waveformHistoryLimit)
     waveformDisplayLevels.removeFirst();
 
+  // Thin download progress bar along the bottom edge, inside the pill.
+  if (downloadProgressBar) {
+    const int barH = 6;
+    const int barPad = 10;
+    const int barY = h - barH - 2;
+    const int barW = w - barPad * 2;
+    downloadProgressBar->setGeometry(barPad, barY, barW, barH);
+    downloadProgressBar->raise();
+  }
+
   repositionTextBoard();
   update();
 }
@@ -1947,8 +2020,10 @@ void PillWidget::onSettingChanged(QString key, QVariant val) {
       }
       qDebug() << "[POPUP] Ctrl+Space disabled";
     }
-  } else if (key == "ctrlSpaceMode" || key == "ctrlSpaceOutput") {
-    // Forward updated config to popup in real-time
+  } else if (key == "ctrlSpaceMode" || key == "ctrlSpaceOutput" ||
+             key == "alwaysOnPill") {
+    // Forward updated config to popup in real-time (Windows Slint and Linux
+    // Qt overlay share the same JSON CONFIG on 19876).
     if (m_popupClient) {
       QSettings s("QuickSTT", "Config");
       int mode = s.value("ctrlSpaceMode", 0).toInt();
@@ -1959,6 +2034,17 @@ void PillWidget::onSettingChanged(QString key, QVariant val) {
       m_popupClient->write(cfg.toUtf8());
       m_popupClient->flush();
     }
+#ifndef _WIN32
+    // Linux in-process overlay also needs the update even before the socket
+    // handshake completes.
+    if (m_microPill) {
+      QSettings s("QuickSTT", "Config");
+      int mode = s.value("ctrlSpaceMode", 0).toInt();
+      int output = s.value("ctrlSpaceOutput", 0).toInt();
+      bool alwaysOn = s.value("alwaysOnPill", true).toBool();
+      m_microPill->applyConfig(mode, output, alwaysOn);
+    }
+#endif
   }
   setCustomOpacity(activeOpacity);
   customResize(pillWidth, pillHeight, pillRadius);
@@ -3065,10 +3151,23 @@ void PillWidget::updateModelDownloadButton() {
     return;
 
   const QString modelName = currentComboModelName();
+  if (isDownloading) {
+    // Keep the button visible but disabled, showing live percent.
+    modelDownloadBtn->setVisible(true);
+    modelDownloadBtn->setEnabled(false);
+    modelDownloadBtn->setText(QStringLiteral("%1%").arg(downloadProgress));
+    modelDownloadBtn->setToolTip(QStringLiteral("Downloading %1 — %2%")
+                                     .arg(modelName)
+                                     .arg(downloadProgress));
+    return;
+  }
+
+  modelDownloadBtn->setEnabled(true);
+  modelDownloadBtn->setText(QStringLiteral("DL"));
   const bool showButton = !modelName.isEmpty() &&
                           !isCloudModel(modelName) &&
                           !isModelInstalled(modelName) &&
-                          supportsDirectDownload(modelName) && !isDownloading;
+                          supportsDirectDownload(modelName);
   const bool visibilityChanged = modelDownloadBtn->isVisible() != showButton;
   modelDownloadBtn->setVisible(showButton);
   if (showButton)
@@ -3449,6 +3548,11 @@ void PillWidget::initLinuxHotkeysAndOverlay() {
   if (!m_microPill) {
     m_microPill = new MicroPillOverlay();
     connect(m_microPill, &MicroPillOverlay::sessionFinished, this, []() {});
+    // Sync always-on pill visibility immediately (no socket round-trip).
+    QSettings s("QuickSTT", "Config");
+    m_microPill->applyConfig(s.value("ctrlSpaceMode", 0).toInt(),
+                             s.value("ctrlSpaceOutput", 0).toInt(),
+                             s.value("alwaysOnPill", true).toBool());
   }
   if (m_globalHotkeys)
     return;

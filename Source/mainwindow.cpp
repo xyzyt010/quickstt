@@ -41,6 +41,7 @@
 #include <QParallelAnimationGroup>
 #include <QPointer>
 #include <QPixmap>
+#include <QProgressBar>
 #include <QPropertyAnimation>
 #include <QScrollArea>
 #include <QDoubleSpinBox>
@@ -1173,7 +1174,9 @@ public:
       : QWidget(parent), m_checkBox(new QCheckBox(this)),
         m_label(new SelectableTextLabel(text, this)),
         m_downloadButton(new QToolButton(this)),
-        m_uninstallButton(new QToolButton(this)) {
+        m_uninstallButton(new QToolButton(this)),
+        m_progressBar(new QProgressBar(this)),
+        m_progressLabel(new QLabel(this)) {
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     setMinimumHeight(34);
 
@@ -1187,9 +1190,24 @@ public:
 
     configureActionButton(m_downloadButton, downloadActionIcon());
     configureActionButton(m_uninstallButton, trashActionIcon());
+    m_progressBar->setRange(0, 100);
+    m_progressBar->setValue(0);
+    m_progressBar->setTextVisible(false);
+    m_progressBar->setFixedWidth(90);
+    m_progressBar->setFixedHeight(10);
+    m_progressBar->setStyleSheet(
+        "QProgressBar { background-color: #2A2A2E; border: 1px solid #444; "
+        "border-radius: 5px; }"
+        "QProgressBar::chunk { background-color: #0F5E9C; border-radius: 4px; }");
+    m_progressBar->hide();
+    m_progressLabel->setStyleSheet("color: #0F9CFF; font-size: 10px; font-weight: 600;");
+    m_progressLabel->setFixedWidth(36);
+    m_progressLabel->hide();
 
     layout->addWidget(m_checkBox, 0, Qt::AlignVCenter);
     layout->addWidget(m_label, 1);
+    layout->addWidget(m_progressBar, 0, Qt::AlignVCenter);
+    layout->addWidget(m_progressLabel, 0, Qt::AlignVCenter);
     layout->addWidget(m_downloadButton, 0, Qt::AlignVCenter);
     layout->addWidget(m_uninstallButton, 0, Qt::AlignVCenter);
 
@@ -1239,6 +1257,30 @@ public:
     m_uninstallButton->setToolTip(toolTip);
     m_uninstallButton->setVisible(visible);
     m_uninstallButton->setEnabled(enabled);
+  }
+
+  void setDownloadProgress(int percent, const QString &statusText) {
+    m_progressBar->setValue(qBound(0, percent, 100));
+    m_progressLabel->setText(QStringLiteral("%1%").arg(percent));
+    if (!statusText.isEmpty())
+      setToolTip(statusText);
+    m_progressBar->show();
+    m_progressLabel->show();
+    m_downloadButton->hide();
+    m_uninstallButton->hide();
+  }
+
+  void setProgressVisible(bool visible) {
+    m_progressBar->setVisible(visible);
+    m_progressLabel->setVisible(visible);
+    if (visible) {
+      if (m_progressLabel->text().isEmpty())
+        m_progressLabel->setText(QStringLiteral("0%"));
+    } else {
+      m_progressBar->setValue(0);
+      m_progressLabel->clear();
+      setToolTip(QString());
+    }
   }
 
 protected:
@@ -1305,6 +1347,8 @@ private:
   SelectableTextLabel *m_label;
   QToolButton *m_downloadButton;
   QToolButton *m_uninstallButton;
+  QProgressBar *m_progressBar = nullptr;
+  QLabel *m_progressLabel = nullptr;
   std::function<void()> m_interactionCallback;
   std::function<void(bool)> m_hoverCallback;
   std::function<void()> m_downloadCallback;
@@ -1561,7 +1605,18 @@ QString supportedAssetDir(const QString &relativePath) {
       QDir(appDir).filePath(".."),
       QDir(appDir).filePath("../QuickSTT_App"),
       QDir(appDir).filePath("../../QuickSTT_App"),
+      // Linux deb layout: /usr/lib/quickstt + XDG data
+      QDir::cleanPath(QDir(appDir).filePath(relativePath)),
   };
+
+  // Linux: also probe system install and XDG data regardless of relativePath
+  roots << QStringLiteral("/usr/lib/quickstt");
+  roots << QStringLiteral("/usr/share/quickstt");
+  QString xdgData = qEnvironmentVariable("XDG_DATA_HOME");
+  if (xdgData.isEmpty())
+    xdgData = QDir::homePath() + QStringLiteral("/.local/share");
+  if (!xdgData.isEmpty())
+    roots << QDir(xdgData).filePath(QStringLiteral("QuickSTT"));
 
   QString appdata = qgetenv("APPDATA");
   if (!appdata.isEmpty()) {
@@ -1589,24 +1644,43 @@ QStringList discoverOpenWakeWordChoices() {
       supportedAssetDir("openwakeword/resources/models"),
       supportedAssetDir("oww_models"),
       supportedAssetDir("data/oww_models"),
-      QCoreApplication::applicationDirPath() + "/data/oww_models"
-  };
+      QCoreApplication::applicationDirPath() + "/data/oww_models",
+      supportedAssetDir("wakeword_models"),
+      QCoreApplication::applicationDirPath() + "/wakeword_models",
+      QStringLiteral("/usr/lib/quickstt/wakeword_models"),
+      QDir::homePath() + QStringLiteral("/.local/share/QuickSTT/wakeword_models")};
 
   for (const QString &modelsDir : dirsToScan) {
-    if (modelsDir.isEmpty() || !QDir(modelsDir).exists()) continue;
+    if (modelsDir.isEmpty() || !QDir(modelsDir).exists())
+      continue;
     QDir dir(modelsDir);
+    // 1) Classic flat files: *.tflite / *.onnx directly in the dir.
     const QFileInfoList files =
         dir.entryInfoList({"*.tflite", "*.onnx"}, QDir::Files, QDir::Name);
     for (const QFileInfo &file : files) {
       QString base = file.completeBaseName();
       if (base.contains("melspectrogram") || base.contains("embedding_model"))
         continue;
+      if (base == QStringLiteral("model"))
+        continue; // wakeword_models subdirs use generic model.onnx
       const int versionPos = base.lastIndexOf("_v");
       if (versionPos > 0)
         base = base.left(versionPos);
       const QString normalized = normalizeWakePhrase(base);
       if (!normalized.isEmpty())
         choices << normalized;
+    }
+    // 2) Deb layout: wakeword_models/<phrase>/model.onnx — use dir name.
+    const QFileInfoList subdirs =
+        dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QFileInfo &sub : subdirs) {
+      if (!QDir(sub.absoluteFilePath())
+               .entryInfoList({"*.onnx", "*.tflite"}, QDir::Files)
+               .isEmpty()) {
+        const QString normalized = normalizeWakePhrase(sub.fileName());
+        if (!normalized.isEmpty())
+          choices << normalized;
+      }
     }
   }
 
@@ -5393,6 +5467,45 @@ void MainWindow::setLocalModelManager(LocalModelManager *manager) {
           [this](const QString &, const QString &errorText) {
             QMessageBox::warning(this, "Local Model Error", errorText);
           });
+  connect(localModelManager, &LocalModelManager::progressChanged, this,
+          [this](const QString &modelName, int percent, const QString &statusText) {
+            // Update the active row's inline progress bar.
+            for (int i = 0; i < modelList->count(); ++i) {
+              QListWidgetItem *item = modelList->item(i);
+              if (selectedModelName(item) == modelName) {
+                if (auto *row = dynamic_cast<LocalModelRowWidget *>(
+                        modelList->itemWidget(item))) {
+                  row->setDownloadProgress(percent, statusText);
+                }
+              }
+            }
+            if (localModelDetailsLabel && selectedModelName(modelList->currentItem()) == modelName) {
+              localModelDetailsLabel->setText(
+                  statusText + QStringLiteral(" — %1%").arg(percent));
+            }
+          },
+          Qt::UniqueConnection);
+  connect(localModelManager, &LocalModelManager::busyChanged, this,
+          [this](bool busy) {
+            if (!busy) {
+              // Clear all inline progress bars and refresh actions.
+              for (int i = 0; i < modelList->count(); ++i) {
+                if (auto *row = dynamic_cast<LocalModelRowWidget *>(
+                        modelList->itemWidget(modelList->item(i)))) {
+                  row->setProgressVisible(false);
+                }
+              }
+            }
+            refreshDashboardModelStatuses();
+            refreshSelectionDetails();
+          },
+          Qt::UniqueConnection);
+  connect(localModelManager, &LocalModelManager::modelInstalled, this,
+          [this](const QString &modelName) {
+            QMessageBox::information(this, "Model Installed",
+                                     modelName + " installed successfully and is ready to use.");
+          },
+          Qt::UniqueConnection);
 }
 
 void MainWindow::setSmartLifeManager(SmartLifeManager *manager) {
@@ -7850,25 +7963,36 @@ void MainWindow::refreshDashboardModelItem(QListWidgetItem *item) {
 
   const bool downloadable = localModelSupportsDirectDownload(modelName);
   const bool managerBusy = localModelManager && localModelManager->isBusy();
-  row->setDownloadAction(
-      !installed, downloadable && !managerBusy,
-      downloadable
-          ? QStringLiteral("Download %1").arg(modelName)
-          : localModelTooltip(modelName, installed),
-      [this, item]() {
-        if (!modelList || !item)
-          return;
-        modelList->setCurrentItem(item);
-        onDownloadClicked();
-      });
-  row->setUninstallAction(
-      installed, !managerBusy, QStringLiteral("Uninstall %1").arg(modelName),
-      [this, item]() {
-        if (!modelList || !item)
-          return;
-        modelList->setCurrentItem(item);
-        onUninstallClicked();
-      });
+  const bool isActiveDownload = managerBusy && localModelManager &&
+                                localModelManager->activeModel() == modelName;
+  if (isActiveDownload) {
+    // Active download: show inline progress bar, hide DL/trash until done.
+    row->setDownloadAction(false, false, QString(), nullptr);
+    row->setUninstallAction(false, false, QString(), nullptr);
+    // Ensure progress bar is visible; progressChanged will drive the percent.
+    row->setProgressVisible(true);
+  } else {
+    row->setProgressVisible(false);
+    row->setDownloadAction(
+        !installed, downloadable && !managerBusy,
+        downloadable
+            ? QStringLiteral("Download %1").arg(modelName)
+            : localModelTooltip(modelName, installed),
+        [this, item]() {
+          if (!modelList || !item)
+            return;
+          modelList->setCurrentItem(item);
+          onDownloadClicked();
+        });
+    row->setUninstallAction(
+        installed, !managerBusy, QStringLiteral("Uninstall %1").arg(modelName),
+        [this, item]() {
+          if (!modelList || !item)
+            return;
+          modelList->setCurrentItem(item);
+          onUninstallClicked();
+        });
+  }
 }
 
 void MainWindow::refreshCloudDashboardItem(QListWidgetItem *item) {

@@ -35,6 +35,7 @@ public slots:
   void startSession();  // show overlay + popup_start
   void stopSession();   // popup_stop (waits for FINAL_TEXT)
   void cancelSession(); // popup_sleep + immediate hide
+  void applyConfig(int mode, int output, bool alwaysOnPill);
 
 signals:
   void sessionFinished(); // emitted after final text was delivered
@@ -52,11 +53,10 @@ private slots:
   void onAnimationTick();
 
 private:
-  enum class Phase { Hidden, Recording, Transcribing, Done };
+  enum class Phase { Hidden, Idle, Recording, Transcribing, Done, NoModel };
 
   void sendCommand(const QString &command);
   void handleEvent(const QJsonObject &obj);
-  void applyConfig(int mode, int output, bool alwaysOnPill);
   void setPhase(Phase phase);
   void repositionToScreenBottom();
   void deliverTextDelta(const QString &delta);
@@ -71,6 +71,7 @@ private:
   int m_activationMode = 0; // 0=push-to-talk, 1=toggle
   int m_outputMode = 0;     // 0=type, 1=clipboard, 2=none
   bool m_streamingCap = false;
+  bool m_alwaysOnPill = true;
 
   // Text delivery bookkeeping
   QString m_streamTypedPrefix;
@@ -81,6 +82,7 @@ private:
   QList<float> m_displayLevels;
   qreal m_transcribeAnim = 0.0;
   QPixmap m_micIcon;
+  QString m_statusText;
 
   QPoint m_dragOffset;
   bool m_dragging = false;

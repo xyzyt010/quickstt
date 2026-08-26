@@ -557,6 +557,43 @@ void LocalModelManager::startExtraction(const QString &archivePath,
     args << QStringLiteral("-xf") << QDir::toNativeSeparators(archivePath)
          << QStringLiteral("-C") << QDir::toNativeSeparators(destinationRoot);
     m_extractProcess->start(QStringLiteral("tar"), args);
+  } else if (lowerPath.endsWith(QStringLiteral(".zip"))) {
+#ifdef Q_OS_WIN
+    QStringList args;
+    args << QStringLiteral("-NoProfile") << QStringLiteral("-ExecutionPolicy")
+         << QStringLiteral("Bypass") << QStringLiteral("-Command")
+         << QStringLiteral("Expand-Archive -LiteralPath %1 -DestinationPath %2 -Force")
+                .arg(psQuoted(QDir::toNativeSeparators(archivePath)),
+                     psQuoted(QDir::toNativeSeparators(destinationRoot)));
+    m_extractProcess->start(QStringLiteral("powershell"), args);
+#else
+    // Linux: Vosk models are zips. Prefer unzip, fall back to bsdtar/python.
+    if (!QStandardPaths::findExecutable(QStringLiteral("unzip")).isEmpty()) {
+      QStringList args;
+      args << QStringLiteral("-o") << QDir::toNativeSeparators(archivePath)
+           << QStringLiteral("-d") << QDir::toNativeSeparators(destinationRoot);
+      m_extractProcess->start(QStringLiteral("unzip"), args);
+    } else if (!QStandardPaths::findExecutable(QStringLiteral("bsdtar")).isEmpty()) {
+      QStringList args;
+      args << QStringLiteral("-xf") << QDir::toNativeSeparators(archivePath)
+           << QStringLiteral("-C") << QDir::toNativeSeparators(destinationRoot);
+      m_extractProcess->start(QStringLiteral("bsdtar"), args);
+    } else {
+      // Python fallback — always available on Ubuntu.
+      QString py = QStandardPaths::findExecutable(QStringLiteral("python3"));
+      if (py.isEmpty())
+        py = QStandardPaths::findExecutable(QStringLiteral("python"));
+      if (py.isEmpty())
+        py = QStringLiteral("python3");
+      QStringList args;
+      args << QStringLiteral("-c")
+           << QStringLiteral(
+                  "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])")
+           << QDir::toNativeSeparators(archivePath)
+           << QDir::toNativeSeparators(destinationRoot);
+      m_extractProcess->start(py, args);
+    }
+#endif
   } else {
     QStringList args;
     args << QStringLiteral("-NoProfile") << QStringLiteral("-ExecutionPolicy")

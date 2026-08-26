@@ -43,6 +43,7 @@
 
 class MicroPillOverlay;
 class GlobalHotkeyX11;
+class QProgressBar;
 
 // Custom ComboBox to track Open/Close state for Arrow rotation
 class PillComboBox : public QComboBox {
@@ -304,10 +305,11 @@ private:
   bool m_isQuitting = false;
   int m_lastPartialLen = 0;
 
-  bool isListening = false;
+   bool isListening = false;
   bool blinkState = false;
   QPoint dragPos;
   QRect waveRect;
+  QProgressBar *downloadProgressBar = nullptr;
 
   // Resizing State
   bool m_widgetFlexible = false;

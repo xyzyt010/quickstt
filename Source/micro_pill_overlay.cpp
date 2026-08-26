@@ -87,8 +87,15 @@ MicroPillOverlay::MicroPillOverlay(QWidget *parent) : QWidget(parent) {
   m_doneHideTimer = new QTimer(this);
   m_doneHideTimer->setSingleShot(true);
   connect(m_doneHideTimer, &QTimer::timeout, this, [this]() {
-    hide();
-    setPhase(Phase::Hidden);
+    if (m_alwaysOnPill) {
+      repositionToScreenBottom();
+      setPhase(Phase::Idle);
+      show();
+      raise();
+    } else {
+      hide();
+      setPhase(Phase::Hidden);
+    }
   });
 
   // The bridge may not be listening yet at construction — retry on a short
@@ -110,8 +117,8 @@ void MicroPillOverlay::onData() {
 }
 
 void MicroPillOverlay::onDisconnected() {
-  if (m_phase != Phase::Hidden)
-    setPhase(Phase::Hidden);
+  if (m_phase != Phase::Hidden && m_phase != Phase::Idle)
+    setPhase(m_alwaysOnPill ? Phase::Idle : Phase::Hidden);
   QTimer::singleShot(2000, this, [this]() {
     const auto state = m_socket->state();
     if (state != QAbstractSocket::ConnectedState &&
@@ -191,7 +198,19 @@ void MicroPillOverlay::setPhase(Phase phase) {
 void MicroPillOverlay::applyConfig(int mode, int output, bool alwaysOnPill) {
   m_activationMode = mode;
   m_outputMode = output;
-  Q_UNUSED(alwaysOnPill);
+  m_alwaysOnPill = alwaysOnPill;
+  // Sync idle pill visibility with setting (Windows parity).
+  if (m_phase == Phase::Hidden || m_phase == Phase::Idle) {
+    if (m_alwaysOnPill) {
+      repositionToScreenBottom();
+      setPhase(Phase::Idle);
+      show();
+      raise();
+    } else {
+      hide();
+      setPhase(Phase::Hidden);
+    }
+  }
 }
 
 void MicroPillOverlay::handleEvent(const QJsonObject &obj) {
@@ -221,8 +240,28 @@ void MicroPillOverlay::handleEvent(const QJsonObject &obj) {
     const QString state = obj.value(QStringLiteral("text")).toString();
     if (state == QLatin1String("Hidden")) {
       // Backend went to sleep (close word / SLEEP command).
-      if (m_phase != Phase::Hidden)
+      if (m_phase != Phase::Hidden && m_phase != Phase::Idle)
         finishSession(false);
+      return;
+    }
+    // No-model / error states — show explicit message instead of endless dots.
+    const QString lower = state.toLower();
+    if (lower.contains(QStringLiteral("not installed")) ||
+        lower.contains(QStringLiteral("no model")) ||
+        lower.contains(QStringLiteral("download failed")) ||
+        lower.contains(QStringLiteral("model load failed")) ||
+        lower.contains(QStringLiteral("missing")) ||
+        lower.contains(QStringLiteral("add model")) ||
+        state == QStringLiteral("Inefficient model")) {
+      m_statusText = state.isEmpty()
+                         ? QStringLiteral("No model — download in Dashboard")
+                         : state;
+      if (m_phase == Phase::Recording || m_phase == Phase::Transcribing ||
+          m_phase == Phase::Idle) {
+        setPhase(Phase::NoModel);
+        m_animTimer->start();
+        m_doneHideTimer->start(2600);
+      }
       return;
     }
     if (state.startsWith(QLatin1String("Ready")) &&
@@ -305,8 +344,15 @@ void MicroPillOverlay::finishSession(bool success) {
     setPhase(Phase::Done);
     m_doneHideTimer->start(500);
   } else {
-    hide();
-    setPhase(Phase::Hidden);
+    if (m_alwaysOnPill) {
+      repositionToScreenBottom();
+      setPhase(Phase::Idle);
+      show();
+      raise();
+    } else {
+      hide();
+      setPhase(Phase::Hidden);
+    }
   }
 }
 
@@ -341,14 +387,25 @@ void MicroPillOverlay::onAnimationTick() {
 void MicroPillOverlay::paintEvent(QPaintEvent *) {
   QPainter p(this);
   p.setRenderHint(QPainter::Antialiasing);
+  p.setRenderHint(QPainter::TextAntialiasing);
 
+  // Windows parity: pure black pill with subtle white border, not #1A1A1A.
+  const QColor pillBg(0x00, 0x00, 0x00, 245);
+  const QColor pillBorder(255, 255, 255, int(0.35 * 255));
   QPainterPath path;
-  path.addRoundedRect(rect(), qreal(height()) / 2.0, qreal(height()) / 2.0);
-  p.fillPath(path, QColor(26, 26, 26, 235));
+  path.addRoundedRect(rect().adjusted(0.5, 0.5, -0.5, -0.5),
+                      qreal(height()) / 2.0, qreal(height()) / 2.0);
+  p.fillPath(path, pillBg);
+  p.setPen(QPen(pillBorder, 1.0));
+  p.setBrush(Qt::NoBrush);
+  p.drawPath(path);
 
-  QColor accent = m_phase == Phase::Recording
-                      ? QColor(0x20, 0x60, 0xAA)
-                      : QColor(0x3A, 0x3A, 0x3A);
+  // Mic capsule accent — red when recording, dark otherwise.
+  QColor accent = (m_phase == Phase::Recording)
+                      ? QColor(0xFF, 0x33, 0x4B)
+                      : QColor(0x2A, 0x2A, 0x2A);
+  if (m_phase == Phase::NoModel)
+    accent = QColor(0x66, 0x1A, 0x1A);
   p.setBrush(accent);
   p.setPen(Qt::NoPen);
   p.drawEllipse(QRectF(10, 10, 24, 24));
@@ -365,8 +422,33 @@ void MicroPillOverlay::paintEvent(QPaintEvent *) {
   const qreal waveLeft = 44;
   const qreal waveRight = width() - 18;
 
-  if (m_phase == Phase::Recording) {
-    p.setBrush(QColor(0x5A, 0xAC, 0xFF));
+  if (m_phase == Phase::Idle) {
+    // Windows "Dictate  Ctrl+Space" hint — centered text like popup.slint.
+    p.setPen(QColor(0xFF, 0xFF, 0xFF));
+    QFont f = p.font();
+    f.setPointSize(9);
+    f.setWeight(QFont::Normal);
+    p.setFont(f);
+    const QString hint = QStringLiteral("Dictate  Ctrl + Space");
+    QRectF textRect(waveLeft, 0, waveRight - waveLeft, height());
+    p.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, hint);
+  } else if (m_phase == Phase::NoModel) {
+    p.setPen(QColor(0xFF, 0x8A, 0x80));
+    QFont f = p.font();
+    f.setPointSize(8);
+    f.setWeight(QFont::DemiBold);
+    p.setFont(f);
+    const QString msg = m_statusText.isEmpty()
+                            ? QStringLiteral("No model — download in Dashboard")
+                            : m_statusText;
+    // Elide if too long for pill width.
+    QFontMetrics fm(f);
+    QString elided = fm.elidedText(msg, Qt::ElideRight, int(waveRight - waveLeft));
+    QRectF textRect(waveLeft, 0, waveRight - waveLeft, height());
+    p.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, elided);
+  } else if (m_phase == Phase::Recording) {
+    // Windows style: white waveform bars (not blue) on black.
+    p.setBrush(QColor(0xFF, 0xFF, 0xFF));
     const qreal slotW = (waveRight - waveLeft) / kWaveBars;
     const qreal centerY = height() / 2.0;
     for (int i = 0; i < kWaveBars; ++i) {
@@ -377,16 +459,26 @@ void MicroPillOverlay::paintEvent(QPaintEvent *) {
                         kBarWidth / 2.0, kBarWidth / 2.0);
     }
   } else if (m_phase == Phase::Transcribing) {
+    // Show "Transcribing…" label + bouncing dots like Windows.
+    p.setPen(QColor(0xFF, 0xFF, 0xFF));
+    QFont f = p.font();
+    f.setPointSize(8);
+    f.setWeight(QFont::DemiBold);
+    p.setFont(f);
+    p.drawText(QRectF(waveLeft, 0, 90, height()),
+               Qt::AlignVCenter | Qt::AlignLeft,
+               QStringLiteral("Transcribing…"));
     const qreal centerY = height() / 2.0;
-    const qreal dotsSpan = waveRight - waveLeft;
+    const qreal dotsLeft = waveLeft + 92;
     for (int i = 0; i < 3; ++i) {
       const double phase = m_transcribeAnim - i * 0.55;
       const double bounce = qMax(0.0, qSin(phase));
-      const qreal radius = 2.6 + bounce * 1.8;
-      QColor dot(0x5A, 0xAC, 0xFF);
-      dot.setAlpha(int(120 + bounce * 120));
+      const qreal radius = 2.2 + bounce * 1.4;
+      QColor dot(0xFF, 0xFF, 0xFF);
+      dot.setAlpha(int(140 + bounce * 110));
       p.setBrush(dot);
-      const qreal x = waveLeft + dotsSpan * (0.30 + i * 0.20);
+      p.setPen(Qt::NoPen);
+      const qreal x = dotsLeft + i * 10;
       p.drawEllipse(QPointF(x, centerY), radius, radius);
     }
   } else if (m_phase == Phase::Done) {

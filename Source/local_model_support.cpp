@@ -217,7 +217,9 @@ LocalModelDescriptor makeVoskDescriptor(const QString &displayName,
   item.modelSizeMb = sizeMb;
   item.minRecommendedMemoryMb = minRamMb;
   item.preferredMemoryMb = minRamMb + 1024;
-  item.widgetSelectable = true;
+  // Only the featured Vosk entry is widget-selectable; the rest are
+  // dashboard-only downloads.
+  item.widgetSelectable = (displayName == QStringLiteral("Vosk Small En"));
   item.directDownload = directDownload;
 #ifndef Q_OS_WIN
   // Linux: the native stt_service dlopens libvosk.so. Provision it as a tiny
@@ -253,7 +255,12 @@ LocalModelDescriptor makeSherpaDescriptor(const QString &displayName,
   item.runtimeSizeMb = 22;
   item.minRecommendedMemoryMb = minRamMb;
   item.preferredMemoryMb = minRamMb + 1024;
-  item.widgetSelectable = true;
+  // Featured widget models: Parakeet TDT + Nemotron stay selectable.
+  // Everything else (Moonshine, CTC) is dashboard-only.
+  const bool featuredSherpa =
+      displayName == QStringLiteral("NVIDIA Parakeet TDT 0.6B v3 INT8 (ONNX/Rust)") ||
+      displayName == QStringLiteral("NVIDIA Nemotron 3.5 ASR Streaming 0.6B");
+  item.widgetSelectable = featuredSherpa;
   item.directDownload = true;
   return item;
 }
@@ -283,7 +290,8 @@ LocalModelDescriptor makeWhisperCppDescriptor(const QString &displayName,
   item.runtimeSizeMb = 8;
   item.minRecommendedMemoryMb = minRamMb;
   item.preferredMemoryMb = minRamMb + 1024;
-  item.widgetSelectable = true;
+  // Whisper models are dashboard-only; widget shows only the 3 featured.
+  item.widgetSelectable = false;
   item.directDownload = true;
   return item;
 }
