@@ -37,7 +37,9 @@ private:
   bool grabKey(int hotkeyId, unsigned int modifiers, int keycode);
   void handleXEvent(unsigned int type, int hotkeyId);
 
-  class Display *m_display = nullptr;
+  // Opaque Display* (kept as void* so this header never pulls in Xlib.h —
+  // a forward 'class Display' collides with Qt's own X11 typedef under moc).
+  void *m_display = nullptr;
   class QSocketNotifier *m_notifier = nullptr;
   bool m_active = false;
   bool m_pTTEngaged = false;

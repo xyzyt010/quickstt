@@ -3,11 +3,9 @@
 #ifdef QUICKSTT_X11_HOTKEYS
 
 #include <QSocketNotifier>
-#include <qplatformdefs.h>
 
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
-#include <cerrno>
 
 namespace {
 constexpr unsigned int kLockMaskCombinations[] = {
@@ -15,6 +13,10 @@ constexpr unsigned int kLockMaskCombinations[] = {
     LockMask | Mod5Mask, Mod2Mask | Mod5Mask, LockMask | Mod2Mask | Mod5Mask};
 constexpr int kLockComboCount =
     int(sizeof(kLockMaskCombinations) / sizeof(kLockMaskCombinations[0]));
+
+inline Display *asDisplay(void *handle) {
+  return static_cast<Display *>(handle);
+}
 } // namespace
 
 GlobalHotkeyX11::GlobalHotkeyX11(QObject *parent) : QObject(parent) {
@@ -27,54 +29,50 @@ GlobalHotkeyX11::GlobalHotkeyX11(QObject *parent) : QObject(parent) {
     return;
   }
 
-  m_display = XOpenDisplay(nullptr);
-  if (!m_display) {
-    m_failureReason = QStringLiteral("X11 display unavailable for global hotkeys");
+  Display *display = XOpenDisplay(nullptr);
+  if (!display) {
+    m_failureReason =
+        QStringLiteral("X11 display unavailable for global hotkeys");
     return;
   }
+  m_display = display;
 
-  Window root = DefaultRootWindow(m_display);
-  const int spaceCode = XKeysymToKeycode(m_display, XK_space);
+  Window root = DefaultRootWindow(display);
+  const int spaceCode = XKeysymToKeycode(display, XK_space);
   if (spaceCode == 0) {
     m_failureReason = QStringLiteral("Space keycode unavailable on this keymap");
-    XCloseDisplay(m_display);
+    XCloseDisplay(display);
     m_display = nullptr;
     return;
   }
 
-  XErrorHandler previousHandler = XSetErrorHandler([](Display *, XErrorEvent *error) -> int {
-    // BadAccess = combo already grabbed by another app — silently ignore so
-    // the remaining lock-mask variants keep registering.
-    return error->error_code == BadAccess ? 0 : 0;
-  });
+  XErrorHandler previousHandler =
+      XSetErrorHandler([](Display *, XErrorEvent *error) -> int {
+        // BadAccess = combo already grabbed by another app — ignore so the
+        // remaining lock-mask variants keep registering.
+        (void)error;
+        return 0;
+      });
 
-  bool grabbedToggle = false;
-  bool grabbedPtt = false;
   for (int i = 0; i < kLockComboCount; ++i) {
     const unsigned int locks = kLockMaskCombinations[i];
-    if (grabKey(kToggleDictation, ControlMask | ShiftMask | locks, spaceCode))
-      grabbedToggle = true;
-    if (grabKey(kPushToTalk, ControlMask | locks, spaceCode))
-      grabbedPtt = true;
+    grabKey(kToggleDictation, ControlMask | ShiftMask | locks, spaceCode);
+    grabKey(kPushToTalk, ControlMask | locks, spaceCode);
   }
   XSetErrorHandler(previousHandler);
-  XSync(m_display, False);
-
-  if (!grabbedToggle && !grabbedPtt) {
-    m_failureReason = QStringLiteral(
-        "Ctrl+Shift+Space is already captured by another application");
-    XCloseDisplay(m_display);
-    m_display = nullptr;
-    return;
-  }
+  XSync(display, False);
 
   m_active = true;
-  m_notifier = new QSocketNotifier(XConnectionNumber(m_display),
-                                   QSocketNotifier::Read, this);
+  m_notifier =
+      new QSocketNotifier(XConnectionNumber(display), QSocketNotifier::Read,
+                          this);
   connect(m_notifier, &QSocketNotifier::activated, this, [this]() {
-    while (XPending(m_display) > 0) {
+    Display *d = asDisplay(m_display);
+    if (!d)
+      return;
+    while (XPending(d) > 0) {
       XEvent event;
-      XNextEvent(m_display, &event);
+      XNextEvent(d, &event);
       if (event.type == KeyPress)
         handleXEvent(KeyPress, int(event.xkey.state));
       else if (event.type == KeyRelease)
@@ -85,11 +83,12 @@ GlobalHotkeyX11::GlobalHotkeyX11(QObject *parent) : QObject(parent) {
 
 bool GlobalHotkeyX11::grabKey(int hotkeyId, unsigned int modifiers,
                               int keycode) {
-  if (!m_display)
+  Display *display = asDisplay(m_display);
+  if (!display)
     return false;
-  Window root = DefaultRootWindow(m_display);
+  Window root = DefaultRootWindow(display);
   const int result =
-      XGrabKey(m_display, keycode, modifiers, root, True, GrabModeAsync,
+      XGrabKey(display, keycode, modifiers, root, True, GrabModeAsync,
                GrabModeAsync);
   Q_UNUSED(hotkeyId);
   return result == Success;
@@ -100,16 +99,16 @@ void GlobalHotkeyX11::handleXEvent(unsigned int type, int state) {
   const bool ctrlHeld = (state & ControlMask) != 0;
 
   if (type == KeyPress) {
-    // Distinguish the two grabs by the modifier state carried in the event.
-    const int hotkeyId = (shiftHeld && ctrlHeld) ? kToggleDictation : kPushToTalk;
-    if (hotkeyId == kToggleDictation) {
+    // The two grabs are distinguished by the modifier state in the event:
+    // only the Ctrl+Shift+Space grab delivers shift+ctrl presses.
+    if (shiftHeld && ctrlHeld) {
       if (m_toggleEngaged)
-        return;
+        return; // auto-repeat
       m_toggleEngaged = true;
       emit hotkeyPressed(kToggleDictation);
     } else if (ctrlHeld) {
       if (m_pTTEngaged)
-        return;
+        return; // auto-repeat
       m_pTTEngaged = true;
       emit hotkeyPressed(kPushToTalk);
     }
@@ -128,17 +127,18 @@ void GlobalHotkeyX11::handleXEvent(unsigned int type, int state) {
 }
 
 GlobalHotkeyX11::~GlobalHotkeyX11() {
-  if (m_display) {
-    Window root = DefaultRootWindow(m_display);
-    if (const int spaceCode = XKeysymToKeycode(m_display, XK_space)) {
+  Display *display = asDisplay(m_display);
+  if (display) {
+    Window root = DefaultRootWindow(display);
+    if (const int spaceCode = XKeysymToKeycode(display, XK_space)) {
       for (int i = 0; i < kLockComboCount; ++i) {
         const unsigned int locks = kLockMaskCombinations[i];
-        XUngrabKey(m_display, spaceCode, ControlMask | ShiftMask | locks, root);
-        XUngrabKey(m_display, spaceCode, ControlMask | locks, root);
+        XUngrabKey(display, spaceCode, ControlMask | ShiftMask | locks, root);
+        XUngrabKey(display, spaceCode, ControlMask | locks, root);
       }
     }
-    XSync(m_display, False);
-    XCloseDisplay(m_display);
+    XSync(display, False);
+    XCloseDisplay(display);
   }
 }
 
