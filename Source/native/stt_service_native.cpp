@@ -3910,8 +3910,8 @@ int main() {
   setvbuf(stderr, nullptr, _IONBF, 0);
 
 #ifndef _WIN32
-  std::signal(SIGTERM, quicksttSignalHandler);
-  std::signal(SIGINT, quicksttSignalHandler);
+  ::signal(SIGTERM, quicksttSignalHandler);
+  ::signal(SIGINT, quicksttSignalHandler);
 #endif
 
   sendEvent("INIT", "Native Service Ready");
