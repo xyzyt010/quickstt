@@ -2,6 +2,9 @@
 //! C++ original: Source/text_board.h + text_board.cpp
 //! Features: title bar 28px, opacity, monospace text, attach/detach, custom scroll, QSizeGrip
 //! Egui port: second viewport "quickstt_textboard" with same visual styling
+//! NOTE(alpha.11): This module is LEGACY — QuickSttApp now uses inline render_textboard() in main.rs
+//! for single-source viewport handling (avoids double viewport IDs). This file remains for
+//! unit tests and future slint migration; do not instantiate TextBoardViewport directly.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2, ViewportBuilder, ViewportId, ViewportCommand};
 

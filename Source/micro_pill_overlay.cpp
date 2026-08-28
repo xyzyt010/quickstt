@@ -28,7 +28,7 @@ constexpr int kWaveBars = 24;
 constexpr qreal kBarWidth = 3.0;
 constexpr qreal kMaxBarHeight = 22.0;
 
-// ── Native typing into the focused window (X11: xdotool) ──
+// ── Native typing into the focused window (Wayland wtype/ydotool, X11 xdotool) ──
 void typeIntoFocusedWindow(const QString &text) {
   if (text.isEmpty())
     return;
@@ -48,18 +48,25 @@ void typeIntoFocusedWindow(const QString &text) {
   if (!inputs.empty())
     SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
 #else
-  QProcess *xdotool = new QProcess();
-  xdotool->setProgram(QStringLiteral("xdotool"));
-  QStringList args{QStringLiteral("type"), QStringLiteral("--delay"),
-                   QStringLiteral("0"), QStringLiteral("--"), text};
-  xdotool->setArguments(args);
-  QObject::connect(xdotool,
-                   static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(
-                       &QProcess::finished),
-                   xdotool, [xdotool](int, QProcess::ExitStatus) {
-                     xdotool->deleteLater();
-                   });
-  xdotool->start();
+  auto startTool = [](const QString &prog, const QStringList &args){
+    QProcess *p = new QProcess();
+    p->setProgram(prog);
+    p->setArguments(args);
+    QObject::connect(p, static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+                     p, [p](int, QProcess::ExitStatus){ p->deleteLater(); });
+    p->start();
+    return p;
+  };
+  // Probe order: wtype (Wayland wlroots) -> ydotool -> xdotool (X11)
+  if (QProcess::execute(QStringLiteral("which"), QStringList{QStringLiteral("wtype")}) == 0) {
+    startTool(QStringLiteral("wtype"), QStringList{QStringLiteral("--"), text});
+    return;
+  }
+  if (QProcess::execute(QStringLiteral("which"), QStringList{QStringLiteral("ydotool")}) == 0) {
+    startTool(QStringLiteral("ydotool"), QStringList{QStringLiteral("type"), QStringLiteral("--next-delay"), QStringLiteral("0"), text});
+    return;
+  }
+  startTool(QStringLiteral("xdotool"), QStringList{QStringLiteral("type"), QStringLiteral("--delay"), QStringLiteral("0"), QStringLiteral("--clearmodifiers"), QStringLiteral("--"), text});
 #endif
 }
 } // namespace
@@ -337,6 +344,14 @@ void MicroPillOverlay::deliverTextDelta(const QString &delta) {
   case 1: {
     QClipboard *clipboard = QGuiApplication::clipboard();
     clipboard->setText(clipboard->text() + delta + QStringLiteral(" "));
+    // Wayland wl-copy fallback (xclip not always present on wlroots)
+    if (QProcess::execute(QStringLiteral("which"), QStringList{QStringLiteral("wl-copy")}) == 0) {
+      QProcess *p = new QProcess();
+      p->setProgram(QStringLiteral("sh"));
+      p->setArguments(QStringList{QStringLiteral("-c"), QStringLiteral("echo -n \"") + delta.replace(QStringLiteral("\""), QStringLiteral("\\\"")) + QStringLiteral("\" | wl-copy 2>/dev/null")});
+      QObject::connect(p, static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), p, [p](int, QProcess::ExitStatus){ p->deleteLater(); });
+      p->start();
+    }
     break;
   }
   default:

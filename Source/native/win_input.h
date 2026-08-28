@@ -80,18 +80,39 @@ static bool haveCommand(const char* cmd) {
 }
 static void typeUtf8(const std::string &utf8) {
   if (utf8.empty()) return;
-  // Escape single quotes for shell
   std::string esc;
   esc.reserve(utf8.size()+16);
   for(char c: utf8){ if(c=='\'') esc += "'\\''"; else esc+=c; }
   std::string cmd;
-  if (haveCommand("wtype")) cmd = "wtype '" + esc + " ' 2>/dev/null &";
-  else if (haveCommand("ydotool")) cmd = "ydotool type '" + esc + " ' 2>/dev/null &";
-  else if (haveCommand("xdotool")) cmd = "xdotool type --clearmodifiers '" + esc + " ' 2>/dev/null &";
+  if (haveCommand("wtype")) cmd = "wtype '" + esc + "' 2>/dev/null &";
+  else if (haveCommand("ydotool")) cmd = "ydotool type --next-delay 0 '" + esc + "' 2>/dev/null &";
+  else if (haveCommand("xdotool")) cmd = "xdotool type --clearmodifiers --delay 0 '" + esc + "' 2>/dev/null &";
   else { fprintf(stderr,"[LINUX_INPUT] no wtype/xdotool/ydotool found — texto: %s\n", utf8.c_str()); return; }
   std::system(cmd.c_str());
 }
-static void pressKey(int, bool=false) {}
+static void linuxKey(const std::string& key) {
+  std::string cmd;
+  if (haveCommand("ydotool")) cmd = "ydotool key " + key + " 2>/dev/null &";
+  else if (haveCommand("xdotool")) cmd = "xdotool key --clearmodifiers " + key + " 2>/dev/null &";
+  else if (haveCommand("wtype")) {
+    // wtype can send some keys via -k but ydotool/xdotool preferred; fallback to typing char
+    if (key=="space") typeUtf8(" "); else if (key=="Return") typeUtf8("\n"); else if (key=="Tab") typeUtf8("\t");
+    return;
+  } else return;
+  std::system(cmd.c_str());
+}
+static void linuxCombo(const std::string& combo) {
+  // combo like "ctrl+c" for xdotool, "29:46" codes for ydotool; xdotool syntax is preferred for readability
+  std::string cmd;
+  if (haveCommand("xdotool")) cmd = "xdotool key --clearmodifiers " + combo + " 2>/dev/null &";
+  else if (haveCommand("ydotool")) {
+    // ydotool wants keycodes; map common combos to xdotool-like via wtype fallback
+    // For ydotool we invoke xdotool-compatible shim via ydotool key if available, else try wtype
+    cmd = "ydotool key " + combo + " 2>/dev/null &";
+  } else return;
+  std::system(cmd.c_str());
+}
+static void pressKey(int, bool=false) { linuxKey("space"); }
 static void pressCombo(int,int) {}
 #endif
 
@@ -171,10 +192,35 @@ static const std::unordered_map<std::string, CmdFn> &getCommands() {
 #else
 static const std::unordered_map<std::string, CmdFn> &getCommands() {
   static const std::unordered_map<std::string, CmdFn> cmds = {
-      {"space", [] { typeUtf8(" "); }},
-      {"enter", [] { typeUtf8("\n"); }},
-      {"tab", [] { typeUtf8("\t"); }},
-      // Linux: other shortcuts rely on external tools; map to no-ops with log
+      {"space", [] { linuxKey("space"); }},
+      {"spacebar", [] { linuxKey("space"); }},
+      {"space bar", [] { linuxKey("space"); }},
+      {"backspace", [] { linuxKey("BackSpace"); }},
+      {"back space", [] { linuxKey("BackSpace"); }},
+      {"enter", [] { linuxKey("Return"); }},
+      {"return", [] { linuxKey("Return"); }},
+      {"new line", [] { linuxKey("Return"); }},
+      {"newline", [] { linuxKey("Return"); }},
+      {"tab", [] { linuxKey("Tab"); }},
+      {"delete", [] { linuxKey("Delete"); }},
+      {"escape", [] { linuxKey("Escape"); }},
+      {"esc", [] { linuxKey("Escape"); }},
+      {"select all", [] { linuxCombo("ctrl+a"); }},
+      {"undo", [] { linuxCombo("ctrl+z"); }},
+      {"redo", [] { linuxCombo("ctrl+y"); }},
+      {"copy", [] { linuxCombo("ctrl+c"); }},
+      {"paste", [] { linuxCombo("ctrl+v"); }},
+      {"cut", [] { linuxCombo("ctrl+x"); }},
+      {"save", [] { linuxCombo("ctrl+s"); }},
+      {"find", [] { linuxCombo("ctrl+f"); }},
+      {"left", [] { linuxKey("Left"); }},
+      {"right", [] { linuxKey("Right"); }},
+      {"up", [] { linuxKey("Up"); }},
+      {"down", [] { linuxKey("Down"); }},
+      {"home", [] { linuxKey("Home"); }},
+      {"end", [] { linuxKey("End"); }},
+      {"caps lock", [] { linuxKey("Caps_Lock"); }},
+      {"caps", [] { linuxKey("Caps_Lock"); }},
   };
   return cmds;
 }

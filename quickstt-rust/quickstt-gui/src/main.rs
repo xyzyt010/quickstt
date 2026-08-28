@@ -346,6 +346,30 @@ fn get_screen_size() -> (f32, f32) {
     (1920.0, 1080.0)
 }
 
+fn deliver_transcription_output(delta: &str, output_mode: u32) {
+    if delta.trim().is_empty() { return; }
+    let text = format!("{} ", delta.trim());
+    let esc = text.replace('\'', "'\\''");
+    match output_mode {
+        1 => {
+            let _ = std::process::Command::new("sh").arg("-c")
+                .arg(format!("printf '{}' | wl-copy 2>/dev/null || printf '{}' | xclip -selection clipboard 2>/dev/null || printf '{}' | xsel --clipboard 2>/dev/null || true", esc, esc, esc))
+                .spawn();
+        }
+        2 => {} // none
+        _ => {
+            let cmd = if std::process::Command::new("which").arg("wtype").output().map(|o| o.status.success()).unwrap_or(false) {
+                format!("wtype '{}' 2>/dev/null &", esc)
+            } else if std::process::Command::new("which").arg("ydotool").output().map(|o| o.status.success()).unwrap_or(false) {
+                format!("ydotool type '{}' 2>/dev/null &", esc)
+            } else {
+                format!("xdotool type --clearmodifiers --delay 0 '{}' 2>/dev/null &", esc)
+            };
+            let _ = std::process::Command::new("sh").arg("-c").arg(cmd).spawn();
+        }
+    }
+}
+
 #[allow(dead_code)]
 fn read_registry_bool(key_name: &str, default: bool) -> bool {
     #[cfg(target_os = "windows")]
@@ -1044,7 +1068,17 @@ impl QuickSttApp {
                 self.waveform.push_level(level);
             }
             if !s.transcript_buffer.is_empty() && s.transcript_buffer != self.transcript {
-                self.transcript = s.transcript_buffer.clone();
+                let new_text = s.transcript_buffer.clone();
+                let delta = if new_text.starts_with(&self.transcript) {
+                    new_text[self.transcript.len()..].trim().to_string()
+                } else {
+                    new_text.clone()
+                };
+                let output_mode = s.settings.ctrl_space_output;
+                self.transcript = new_text;
+                if !delta.is_empty() {
+                    deliver_transcription_output(&delta, output_mode);
+                }
             }
             if s.partial_result != self.partial_text {
                 self.partial_text = s.partial_result.clone();
@@ -1792,17 +1826,16 @@ impl eframe::App for QuickSttApp {
             self.last_sent_w = target_window_w;
             self.last_widget_visible = widget_visible;
 
-            // Toggle the background wakeword detector based on widget visibility.
-            // When the widget is hidden (closed to the system tray) we open the mic
-            // stream so the background detector can listen for the wake phrase;
-            // when the widget is back on screen we hand the mic back to transcription
-            // and stop background listening.
+            // Toggle background wakeword per wake_word_mode (Off/Always On/On with Widget) + widget visibility.
             if !on_command_active {
                 if let Some(handle) = &self.wakeword_handle {
-                    if widget_visible {
-                        handle.stop();
-                    } else {
-                        handle.start();
+                    let mode = self.state.lock().map(|s| s.settings.wake_word_mode.clone()).unwrap_or_else(|_| "Off".into());
+                    match mode.as_str() {
+                        "Always On" => handle.start(),
+                        "On with Widget" => {
+                            if widget_visible { handle.stop(); } else { handle.start(); }
+                        }
+                        _ => handle.stop(), // Off
                     }
                 }
             }
@@ -2665,8 +2698,10 @@ fn render_updates_tab(ui: &mut egui::Ui) {
                 .size(13.0),
         );
         ui.add_space(4.0);
-        ui.label("• http://127.0.0.1:5000");
-        ui.label("• http://localhost:5000");
+        ui.label("• https://github.com/xyzyt010/quickstt/releases");
+        ui.label("• http://127.0.0.1:5000 (local dev)");
+        ui.label("• http://localhost:5000 (local dev)");
+        ui.hyperlink_to("Check for updates on GitHub →", "https://github.com/xyzyt010/quickstt/releases");
     });
 }
 

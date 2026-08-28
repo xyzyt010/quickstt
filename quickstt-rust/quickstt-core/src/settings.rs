@@ -541,17 +541,93 @@ impl Settings {
     pub fn save_all(&self) -> QuickSttResult<()> {
         #[cfg(target_os = "windows")]
         {
-            // On Windows also mirror to TOML for migration readiness
+            // Field-by-field Registry write + TOML mirror for migration
+            let key = open_settings_key_writable()?;
+            let write_str = |name: &str, val: &str| -> QuickSttResult<()> {
+                let wide: Vec<u16> = val.encode_utf16().chain(std::iter::once(0)).collect();
+                let wname = to_wide(name);
+                unsafe {
+                    let data = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
+                    RegSetValueExW(key, PCWSTR(wname.as_ptr()), 0, REG_SZ, Some(data))?;
+                }
+                Ok(())
+            };
+            let write_dword = |name: &str, val: u32| -> QuickSttResult<()> {
+                let wname = to_wide(name);
+                unsafe {
+                    let data = std::slice::from_raw_parts(&val as *const u32 as *const u8, 4);
+                    RegSetValueExW(key, PCWSTR(wname.as_ptr()), 0, REG_DWORD, Some(data))?;
+                }
+                Ok(())
+            };
+            let write_multi = |name: &str, vals: &[String]| -> QuickSttResult<()> {
+                let wname = to_wide(name);
+                let mut data: Vec<u16> = Vec::new();
+                for v in vals { data.extend(v.encode_utf16()); data.push(0); }
+                data.push(0);
+                unsafe {
+                    let bytes = std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len()*2);
+                    RegSetValueExW(key, PCWSTR(wname.as_ptr()), 0, REG_MULTI_SZ, Some(bytes))?;
+                }
+                Ok(())
+            };
+            let _ = write_str("selectedModel", &self.selected_model);
+            let _ = write_multi("widgetModels", &self.widget_models);
+            let _ = write_multi("cloudWidgetModels", &self.cloud_widget_models);
+            let _ = write_multi("favoriteModels", &self.favorite_models);
+            let _ = write_multi("wakeWords", &self.wake_words);
+            let _ = write_multi("closeWords", &self.close_words);
+            let _ = write_str("wakeEngine", &self.wake_engine);
+            let _ = write_str("porcupineAccessKey", &self.porcupine_access_key);
+            let _ = write_str("recordingDir", &self.recording_dir);
+            let _ = write_str("autoOffload", if self.auto_offload { "true" } else { "false" });
+            let _ = write_dword("offloadSeconds", self.offload_seconds);
+            let _ = write_str("autoModelLoad", if self.auto_model_load { "true" } else { "false" });
+            let _ = write_str("startupEnabled", if self.startup_enabled { "true" } else { "false" });
+            let _ = write_str("startupBackground", if self.startup_background { "true" } else { "false" });
+            let _ = write_str("specialCommands", if self.special_commands { "true" } else { "false" });
+            let _ = write_str("haptics", if self.haptics { "true" } else { "false" });
+            let _ = write_str("sound", if self.sound { "true" } else { "false" });
+            let _ = write_str("widgetFlexible", if self.widget_flexible { "true" } else { "false" });
+            let _ = write_str("firstLaunch", if self.first_launch { "true" } else { "false" });
+            let _ = write_str("setupCompleted", if self.setup_completed { "true" } else { "false" });
+            let _ = write_dword("pillWidth", self.pill_width);
+            let _ = write_dword("pillHeight", self.pill_height);
+            let _ = write_dword("pillRadius", self.pill_radius);
+            let _ = write_dword("activeOpacity", self.active_opacity);
+            let _ = write_dword("iconSize", self.icon_size);
+            let _ = write_dword("trayIconSize", self.tray_icon_size);
+            let _ = write_dword("txtOpacity", self.txt_opacity);
+            let _ = write_dword("txtSize", self.txt_size);
+            let _ = write_dword("r", self.r_color);
+            let _ = write_dword("o", self.o_color);
+            let _ = write_str("showWaveform", if self.show_waveform { "true" } else { "false" });
+            let _ = write_dword("waveformSensitivity", self.waveform_sensitivity);
+            let _ = write_str("smartLifeAccountMode", &self.smart_life_account_mode);
+            let _ = write_str("smartLifeEndpoint", &self.smart_life_endpoint);
+            let _ = write_str("smartLifeAccessId", &self.smart_life_access_id);
+            let _ = write_str("smartLifeAccessKey", &self.smart_life_access_key);
+            let _ = write_str("smartLifeDeveloperUid", &self.smart_life_developer_uid);
+            let _ = write_str("smartLifeUsername", &self.smart_life_username);
+            let _ = write_str("smartLifePassword", &self.smart_life_password);
+            let _ = write_str("smartLifeCountryCode", &self.smart_life_country_code);
+            let _ = write_str("smartLifeSchema", &self.smart_life_schema);
+            let _ = write_str("haUrl", &self.ha_url);
+            let _ = write_str("haToken", &self.ha_token);
+            let _ = write_str("androidTvAutoScan", if self.android_tv_auto_scan { "true" } else { "false" });
+            let _ = write_str("alwaysOnPill", if self.always_on_pill { "true" } else { "false" });
+            let _ = write_str("ctrlSpaceEnabled", if self.ctrl_space_enabled { "true" } else { "false" });
+            let _ = write_dword("ctrlSpaceMode", self.ctrl_space_mode);
+            let _ = write_dword("ctrlSpaceOutput", self.ctrl_space_output);
+            let _ = write_str("onCommandTranscription", if self.on_command_transcription { "true" } else { "false" });
+            let _ = write_str("wakeWordMode", &self.wake_word_mode);
+            unsafe { let _ = RegCloseKey(key); }
             let _ = self.save_to_toml();
+            return Ok(());
         }
         #[cfg(not(target_os = "windows"))]
         {
             return self.save_to_toml();
-        }
-        #[cfg(target_os = "windows")]
-        {
-            // Windows saves field-by-field via registry above; TOML mirror already done
-            Ok(())
         }
     }
 
