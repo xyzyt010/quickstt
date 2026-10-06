@@ -2221,13 +2221,15 @@ fn dock_hop(
                 std::mem::forget(manager);
                 *mlock(&hotkey_ok) = true;
                 loop {
-                    // Pump THIS thread's message queue: the global-hotkey
+                    // Pump THIS thread's message queue on Windows: the global-hotkey
                     // hidden window was created on this thread, and its
                     // WM_HOTKEY is only dispatched when this thread pumps.
                     // Without this, registration succeeds but press/release
                     // events sit in the queue forever (exactly the observed
                     // "Ctrl+Space does nothing"; egui worked because its main
-                    // thread pumps messages).
+                    // thread pumps messages). Non-Windows needs no pump — the
+                    // try_recv + 5ms sleep below already paces the loop.
+                    #[cfg(target_os = "windows")]
                     {
                         use windows::Win32::Foundation::HWND;
                         use windows::Win32::UI::WindowsAndMessaging::{

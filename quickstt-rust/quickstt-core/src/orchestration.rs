@@ -945,13 +945,19 @@ impl AppOrchestrator {
                 OrchestratorCommand::TransientStart(kind) => {
                     // Clap gate: fires only when the clap action is Start.
                     // Independent of wakewords, so claps work with wakewords
-                    // fully disabled.
+                    // fully disabled. The const lives in the `audio` module
+                    // (compiled out without `audio-capture`), so the
+                    // no-audio build compares against its literal value
+                    // (TRANSIENT_START = 0) instead of failing to compile —
+                    // this arm is what bare `cargo test -p quickstt-core`
+                    // builds on CI.
+                    #[cfg(feature = "audio-capture")]
+                    let want_start = crate::audio::transient::TRANSIENT_START;
+                    #[cfg(not(feature = "audio-capture"))]
+                    let want_start = 0u32;
                     let allowed = state
                         .lock()
-                        .map(|s| {
-                            s.settings.transient_action
-                                == crate::audio::transient::TRANSIENT_START
-                        })
+                        .map(|s| s.settings.transient_action == want_start)
                         .unwrap_or(false);
                     if !allowed {
                         info!(

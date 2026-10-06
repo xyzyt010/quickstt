@@ -1,0 +1,1 @@
+{"action":"load","model_path":"C:/Users/hemsh_sfya5gq/AppData/Roaming/QuickSTT/models/nemotron/nemotron-3.5-asr-streaming-0.6b","language":"en-US"}
