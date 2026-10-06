@@ -16,10 +16,12 @@ namespace {
 
 constexpr int kSampleRate = 16000;
 constexpr int kTenVadHopSamples = 256;
-// Wake-friendly default. Dictation endpointing still uses speech hangover
-// timing in stt_service_native; this only marks speechLikely for gates.
-// Handy Silero-style onset sits near 0.30; 0.28 keeps quiet wake phrases.
-constexpr float kTenVadThreshold = 0.28f;
+// Wake gate default: STRICT (low sensitivity). Dictation endpointing still
+// uses speech hangover timing in stt_service_native; this only marks
+// speechLikely for gates. 0.45 lets normal close-mic speech through while
+// room noise / TV chatter at a distance stays gated. (0.28 was far too hot
+// and fed every noise blip to the wake scorer.)
+constexpr float kTenVadThreshold = 0.45f;
 
 std::string joinPath(const std::string &a, const std::string &b) {
   return (fs::path(a) / b).string();

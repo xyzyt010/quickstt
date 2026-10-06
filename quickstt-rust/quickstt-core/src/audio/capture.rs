@@ -4,9 +4,51 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 use tokio::sync::mpsc;
 
-/// The dual-stream audio architecture as specified in the architectural plan.
-/// It uses a low-bitrate stream for wakeword detection to save memory,
-/// and a high-quality stream that is ONLY opened when transcription is active.
+/// List OS input (microphone) device names in enumeration order.
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let mut names = Vec::new();
+    if let Ok(devices) = host.input_devices() {
+        for d in devices {
+            if let Ok(n) = d.name() {
+                let n = n.trim().to_string();
+                if !n.is_empty() && !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+    }
+    // OS default first (when present) so "System default" ~= names[0].
+    if let Some(def) = host.default_input_device() {
+        if let Ok(dn) = def.name() {
+            if let Some(i) = names.iter().position(|n| n == &dn) {
+                names.remove(i);
+                names.insert(0, dn);
+            }
+        }
+    }
+    names
+}
+
+/// Resolve a preferred microphone: "" / "System default" (or unknown names)
+/// fall back to the OS default input.
+fn resolve_input_device(host: &cpal::Host, preferred: &str) -> Option<cpal::Device> {
+    let preferred = preferred.trim();
+    if !preferred.is_empty() && !preferred.eq_ignore_ascii_case("System default") {
+        if let Ok(devices) = host.input_devices() {
+            for d in devices {
+                if d.name().map(|n| n == preferred).unwrap_or(false) {
+                    return Some(d);
+                }
+            }
+        }
+        tracing::warn!(
+            "Preferred microphone {:?} not found — falling back to system default",
+            preferred
+        );
+    }
+    host.default_input_device()
+}
 pub struct AudioCaptureManager {
     wakeword_stream: Option<Stream>,
     transcription_stream: Option<Stream>,
@@ -24,11 +66,18 @@ impl AudioCaptureManager {
     }
 
     /// Starts a lightweight microphone stream and normalizes it to 16 kHz mono i16.
-    pub fn start_wakeword_stream(&mut self, wakeword_tx: mpsc::Sender<Vec<i16>>) -> Result<()> {
-        let device = self
-            .host
-            .default_input_device()
+    /// `preferred` is an OS device name ("" = system default).
+    pub fn start_wakeword_stream(
+        &mut self,
+        wakeword_tx: mpsc::Sender<Vec<i16>>,
+        preferred: &str,
+    ) -> Result<()> {
+        let device = resolve_input_device(&self.host, preferred)
             .context("No input device available")?;
+        tracing::info!(
+            "Capture device: {:?}",
+            device.name().unwrap_or_else(|_| "<unnamed>".into())
+        );
 
         let supported = device
             .default_input_config()

@@ -67,6 +67,25 @@ echo [2/6] Native STT service compiled. Skipping Python PyInstaller...
 echo [3/6] Collecting Binaries to App Folder...
 copy /Y "QuickSTT.exe" "%BASE_DIR%QuickSTT_Portable.exe" >nul
 copy /Y "QuickSTT_App.exe" "%DIST_APP%\"
+if exist "%BASE_DIR%quickstt-rust\target\release\quickstt-slint.exe" (
+    copy /Y "%BASE_DIR%quickstt-rust\target\release\quickstt-slint.exe" "%BASE_DIR%quickstt-slint.exe" >nul
+) else (
+    echo [3/6] WARNING: quickstt-slint.exe was not built (Rust widget not bundled).
+)
+rem Widget resolves parakeet_engine + wakeword_models from its own exe dir —
+rem keep them beside the bundled copy or transcription/wakeword fail.
+if exist "%BASE_DIR%quickstt-rust\target\release\tools\parakeet\parakeet_engine.exe" (
+    if not exist "%BASE_DIR%tools\parakeet" mkdir "%BASE_DIR%tools\parakeet"
+    xcopy /E /I /Y "%BASE_DIR%quickstt-rust\target\release\tools\parakeet\*" "%BASE_DIR%tools\parakeet\" >nul
+) else (
+    echo [3/6] WARNING: parakeet engine not built (widget transcription will fail).
+)
+if exist "%BASE_DIR%quickstt-rust\wakeword_models" (
+    if not exist "%BASE_DIR%wakeword_models" mkdir "%BASE_DIR%wakeword_models"
+    xcopy /E /I /Y "%BASE_DIR%quickstt-rust\wakeword_models\*" "%BASE_DIR%wakeword_models\" >nul
+) else (
+    echo [3/6] WARNING: wakeword_models missing (widget wakeword will fail).
+)
 if exist "%BASE_DIR%quickstt_popup\target\release\quickstt_popup.exe" (
     copy /Y "%BASE_DIR%quickstt_popup\target\release\quickstt_popup.exe" "%DIST_APP%\quickstt_popup.exe" >nul
 ) else (

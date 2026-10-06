@@ -491,11 +491,20 @@ QStringList LocalFrontendSttManager::argumentsForModel(
     const bool englishOnly =
         lowerModel.contains(QStringLiteral(".en")) ||
         descriptor.variantKey.contains(QStringLiteral("_en"));
+    // Dashboard language choice (General → model/language dropdowns):
+    // "auto" by default (previous behaviour); a forced language is passed
+    // straight to whisper.cpp. English-only (.en) models are clamped to en —
+    // whisper.cpp errors on any other code, so compatibility is enforced
+    // here as well as in the dropdown (which offers only English for them).
+    QString whisperLang = localModelSelectedLanguageCode(modelName);
+    if (englishOnly && whisperLang != QStringLiteral("en"))
+      whisperLang = QStringLiteral("en");
+    if (whisperLang.isEmpty())
+      whisperLang = QStringLiteral("auto");
     QStringList whisperArgs = {
         QStringLiteral("-m"), modelFile,
         QStringLiteral("-f"), nativePath(audioPath),
-        QStringLiteral("--language"), englishOnly ? QStringLiteral("en")
-                                                   : QStringLiteral("auto"),
+        QStringLiteral("--language"), whisperLang,
         QStringLiteral("--no-timestamps"),
         QStringLiteral("--no-prints"),
         QStringLiteral("-tp"), QStringLiteral("0.0"),
@@ -601,7 +610,7 @@ QString LocalFrontendSttManager::extractTranscript(
   const auto extractFromChannel = [&](const QString &channelText) {
     const QStringList lines = channelText.split(
         QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts);
-    QString lastFallback;
+    QStringList keptLines;
     for (const QString &rawLine : lines) {
       const QString line = sanitizeTranscript(rawLine);
       if (line.isEmpty())
@@ -617,9 +626,11 @@ QString LocalFrontendSttManager::extractTranscript(
       if (isNoiseLine(line, audioPath))
         continue;
 
-      lastFallback = line;
+      // Keep EVERY content line — the old code kept only the last one and
+      // silently dropped the rest of long utterances.
+      keptLines.append(line);
     }
-    return sanitizeTranscript(lastFallback);
+    return sanitizeTranscript(keptLines.join(QStringLiteral(" ")));
   };
 
   const QString stdoutTranscript = extractFromChannel(stdoutText);
@@ -739,6 +750,24 @@ void LocalFrontendSttManager::onProcessError(QProcess::ProcessError error) {
           ? QStringLiteral("Failed to start the local transcription runtime.")
           : m_process->errorString().trimmed();
   finishFailure(message);
+}
+
+// Idle offload: release the worker's model from RAM ({"action":"unload"} —
+// the engine keeps running for fast reload). Never yanks mid-turn or with
+// jobs queued; the next transcribeFile() reloads on demand.
+void LocalFrontendSttManager::unloadIdleModels() {
+  if (m_busy)
+    return;
+  if (!m_pendingJobs.isEmpty())
+    return;
+  if (m_parakeetProcess &&
+      m_parakeetProcess->state() == QProcess::Running) {
+    QJsonObject unloadReq;
+    unloadReq[QStringLiteral("action")] = QStringLiteral("unload");
+    m_parakeetProcess->write(
+        QJsonDocument(unloadReq).toJson(QJsonDocument::Compact) + "\n");
+    feLog(QStringLiteral("idle unload sent to frontend worker"));
+  }
 }
 
 // ─── Worker process liveness (Handy-like respawn after external kill) ────

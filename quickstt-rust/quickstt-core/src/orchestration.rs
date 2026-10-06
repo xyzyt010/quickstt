@@ -25,6 +25,10 @@ pub struct ModelEntry {
     pub installed: bool,
     pub size_mb: u32,
     pub engine_family: String,
+    pub languages: Vec<String>,
+    pub accuracy: u8,
+    pub speed: u8,
+    pub blurb: String,
 }
 
 #[derive(Clone)]
@@ -39,9 +43,30 @@ pub struct AppState {
     pub audio_level: u8,
     pub model_entries: Vec<ModelEntry>,
     pub selected_model: usize,
+    pub selected_language: String,
     pub model_offloaded: bool,
     pub wakeword_active: bool,
     pub widget_visible: bool,
+    /// True while the foreground capture stream is open (mic live).
+    pub mic_open: bool,
+    pub download_progress: u8,
+    pub is_downloading: bool,
+    pub download_status: String,
+    /// Active download identity + byte-accurate progress (dashboard MB/s UI).
+    pub download_name: String,
+    pub download_file_label: String,
+    pub download_received_bytes: u64,
+    pub download_total_bytes: u64,
+    pub download_speed_bps: f64,
+    pub download_speed_text: String,
+    pub download_bytes_text: String,
+    /// Hardware-aware recommendation (entry index into model_entries).
+    pub recommended_model: Option<usize>,
+    pub recommend_reason: String,
+    pub hardware_summary: String,
+    /// Dashboard catalog UI state (search + language filter, Slint-driven).
+    pub catalog_search: String,
+    pub catalog_lang_filter: String,
 }
 
 impl AppState {
@@ -57,9 +82,26 @@ impl AppState {
             audio_level: 0,
             model_entries: Vec::new(),
             selected_model: 0,
+            selected_language: "Auto".to_string(),
             model_offloaded: false,
             wakeword_active: false,
             widget_visible: true,
+            mic_open: false,
+            download_progress: 0,
+            is_downloading: false,
+            download_status: String::new(),
+            download_name: String::new(),
+            download_file_label: String::new(),
+            download_received_bytes: 0,
+            download_total_bytes: 0,
+            download_speed_bps: 0.0,
+            download_speed_text: String::new(),
+            download_bytes_text: String::new(),
+            recommended_model: None,
+            recommend_reason: String::new(),
+            hardware_summary: String::new(),
+            catalog_search: String::new(),
+            catalog_lang_filter: "All Languages".to_string(),
         }
     }
 }
@@ -73,13 +115,25 @@ pub enum OrchestratorCommand {
     TranscribeChunk(Vec<f32>),
     TextRecognized(String),
     PartialText(String),
+    /// Watchdog: the transcription engine stopped responding (hung load or
+    /// dead helper). Unstick the turn so the widget never sits in
+    /// "Transcribing…" forever; the next turn respawns the engine session.
+    AbortTranscribe,
     WakewordTriggered(f32),
+    /// A clap transient fired with action=Start. Carries the sound kind
+    /// ("clap") for logging. Gated on `transient_action == 0`.
+    TransientStart(String),
     SelectModel(usize),
+    SelectLanguage(String),
+    /// Select the capture microphone by OS device name ("" = system default).
+    /// Applies on next mic open; restarts the live stream when capturing.
+    SelectMicrophone(String),
     /// Download + install the model at this catalog index (background thread).
     DownloadModel(usize),
     OffloadModel,
     ReloadModel,
     ToggleWakeword(bool),
+    SetWakewordSensitivity(u32),
     ShowWidget,
     HideWidget,
     /// Enable background wakeword detection (runs when widget is hidden).
@@ -101,8 +155,7 @@ pub struct AppOrchestrator {
     audio_tx: mpsc::Sender<Vec<i16>>,
 }
 
-fn model_name_matches(configured: &str, catalog_name: &str) -> bool {
-    let configured = configured.trim();
+fn model_name_matches(configured: &str, catalog_name: &str) -> bool {    let configured = configured.trim();
     let catalog_name = catalog_name.trim();
     if configured.eq_ignore_ascii_case(catalog_name) {
         return true;
@@ -116,7 +169,57 @@ fn model_name_matches(configured: &str, catalog_name: &str) -> bool {
             .to_string()
     };
 
-    strip_suffix(configured).eq_ignore_ascii_case(&strip_suffix(catalog_name))
+    if strip_suffix(configured).eq_ignore_ascii_case(&strip_suffix(catalog_name)) {
+        return true;
+    }
+
+    // Quant migration: Nemotron Q8_0 (broken, all-<unk>) -> Q4_K_M (working).
+    // Old saved selections must keep matching the renamed descriptor.
+    let low_cfg = configured.to_lowercase();
+    let low_cat = catalog_name.to_lowercase();
+    if low_cfg.contains("nemotron") && low_cat.contains("nemotron") {
+        return true;
+    }
+    // Moonshine family alias (v2 base vs streaming naming).
+    if low_cfg.contains("moonshine") && low_cat.contains("moonshine") {
+        return true;
+    }
+    // Canary family alias (quant renames).
+    if low_cfg.contains("canary") && low_cat.contains("canary") {
+        return true;
+    }
+    // Whisper Large Turbo alias.
+    if low_cfg.contains("large") && low_cfg.contains("turbo") && low_cat.contains("large") {
+        return true;
+    }
+    false
+}
+
+/// Recompute the smart recommendation from the live entries + fresh hardware
+/// probe. Called on startup and whenever the language changes (CPU scoring
+/// carries a multilingual bonus).
+fn refresh_recommendation(s: &mut AppState) {
+    let hw = crate::engine::HardwareInfo::detect();
+    let descs: Vec<catalog::ModelDescriptor> = s
+        .model_entries
+        .iter()
+        .filter_map(|e| {
+            catalog::all_descriptors().into_iter().find(|d| d.name == e.name)
+        })
+        .collect();
+    let (rec_name, reason) = catalog::recommend_model(
+        &descs,
+        hw.has_discrete_gpu,
+        &hw.vendor,
+        &hw.device_name,
+        hw.vram_mb,
+        hw.system_ram_gb,
+        &s.selected_language,
+    );
+    s.hardware_summary = hw.summary();
+    s.recommend_reason = reason;
+    s.recommended_model = rec_name
+        .and_then(|n| s.model_entries.iter().position(|e| e.name == n));
 }
 
 /// Internal commands sent to the dedicated audio-control thread. The audio
@@ -126,7 +229,10 @@ fn model_name_matches(configured: &str, catalog_name: &str) -> bool {
 #[cfg(feature = "audio-capture")]
 pub enum AudioControlCommand {
     /// Open the wakeword mic and create a fresh [`SpeechSegmenter`].
-    Open { audio_tx: mpsc::Sender<Vec<i16>> },
+    Open {
+        audio_tx: mpsc::Sender<Vec<i16>>,
+        ptt_mode: bool,
+    },
     /// Close the wakeword mic and drop the segmenter.
     Close,
 }
@@ -135,6 +241,11 @@ pub enum AudioControlCommand {
 struct AudioControlState {
     capture: Option<AudioCaptureManager>,
     segmenter: Option<SpeechSegmenter>,
+    /// Clap detector (same type as the background thread's, so every mic
+    /// path shares one function and one action).
+    transient: crate::audio::transient::TransientDetector,
+    /// One-chunk isolation arbiter for STOP transients (see background).
+    transient_arbiter: crate::audio::transient::TransientArbiter,
 }
 
 #[cfg(feature = "audio-capture")]
@@ -161,6 +272,8 @@ fn run_audio_control_thread(
     let mut ctrl = AudioControlState {
         capture: None,
         segmenter: None,
+        transient: crate::audio::transient::TransientDetector::new(),
+        transient_arbiter: crate::audio::transient::TransientArbiter::new(),
     };
 
     loop {
@@ -170,7 +283,7 @@ fn run_audio_control_thread(
             // We are running. Try commands first so Stop is responsive.
             match cmd_rx.try_recv() {
                 Ok(AudioControlCommand::Close) => {
-                    close_audio(&mut ctrl);
+                    close_audio(&mut ctrl, &state, &tx_cmd);
                     continue;
                 }
                 Ok(AudioControlCommand::Open { .. }) => {
@@ -179,7 +292,7 @@ fn run_audio_control_thread(
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     info!("Audio control channel disconnected; closing audio capture");
-                    close_audio(&mut ctrl);
+                    close_audio(&mut ctrl, &state, &tx_cmd);
                     return;
                 }
             }
@@ -191,15 +304,15 @@ fn run_audio_control_thread(
                 }
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     info!("Audio rx closed while running");
-                    close_audio(&mut ctrl);
+                    close_audio(&mut ctrl, &state, &tx_cmd);
                     return;
                 }
             }
         } else {
             // Idle: block waiting for commands.
             match cmd_rx.recv() {
-                Ok(AudioControlCommand::Open { audio_tx }) => {
-                    open_audio(&mut ctrl, audio_tx);
+                Ok(AudioControlCommand::Open { audio_tx, ptt_mode }) => {
+                    open_audio(&mut ctrl, &state, audio_tx, ptt_mode);
                 }
                 Ok(AudioControlCommand::Close) => {
                     // No-op: already idle.
@@ -211,28 +324,176 @@ fn run_audio_control_thread(
 }
 
 #[cfg(feature = "audio-capture")]
-fn open_audio(ctrl: &mut AudioControlState, audio_tx: mpsc::Sender<Vec<i16>>) {
-    if ctrl.capture.is_some() {
+fn open_audio(
+    ctrl: &mut AudioControlState,
+    state: &Arc<Mutex<AppState>>,
+    audio_tx: mpsc::Sender<Vec<i16>>,
+    ptt_mode: bool,
+) {
+    // Instant second press: reuse the live cpal stream, just reset PTT state.
+    if let Some(seg) = ctrl.segmenter.as_mut() {
+        seg.reset();
+        seg.set_ptt_mode(ptt_mode);
         return;
     }
+    let preferred = state
+        .lock()
+        .map(|s| s.settings.selected_microphone.clone())
+        .unwrap_or_default();
     let mut manager = AudioCaptureManager::new();
-    if let Err(e) = manager.start_wakeword_stream(audio_tx) {
+    if let Err(e) = manager.start_wakeword_stream(audio_tx, &preferred) {
         warn!("Failed to open wakeword audio stream: {}", e);
         return;
     }
     let cache_dir = std::env::temp_dir().join("quickstt").join("utterances");
+    let mut seg = SpeechSegmenter::new(cache_dir);
+    seg.set_ptt_mode(ptt_mode);
+    if let Ok(s) = state.lock() {
+        seg.set_vad_sensitivity(s.settings.vad_sensitivity);
+    }
     ctrl.capture = Some(manager);
-    ctrl.segmenter = Some(SpeechSegmenter::new(cache_dir));
-    info!("Foreground audio capture opened");
+    ctrl.segmenter = Some(seg);
+    // Fresh mic → fresh transient state (open pops must not fire it).
+    ctrl.transient.reset();
+    ctrl.transient_arbiter.reset();
+    if let Ok(mut s) = state.lock() {
+        s.mic_open = true;
+    }
+    info!("Foreground audio capture opened (ptt_mode={ptt_mode})");
 }
 
 #[cfg(feature = "audio-capture")]
-fn close_audio(ctrl: &mut AudioControlState) {
+fn wav_is_silent(path: &std::path::Path) -> bool {
+    // Silence gate: never send near-silence to the engine. Parakeet (like
+    // most ASR) hallucinates "yeah"/"yes" on noise-only clips, which is
+    // exactly the reported "say nothing -> prints yeah".
+    let reader = match hound::WavReader::open(path) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let spec = reader.spec();
+    if spec.sample_rate == 0 {
+        return false;
+    }
+    let mut peak: i32 = 0;
+    let mut sum_sq: f64 = 0.0;
+    let mut n: u64 = 0;
+    for s in reader.into_samples::<i16>() {
+        let v = match s {
+            Ok(v) => v as i32,
+            Err(_) => continue,
+        };
+        let a = v.abs();
+        if a > peak {
+            peak = a;
+        }
+        sum_sq += (v as f64) * (v as f64);
+        n += 1;
+    }
+    if n == 0 {
+        return true;
+    }
+    let secs = n as f32 / spec.sample_rate as f32;
+    let rms = (sum_sq / n as f64).sqrt();
+    // ~0.25s min (keeps "ok"), peak floor ~600, rms floor ~50. Tuned so
+    // genuine whispers pass but mic hiss / empty taps do not.
+    if secs < 0.25 {
+        return true;
+    }
+    if peak < 600 {
+        return true;
+    }
+    if rms < 50.0 {
+        return true;
+    }
+    false
+}
+
+#[cfg(feature = "audio-capture")]
+fn flush_pending_utterance(
+    ctrl: &mut AudioControlState,
+    state: &Arc<Mutex<AppState>>,
+    tx_cmd: &mpsc::Sender<OrchestratorCommand>,
+) {
+    let wav_path = match ctrl.segmenter.as_mut().and_then(|s| s.flush()) {
+        Some(p) => p,
+        None => return,
+    };
+    // Silent tap (no speech buffered): complete the turn silently without
+    // ever invoking the engine — no spinner flash, no "yeah".
+    if wav_is_silent(&wav_path) {
+        info!("Silent flush skipped (no engine call): {:?}", wav_path);
+        let _ = tx_cmd.try_send(OrchestratorCommand::TextRecognized(String::new()));
+        return;
+    }
+    let (name, language) = {
+        let s = state.lock().unwrap();
+        match s.model_entries.get(s.selected_model).map(|e| e.name.clone()) {
+            Some(n) => (n, s.selected_language.clone()),
+            None => return,
+        }
+    };
+    let descriptor = match catalog::all_descriptors().into_iter().find(|d| d.name == name) {
+        Some(d) => d,
+        None => return,
+    };
+    // Mark transcribing instantly so the pill swaps mic->spinner with no delay.
+    {
+        let mut s = state.lock().unwrap();
+        s.mode = AppMode::Transcribing;
+        s.status_message = "Transcribing…".into();
+    }
+    let tx_clone = tx_cmd.clone();
+    std::thread::Builder::new()
+        .name("stt-transcribe".to_string())
+        .spawn(move || {
+            // Cached engine detection (no per-utterance probing).
+            let config = crate::models::engine::cached_config();
+            let t0 = std::time::Instant::now();
+            match crate::models::engine::transcribe_with_language(
+                &config,
+                &descriptor,
+                &wav_path,
+                &language,
+            ) {
+                Ok(text) => {
+                    info!(
+                        "transcribe done (flush): model='{}' wav={:?} took={}ms chars={}",
+                        descriptor.name,
+                        wav_path,
+                        t0.elapsed().as_millis(),
+                        text.len()
+                    );
+                    let _ = tx_clone.try_send(OrchestratorCommand::TextRecognized(text));
+                }
+                Err(e) => {
+                    // Complete the turn even on failure (empty result): the
+                    // old PartialText("") path left mode=Transcribing forever
+                    // and wedged the widget on every engine error.
+                    warn!("Transcribe failed for {:?}: {}", wav_path, e);
+                    let _ = tx_clone.try_send(OrchestratorCommand::TextRecognized(String::new()));
+                }
+            }
+        })
+        .ok();
+}
+
+#[cfg(feature = "audio-capture")]
+fn close_audio(
+    ctrl: &mut AudioControlState,
+    state: &Arc<Mutex<AppState>>,
+    tx_cmd: &mpsc::Sender<OrchestratorCommand>,
+) {
+    // PTT release: transcribe the buffered word FIRST, then stop the mic.
+    flush_pending_utterance(ctrl, state, tx_cmd);
     if let Some(mut manager) = ctrl.capture.take() {
         manager.stop_wakeword_stream();
         manager.stop_transcription_stream();
     }
     ctrl.segmenter = None;
+    if let Ok(mut s) = state.lock() {
+        s.mic_open = false;
+    }
     info!("Foreground audio capture closed");
 }
 
@@ -247,23 +508,102 @@ fn process_audio_chunk(
     let level = crate::audio::vad::audio_level_0_100(chunk);
     let _ = tx_cmd.try_send(OrchestratorCommand::AudioLevel(level));
 
+    // 1b. Foreground transient stop: the background mic is parked while a
+    // session is live, so a "Stop Dictation" clap can only be heard
+    // here. Only acts when recording — never interrupts idle.
+    {
+        let action = state
+            .lock()
+            .map(|s| s.settings.transient_action)
+            .unwrap_or(crate::audio::transient::TRANSIENT_DISABLED);
+        if action == crate::audio::transient::TRANSIENT_STOP {
+            // STOP goes through the isolation arbiter too: only an isolated
+            // impulse stops the session, sustained speech never does.
+            let detected = ctrl.transient.process(chunk);
+            let peak = crate::audio::transient::chunk_peak(chunk);
+            if let Some(kind) = ctrl.transient_arbiter.update(detected, peak) {
+                ctrl.transient_arbiter.reset();
+                let live = state
+                    .lock()
+                    .map(|s| s.mode == AppMode::Recording || s.mode == AppMode::Transcribing)
+                    .unwrap_or(false);
+                if live {
+                    // Same one-chunk lag as the background fire line: the
+                    // confirmation chunk is quiet, so onset numbers come
+                    // from `last_onset_stats()`.
+                    let (cpeak, cratio, cjump, _, _, cfloor, cwidth) =
+                        ctrl.transient.last_stats();
+                    if let Some((opeak, oratio, ojump, ofloor, owidth)) =
+                        ctrl.transient.last_onset_stats()
+                    {
+                        info!(
+                            "Acoustic {} → stop dictation (onset peak={:.0} ratio={:.1} jump={:.1} floor={:.0} width={} / confirm peak={:.0} width={})",
+                            kind.as_str(),
+                            opeak,
+                            oratio,
+                            ojump,
+                            ofloor,
+                            owidth,
+                            cpeak,
+                            cwidth
+                        );
+                    } else {
+                        info!(
+                            "Acoustic {} → stop dictation (peak={:.0} ratio={:.1} jump={:.1} floor={:.0} width={})",
+                            kind.as_str(),
+                            cpeak,
+                            cratio,
+                            cjump,
+                            cfloor,
+                            cwidth
+                        );
+                    }
+                    let _ = tx_cmd.try_send(OrchestratorCommand::StopListening);
+                    return;
+                }
+            }
+        } else if action != crate::audio::transient::TRANSIENT_DISABLED {
+            // Keep the detector's noise floor honest when armed for Start
+            // (cheap), so switching actions mid-session just works.
+            // Classification results are ignored here.
+            let _ = ctrl.transient.process(chunk);
+        }
+    }
+
     // 2. Drive the speech segmenter.
     let event = match ctrl.segmenter.as_mut() {
         Some(seg) => seg.process_chunk(chunk),
         None => None,
     };
+    if matches!(event, Some(SegmenterEvent::SpeechStarted | SegmenterEvent::SpeechContinues)) {
+        if let Ok(mut s) = state.lock() {
+            if s.mode != AppMode::Recording && s.mode != AppMode::Transcribing {
+                s.mode = AppMode::Recording;
+                s.status_message = "Listening...".into();
+            }
+        }
+    }
     if let Some(SegmenterEvent::UtteranceComplete(wav_path)) = event {
         if let Some(seg) = ctrl.segmenter.as_mut() {
             seg.reset();
         }
-        let name = {
+        // Silence gate (same as flush): noise-only segments never reach the
+        // engine, so they can never come back as "yeah".
+        if wav_is_silent(&wav_path) {
+            info!("Silent segment skipped (no engine call): {:?}", wav_path);
+            let _ = tx_cmd.try_send(OrchestratorCommand::TextRecognized(String::new()));
+            return;
+        }
+        let (name, language) = {
             let s = state.lock().unwrap();
             let idx = s.selected_model;
-            s.model_entries.get(idx).map(|e| e.name.clone())
-        };
-        let Some(name) = name else {
-            warn!("Utterance complete but no model selected");
-            return;
+            match s.model_entries.get(idx).map(|e| e.name.clone()) {
+                Some(n) => (n, s.selected_language.clone()),
+                None => {
+                    warn!("Utterance complete but no model selected");
+                    return;
+                }
+            }
         };
         let descriptor = catalog::all_descriptors()
             .into_iter()
@@ -280,13 +620,30 @@ fn process_audio_chunk(
         let _ = std::thread::Builder::new()
             .name("stt-transcribe".to_string())
             .spawn(move || {
-                let config = crate::models::engine::SttEngineConfig::detect();
-                match crate::models::engine::transcribe(&config, &descriptor, &wav_clone) {
+                let config = crate::models::engine::cached_config();
+                let t0 = std::time::Instant::now();
+                match crate::models::engine::transcribe_with_language(
+                    &config,
+                    &descriptor,
+                    &wav_clone,
+                    &language,
+                ) {
                     Ok(text) => {
+                        info!(
+                            "transcribe done (segment): model='{}' wav={:?} took={}ms chars={}",
+                            descriptor.name,
+                            wav_clone,
+                            t0.elapsed().as_millis(),
+                            text.len()
+                        );
                         let _ = tx_clone.try_send(OrchestratorCommand::TextRecognized(text));
                     }
                     Err(e) => {
+                        // Complete the turn even on failure (see above).
                         warn!("Transcribe failed for {:?}: {}", wav_clone, e);
+                        let _ = tx_clone.try_send(OrchestratorCommand::TextRecognized(
+                            String::new(),
+                        ));
                     }
                 }
             });
@@ -299,18 +656,18 @@ impl AppOrchestrator {
         let mut app_state = AppState::new(settings);
 
         let models_dir = wakeword_loader::default_models_dir();
-        let discovered = wakeword_loader::discover_models(&models_dir);
+        // Community heads only (customs quarantined — see discover_oww_heads).
+        let discovered = wakeword_loader::discover_oww_heads(&models_dir);
         if discovered.is_empty() {
-            info!("No wakeword models found in {:?}", models_dir);
-            app_state.status_message = format!("No wakeword models in {:?}", models_dir);
+            info!("No wakeword heads found in {:?}", models_dir);
+            app_state.status_message = format!("No wakeword heads in {:?}", models_dir);
         } else {
-            let names: Vec<String> = discovered.iter().map(|m| m.config.phrase.clone()).collect();
-            info!("Found {} wakeword models: {:?}", discovered.len(), names);
+            let names: Vec<String> = discovered.iter().map(|(_, _, p)| p.clone()).collect();
+            info!("Found {} wakeword heads: {:?}", discovered.len(), names);
             app_state.discovered_wakewords = names;
-            app_state.status_message = format!("{} wakeword models loaded", discovered.len());
+            app_state.status_message = format!("{} wakeword heads loaded", discovered.len());
         }
 
-        let all_models = catalog::all_descriptors();
         let configured_widget_models = app_state
             .settings
             .widget_models
@@ -320,13 +677,23 @@ impl AppOrchestrator {
             .filter(|m| !m.is_empty())
             .collect::<Vec<_>>();
 
+        // Hardware-aware list: discrete GPU → the two Whisper GPU models only;
+        // CPU/iGPU → every non-gpu_only model (existing five + Canary).
+        // GPU-only Large Turbo stays hidden on CPU machines so nobody fetches
+        // 800MB they cannot run well. New models are registered but NEVER
+        // auto-downloaded — user-initiated 1-click only.
+        let hw = crate::engine::HardwareInfo::detect();
+        let hw_models = catalog::models_for_hardware(hw.has_discrete_gpu);
+        // Respect an explicit widget_models allowlist when present, but always
+        // intersect it with the hardware-appropriate set (a stale allowlist
+        // naming a GPU-only model on a CPU box must not resurrect it).
         let mut selected_descriptors = if configured_widget_models.is_empty() {
-            all_models
+            hw_models
                 .iter()
                 .filter(|m| m.widget_selectable)
                 .collect::<Vec<_>>()
         } else {
-            all_models
+            hw_models
                 .iter()
                 .filter(|m| {
                     m.widget_selectable
@@ -338,7 +705,7 @@ impl AppOrchestrator {
         };
 
         if selected_descriptors.is_empty() {
-            selected_descriptors = all_models.iter().filter(|m| m.widget_selectable).collect();
+            selected_descriptors = hw_models.iter().filter(|m| m.widget_selectable).collect();
         }
 
         app_state.model_entries = selected_descriptors
@@ -348,6 +715,10 @@ impl AppOrchestrator {
                 installed: catalog::is_model_installed(m),
                 size_mb: m.size_mb,
                 engine_family: m.engine_family.to_string(),
+                languages: catalog::supported_languages(m),
+                accuracy: m.accuracy,
+                speed: m.speed,
+                blurb: m.blurb.clone(),
             })
             .collect();
 
@@ -357,6 +728,10 @@ impl AppOrchestrator {
                 installed: false,
                 size_mb: 0,
                 engine_family: "N/A".into(),
+                languages: vec!["Auto".to_string()],
+                accuracy: 0,
+                speed: 0,
+                blurb: String::new(),
             });
         }
         if !app_state.settings.selected_model.trim().is_empty() {
@@ -366,6 +741,56 @@ impl AppOrchestrator {
                 .position(|m| model_name_matches(app_state.settings.selected_model.trim(), &m.name))
             {
                 app_state.selected_model = idx;
+            }
+        }
+        // If the selected model is not installed, prefer the first installed model so transcription works immediately
+        if !app_state.model_entries.is_empty() && !app_state.model_entries[app_state.selected_model].installed {
+            if let Some(idx) = app_state.model_entries.iter().position(|m| m.installed) {
+                info!("Selected fallback installed model: {}", app_state.model_entries[idx].name);
+                app_state.selected_model = idx;
+            }
+        }
+        // Restore the saved language when the current model supports it,
+        // otherwise fall back to that model's default (first entry).
+        {
+            let saved = app_state.settings.selected_language.trim().to_string();
+            let langs = app_state.model_entries[app_state.selected_model]
+                .languages
+                .clone();
+            app_state.selected_language = if langs.iter().any(|l| l == &saved) {
+                saved
+            } else {
+                langs.into_iter().next().unwrap_or_else(|| "Auto".to_string())
+            };
+        }
+        // Smart recommendation over the hardware-filtered entries.
+        {
+            let descs: Vec<catalog::ModelDescriptor> = app_state
+                .model_entries
+                .iter()
+                .filter_map(|e| {
+                    catalog::all_descriptors().into_iter().find(|d| d.name == e.name)
+                })
+                .collect();
+            let (rec_name, reason) = catalog::recommend_model(
+                &descs,
+                hw.has_discrete_gpu,
+                &hw.vendor,
+                &hw.device_name,
+                hw.vram_mb,
+                hw.system_ram_gb,
+                &app_state.selected_language,
+            );
+            app_state.hardware_summary = hw.summary();
+            app_state.recommend_reason = reason;
+            app_state.recommended_model = rec_name.and_then(|n| {
+                app_state.model_entries.iter().position(|e| e.name == n)
+            });
+            if let Some(idx) = app_state.recommended_model {
+                info!(
+                    "Recommended model: {} ({})",
+                    app_state.model_entries[idx].name, app_state.hardware_summary
+                );
             }
         }
 
@@ -432,15 +857,16 @@ impl AppOrchestrator {
                 OrchestratorCommand::StartListening => {
                     {
                         let mut s = state.lock().unwrap();
-                        s.mode = AppMode::WakewordListening;
+                        s.mode = AppMode::Recording;
                         s.status_message = "Listening...".into();
                         s.model_offloaded = false;
-                        info!("Mode → WakewordListening");
+                        info!("Mode → Recording");
                     }
                     #[cfg(feature = "audio-capture")]
                     {
                         let _ = audio_control_tx.send(AudioControlCommand::Open {
                             audio_tx: audio_tx.clone(),
+                            ptt_mode: true,
                         });
                     }
                 }
@@ -475,34 +901,168 @@ impl AppOrchestrator {
                     let mut s = state.lock().unwrap();
                     s.partial_result = text;
                 }
+                OrchestratorCommand::AbortTranscribe => {
+                    let mut s = state.lock().unwrap();
+                    if s.mode == AppMode::Transcribing {
+                        s.mode = AppMode::Idle;
+                        s.status_message = "Ready".into();
+                        s.partial_result.clear();
+                        warn!("Transcribe aborted by watchdog (engine hung)");
+                    }
+                }
                 OrchestratorCommand::WakewordTriggered(confidence) => {
+                    // Explicit-consent gate: background detection only triggers when
+                    // enabled by user.
+                    let allowed = {
+                        let s = state.lock().unwrap();
+                        let sens = s.settings.wakeword_sensitivity.clamp(0, 100) as f32;
+                        // Sensitivity slider (0-100): 50 -> 0.27 floor, 100 -> 0.15 floor, 0 -> 0.40 floor.
+                        let floor = (0.40 - (sens / 100.0) * 0.25).clamp(0.15, 0.50);
+                        (s.wakeword_active || (!s.settings.wake_word_mode.eq_ignore_ascii_case("Off") && !s.settings.wake_word_mode.trim().is_empty()))
+                            && confidence >= floor
+                    };
+                    if !allowed {
+                        info!(
+                            "Wakeword trigger ignored — background wake not enabled or confidence too low (confidence {:.3})",
+                            confidence
+                        );
+                        continue;
+                    }
                     #[cfg(feature = "audio-capture")]
                     {
-                        // If the background wakeword service fired while the
-                        // foreground mic wasn't running (widget was hidden),
-                        // open it now so the audio pipeline can capture the
-                        // user's response.
                         let _ = audio_control_tx.send(AudioControlCommand::Open {
                             audio_tx: audio_tx.clone(),
+                            ptt_mode: false,
                         });
                     }
                     let mut s = state.lock().unwrap();
                     s.wakeword_confidence = confidence;
-                    s.mode = AppMode::WakewordListening;
-                    s.status_message = "Wakeword detected!".into();
+                    s.mode = AppMode::Recording;
+                    s.status_message = "Listening...".into();
                     s.widget_visible = true;
-                    info!("Wakeword triggered with confidence {:.3}", confidence);
+                    info!("Wakeword triggered with confidence {:.3} -> Mode::Recording (VAD auto-finalize)", confidence);
+                }
+                OrchestratorCommand::TransientStart(kind) => {
+                    // Clap gate: fires only when the clap action is Start.
+                    // Independent of wakewords, so claps work with wakewords
+                    // fully disabled.
+                    let allowed = state
+                        .lock()
+                        .map(|s| {
+                            s.settings.transient_action
+                                == crate::audio::transient::TRANSIENT_START
+                        })
+                        .unwrap_or(false);
+                    if !allowed {
+                        info!(
+                            "Acoustic {} ignored — transient action is not Start",
+                            kind
+                        );
+                        continue;
+                    }
+                    #[cfg(feature = "audio-capture")]
+                    {
+                        let _ = audio_control_tx.send(AudioControlCommand::Open {
+                            audio_tx: audio_tx.clone(),
+                            ptt_mode: false,
+                        });
+                    }
+                    let mut s = state.lock().unwrap();
+                    s.wakeword_confidence = 1.0;
+                    s.mode = AppMode::Recording;
+                    s.status_message = "Listening...".into();
+                    s.widget_visible = true;
+                    info!("Acoustic {} → start dictation (Mode::Recording)", kind);
                 }
                 OrchestratorCommand::SelectModel(idx) => {
                     let mut s = state.lock().unwrap();
                     if idx < s.model_entries.len() {
                         s.selected_model = idx;
                         let name = s.model_entries[idx].name.clone();
+                        // Resync language: keep it only if the new model
+                        // supports it, else fall back to its default.
+                        let langs = s.model_entries[idx].languages.clone();
+                        if !langs.iter().any(|l| l == &s.selected_language) {
+                            s.selected_language =
+                                langs.into_iter().next().unwrap_or_else(|| "Auto".to_string());
+                        }
+                        s.settings.selected_model = name.clone();
+                        s.settings.selected_language = s.selected_language.clone();
+                        if let Err(e) = s.settings.save_all() {
+                            warn!("Failed to persist model selection: {}", e);
+                        }
                         s.status_message = format!("Selected: {}", name);
-                        info!("Model selected: {}", name);
+                        info!("Model selected: {} ({})", name, s.selected_language.clone());
+                    }
+                }
+                OrchestratorCommand::SelectLanguage(lang) => {
+                    let mut s = state.lock().unwrap();
+                    let langs = s.model_entries[s.selected_model].languages.clone();
+                    if langs.iter().any(|l| l == &lang) {
+                        s.selected_language = lang.clone();
+                        s.settings.selected_language = lang.clone();
+                        if let Err(e) = s.settings.save_all() {
+                            warn!("Failed to persist language selection: {}", e);
+                        }
+                        s.status_message = format!("Language: {}", lang);
+                        info!("Language selected: {}", lang);
+                        // Language changes CPU scoring (multilingual bonus).
+                        refresh_recommendation(&mut s);
+                    } else {
+                        warn!("Language '{}' not supported by current model", lang);
+                    }
+                }
+                OrchestratorCommand::SelectMicrophone(name) => {
+                    {
+                        let mut s = state.lock().unwrap();
+                        s.settings.selected_microphone = name.clone();
+                        if let Err(e) = s.settings.save_all() {
+                            warn!("Failed to persist microphone selection: {}", e);
+                        }
+                        s.status_message = if name.trim().is_empty() {
+                            "Microphone: System default".into()
+                        } else {
+                            format!("Microphone: {}", name.trim())
+                        };
+                    }
+                    info!("Microphone selected: {:?}", name);
+                    // A live stream keeps the OLD device until reopened:
+                    // bounce it so the new microphone takes over now.
+                    #[cfg(feature = "audio-capture")]
+                    {
+                        let reopen = state.lock().map(|s| s.mic_open).unwrap_or(false);
+                        if reopen {
+                            let _ = audio_control_tx.send(AudioControlCommand::Close);
+                            let _ = audio_control_tx.send(AudioControlCommand::Open {
+                                audio_tx: audio_tx.clone(),
+                                ptt_mode: true,
+                            });
+                        }
                     }
                 }
                 OrchestratorCommand::DownloadModel(idx) => {
+                    // Single-flight: a second tap while a model is downloading
+                    // just nudges the status line instead of interleaving two
+                    // writers on the same progress fields.
+                    let already: Option<String> = state
+                        .lock()
+                        .map(|s| {
+                            if s.is_downloading {
+                                Some(s.download_name.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(None);
+                    if let Some(active) = already {
+                        if let Ok(mut s) = state.lock() {
+                            s.status_message =
+                                format!("Already downloading {} — wait…", active);
+                            s.download_status = s.status_message.clone();
+                        }
+                        info!("DownloadModel ignored (busy with {})", active);
+                        continue;
+                    }
                     let desc = {
                         let s = state.lock().unwrap();
                         s.model_entries.get(idx).and_then(|e| {
@@ -524,11 +1084,28 @@ impl AppOrchestrator {
                     }
                 }
                 OrchestratorCommand::OffloadModel => {
-                    let mut s = state.lock().unwrap();
-                    s.model_offloaded = true;
-                    s.status_message = "Model offloaded".into();
-                    info!("Model offloaded");
-                    crate::models::engine::compact_working_set();
+                    // Fast return: the persistent workers (Parakeet/Nemotron) free
+                    // their models on a background thread so the command loop never
+                    // blocks on the JSON round-trip. One-shot CLIs (whisper/sherpa/
+                    // vosk) hold no persistent state — compact only. Same semantics
+                    // as before (model dropped, next turn reloads), just async so
+                    // offload feels as instant as the one-shot engines.
+                    {
+                        let mut s = state.lock().unwrap();
+                        s.model_offloaded = true;
+                        s.status_message = "Model offloaded (RAM released)".into();
+                        info!("Model offloaded (async worker release, incl. Photon)");
+                    }
+                    std::thread::Builder::new()
+                        .name("stt-offload".to_string())
+                        .spawn(|| {
+                            crate::models::engine::parakeet_unload();
+                            crate::models::engine::nemotron_unload();
+                            crate::models::engine::canary_unload();
+                            crate::models::engine::photon_unload();
+                            crate::models::engine::compact_working_set();
+                        })
+                        .ok();
                 }
                 OrchestratorCommand::ReloadModel => {
                     let mut s = state.lock().unwrap();
@@ -539,7 +1116,23 @@ impl AppOrchestrator {
                 OrchestratorCommand::ToggleWakeword(active) => {
                     let mut s = state.lock().unwrap();
                     s.wakeword_active = active;
-                    info!("Wakeword active: {}", active);
+                    s.settings.wake_word_mode = if active {
+                        "Always On".to_string()
+                    } else {
+                        "Off".to_string()
+                    };
+                    if let Err(e) = s.settings.save_all() {
+                        warn!("Failed to persist wakeword settings: {}", e);
+                    }
+                    info!("Wakeword active: {}, mode: {}", active, s.settings.wake_word_mode);
+                }
+                OrchestratorCommand::SetWakewordSensitivity(v) => {
+                    let mut s = state.lock().unwrap();
+                    s.settings.wakeword_sensitivity = v.clamp(0, 100);
+                    if let Err(e) = s.settings.save_all() {
+                        warn!("Failed to persist wakeword sensitivity: {}", e);
+                    }
+                    info!("Wakeword sensitivity: {}", s.settings.wakeword_sensitivity);
                 }
                 OrchestratorCommand::ShowWidget => {
                     let mut s = state.lock().unwrap();

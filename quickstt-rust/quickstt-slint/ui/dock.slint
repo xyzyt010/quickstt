@@ -1,0 +1,148 @@
+// Fullscreen docking overlay shown while the pill is REALLY dragged (never
+// on press — taps must not flash the screen).
+// Design: a light readable scrim + three EXACT ghost outlines, one per
+// station, drawn at the true dock footprints with the true gaps (bottom
+// mini 33x8, sides 9x34 at 6px/8px). The ghost nearest the cursor grows
+// into the TRUE expanded preview (bottom 240x82, sides 252x46) with an
+// eased morph on position+size+colour+radius plus a dark outline — what you
+// see is exactly where the pill will land and what it will look like.
+// Rust drives all rects (see layout_overlay) + active_dock; Slint animates
+// every transition so nothing ever pops.
+
+export component DockOverlay inherits Window {
+    title: "";
+    // Fullscreen size via live props + authoritative native set_size from
+    // Rust on every show (props alone do not resize the HWND).
+    in-out property <length> ov_w: 1920px;
+    in-out property <length> ov_h: 1080px;
+    width: ov_w;
+    height: ov_h;
+    background: transparent;
+    // Fullscreen click-through overlay: never an app window.
+    no-frame: true;
+    // Full-damage nudge: Rust flips this on every show. A re-show with
+    // identical rects otherwise damages nothing, leaving a stale/blank
+    // frame; the scrim background keys off it (two visually identical
+    // literals) to force a FULL repaint every show.
+    in-out property <bool> refresh_dark: false;
+
+    // Mini-footprint rects (pure lengths: int*length position math
+    // silently breaks, so Rust feeds floats here — see layout_overlay).
+    in property <length> dock0_x: 0px;
+    in property <length> dock0_y: 0px;
+    in property <length> dock1_x: 0px;
+    in property <length> dock1_y: 0px;
+    in property <length> dock2_x: 0px;
+    in property <length> dock2_y: 0px;
+    in property <length> dock0_w: 33px;
+    in property <length> dock0_h: 8px;
+    in property <length> dock1_w: 9px;
+    in property <length> dock1_h: 34px;
+    in property <length> dock2_w: 9px;
+    in property <length> dock2_h: 34px;
+    // Expanded-preview rects (same anchors, expanded footprints).
+    in property <length> dock0_ex: 0px;
+    in property <length> dock0_ey: 0px;
+    in property <length> dock1_ex: 0px;
+    in property <length> dock1_ey: 0px;
+    in property <length> dock2_ex: 0px;
+    in property <length> dock2_ey: 0px;
+    in property <length> dock0_ew: 240px;
+    in property <length> dock0_eh: 82px;
+    in property <length> dock1_ew: 252px;
+    in property <length> dock1_eh: 46px;
+    in property <length> dock2_ew: 252px;
+    in property <length> dock2_eh: 46px;
+    // -1 = none near, 0/1/2 = pill near that dock (preview it expanded).
+    in property <int> active_dock: -1;
+
+    // Light scrim: the desktop stays clearly readable through it. NOTE:
+    // Slint rgba() takes alpha as 0.0-1.0 (NOT 0-255) — anything above 1.0
+    // clamps to fully opaque, which is how this shade once shipped pitch
+    // black. ~45% black here: a proper dark preview scrim, still translucent
+    // enough to place the drop.
+    // Full-window scrim. NOTE: keep this a plain 0,0,100%,100% rect — an
+    // oversized bleed rect (negative x/y, parent size + N) was tried and
+    // SILENTLY DOES NOT PAINT on the software backend (shade vanished while
+    // hint+ghosts still rendered). Window-size mismatches are fixed in Rust
+    // (ov_w/ov_h + set_size at the show sites), never by oversizing here.
+    // Full-window scrim. Plain 0,0,100%,100% rect (an oversized bleed rect
+    // silently does not paint on the software backend). Background keys off
+    // refresh_dark (see above): literal ternary only, both branches ~45%.
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        background: refresh_dark ? rgba(0, 0, 0, 0.45) : rgba(1, 1, 1, 0.45);
+    }
+
+    // Hint line, top-centre.
+    Text {
+        x: 0px;
+        y: 48px;
+        width: parent.width;
+        text: "Release to dock";
+        color: rgba(255, 255, 255, 0.67);
+        font-size: 13px;
+        font-weight: 600;
+        horizontal-alignment: center;
+    }
+
+    // Station 0 — bottom. Idle: exact 33x8 mini ghost. Near: eases into the
+    // exact 240x82 expanded preview with a dark outline. Pure-length
+    // geometry: int*length position math silently yields broken rects, so
+    // all ghost geometry is <length> fed floats from Rust.
+    Rectangle {
+        x: active_dock == 0 ? dock0_ex : dock0_x;
+        y: active_dock == 0 ? dock0_ey : dock0_y;
+        width: active_dock == 0 ? dock0_ew : dock0_w;
+        height: active_dock == 0 ? dock0_eh : dock0_h;
+        animate x { duration: 150ms; easing: ease-out; }
+        animate y { duration: 150ms; easing: ease-out; }
+        animate width { duration: 150ms; easing: ease-out; }
+        animate height { duration: 150ms; easing: ease-out; }
+        animate background { duration: 150ms; easing: ease-out; }
+        animate border-radius { duration: 150ms; easing: ease-out; }
+        border-radius: active_dock == 0 ? 41px : 7px; // idle 14px tall, expanded 82px
+        background: active_dock == 0 ? rgba(255, 255, 255, 0.92) : rgba(255, 255, 255, 0.72);
+        border-width: active_dock == 0 ? 2px : 1px;
+        border-color: active_dock == 0 ? #000000 : #00000066;
+    }
+
+    // Station 1 — right.
+    Rectangle {
+        x: active_dock == 1 ? dock1_ex : dock1_x;
+        y: active_dock == 1 ? dock1_ey : dock1_y;
+        width: active_dock == 1 ? dock1_ew : dock1_w;
+        height: active_dock == 1 ? dock1_eh : dock1_h;
+        animate x { duration: 150ms; easing: ease-out; }
+        animate y { duration: 150ms; easing: ease-out; }
+        animate width { duration: 150ms; easing: ease-out; }
+        animate height { duration: 150ms; easing: ease-out; }
+        animate background { duration: 150ms; easing: ease-out; }
+        animate border-radius { duration: 150ms; easing: ease-out; }
+        border-radius: active_dock == 1 ? 23px : 29px; // idle 59px tall, expanded 46px
+        background: active_dock == 1 ? rgba(255, 255, 255, 0.92) : rgba(255, 255, 255, 0.72);
+        border-width: active_dock == 1 ? 2px : 1px;
+        border-color: active_dock == 1 ? #000000 : #00000066;
+    }
+
+    // Station 2 — left.
+    Rectangle {
+        x: active_dock == 2 ? dock2_ex : dock2_x;
+        y: active_dock == 2 ? dock2_ey : dock2_y;
+        width: active_dock == 2 ? dock2_ew : dock2_w;
+        height: active_dock == 2 ? dock2_eh : dock2_h;
+        animate x { duration: 150ms; easing: ease-out; }
+        animate y { duration: 150ms; easing: ease-out; }
+        animate width { duration: 150ms; easing: ease-out; }
+        animate height { duration: 150ms; easing: ease-out; }
+        animate background { duration: 150ms; easing: ease-out; }
+        animate border-radius { duration: 150ms; easing: ease-out; }
+        border-radius: active_dock == 2 ? 23px : 29px; // idle 59px tall, expanded 46px
+        background: active_dock == 2 ? rgba(255, 255, 255, 0.92) : rgba(255, 255, 255, 0.72);
+        border-width: active_dock == 2 ? 2px : 1px;
+        border-color: active_dock == 2 ? #000000 : #00000066;
+    }
+}

@@ -222,7 +222,10 @@ class PillWidget : public QWidget {
   Q_OBJECT
 
 public:
-  explicit PillWidget(QWidget *parent = nullptr);
+  // noTray: single-tray mode — the Slint app owns the only system-tray
+  // icon and manages this widget. Skips setupTray entirely (trayIcon /
+  // trayMenu stay null; every use site null-checks).
+  explicit PillWidget(bool noTray = false, QWidget *parent = nullptr);
   ~PillWidget();
   bool isAutoShowSuppressed() const { return m_temporarilySuppressAutoShow; }
 
@@ -244,6 +247,14 @@ protected:
 
 public slots:
   void centerOnScreen();
+  // Center only when never placed this run or currently off-screen —
+  // tray toggles must not yank a user-positioned pill back to top-center.
+  void ensureOnScreen();
+  // Full dismiss from an external trigger (Slint tray Hide, secondaries):
+  // suppress + sleep the backend + stop the turn + hide. A bare hide()
+  // left the engine transcribing, which is why Hide felt like it "didn't
+  // close".
+  void hideFromExternalTrigger();
   void openDashboard();
   void restoreFromExternalTrigger();
   void showMainWidgetExplicitly();
@@ -296,8 +307,14 @@ private:
 
   MainWindow *dashboard = nullptr;
 
-  QSystemTrayIcon *trayIcon;
-  QMenu *trayMenu;
+  QSystemTrayIcon *trayIcon = nullptr;
+  QMenu *trayMenu = nullptr;
+  bool m_noTray = false;
+  // Tray icon is static (app icon) — rebuild once and reuse. Re-rendering
+  // 8 SVG sizes + LoadImage + WM_SETICON on every mic toggle blocked the
+  // UI thread and made on/off feel sluggish.
+  bool m_trayIconCached = false;
+  QIcon m_cachedTrayIcon;
   QProcess *backendProcess;
   QTimer *blinkTimer;
   QTimer *backendHealthTimer;
@@ -306,9 +323,12 @@ private:
   int m_lastPartialLen = 0;
 
    bool isListening = false;
-  bool blinkState = false;
-  QPoint dragPos;
+  bool blinkState = false;  // True while the backend loads/offloads a model (STATE 3). Paints a small
+  // pulsing dot so load/offload is visible without any big overlay.
+  bool m_modelLoading = false;
+   QPoint dragPos;
   QRect waveRect;
+  bool m_placedOnce = false;
   QProgressBar *downloadProgressBar = nullptr;
 
   // Resizing State
@@ -363,7 +383,8 @@ private:
   QList<int> audioWaveform;
 
   void setupTray();
-  void updateTrayIcon();
+  void updateTrayIcon(bool force = false);
+  void applyDarkTrayMenu();
   void applyNativeWindowIcons();
   void checkStartup();
   void customResize(int w, int h, int r);
@@ -379,6 +400,16 @@ private:
   void attemptAutoReconnectAndroidTv();
   void suppressAutoShowBriefly(int durationMs = 2200);
   void showTransientStatus(const QString &text, int durationMs = 5000);
+  // "On with Widget" visibility sync: stand the background wake detector
+  // down while the widget is open, re-arm it once hidden. Always On / Off
+  // are left alone (the backend already handles them).
+  void syncWakeModeForVisibility(bool visible);
+#ifdef _WIN32
+  // Best-effort focus restore before typing: hands focus back to the window
+  // captured at mic/wake time. Returns true when an external window (not
+  // one of ours) holds focus afterwards. Never steals focus TO us.
+  bool tryRestoreTypingFocus();
+#endif
   void processRecognizedText(const QString &text, bool fromCloud);
   void setWidgetStatusText(const QString &text,
                            bool allowWhileListening = false);
@@ -408,6 +439,12 @@ private:
   // Streaming (Nemotron) main-pill paste-as-you-speak: text already typed
   // from committed STREAM_TEXT so FINAL only appends the remaining delta.
   QString m_streamTypedPrefix;
+#ifdef _WIN32
+  // Window that had focus before a mouse click on the pill started dictation.
+  // Focus is handed back on STATE 1 so SendInput types into the user's app
+  // instead of hitting the [UI-ONLY] gate. nullptr = nothing to restore.
+  HWND m_preListenFgWnd = nullptr;
+#endif
   bool m_smartLifeAutoRestoreAttempted = false;
   bool m_androidTvAutoRestoreAttempted = false;
   QTimer *m_ramCompactTimer = nullptr;

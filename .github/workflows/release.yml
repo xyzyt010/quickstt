@@ -55,7 +55,15 @@ jobs:
           cp -f target/release/parakeet_engine ../quickstt-rust/target/release/tools/parakeet/
           file ../quickstt-rust/target/release/tools/parakeet/parakeet_engine
       - name: Stage wakeword models for tarball
-        run: cp -r quickstt-rust/wakeword_models quickstt-rust/target/release/wakeword_models
+        run: |
+          mkdir -p quickstt-rust/target/release/wakeword_models
+          cp -f wakeword_models/hey_jarvis_v0.1.onnx wakeword_models/alexa_v0.1.onnx quickstt-rust/target/release/wakeword_models/
+          cp -r quickstt-rust/wakeword_models quickstt-rust/target/release/wakeword_models_legacy || true
+      - name: Stage Photon worker (Parakeet Ultra/Redux runtime)
+        run: |
+          mkdir -p quickstt-rust/target/release/tools/photon
+          cp -f quickstt-rust/tools/photon/photon_worker.py quickstt-rust/target/release/tools/photon/
+          ls -lh quickstt-rust/target/release/tools/photon/
       - name: Build transcribe.cpp (Nemotron GGUF engine)
         run: |
           git clone --depth 1 https://github.com/handy-computer/transcribe.cpp /tmp/tcpp
@@ -76,7 +84,7 @@ jobs:
       - name: cargo deb
         working-directory: quickstt-rust
         run: |
-          cargo deb --no-build -p quickstt-gui
+          cargo deb --no-build -p quickstt-slint
           ls -lh target/debian/*.deb
           mkdir -p dist
           cp -f target/debian/*.deb dist/
@@ -86,13 +94,21 @@ jobs:
         working-directory: quickstt-rust
         run: |
           mkdir -p dist
-          BIN="target/release/QuickSTT"
+          BIN="target/release/quickstt-slint"
           STT="target/release/stt_service"
           # linuxdeploy requires the icon basename to match desktop Icon= entry
           cp -f assets/icon_app.png assets/quickstt.png
           EXTRA=""
           [[ -f "$STT" ]] && EXTRA="-e $STT"
           linuxdeploy --appdir dist/AppDir -e "$BIN" $EXTRA -d assets/quickstt.desktop -i assets/quickstt.png --plugin gtk --output appimage 2>&1 | tail -n 40 || true
+          # Bundle the OWW wakeword heads next to the binary inside the AppDir
+          # (the app's exe-adjacent lookup finds them there on first run).
+          mkdir -p dist/AppDir/usr/bin/wakeword_models
+          cp -f target/release/wakeword_models/*.onnx dist/AppDir/usr/bin/wakeword_models/ 2>/dev/null || true
+          # Bundle the Photon worker the same way (deb covers it via assets;
+          # AppImage/tarball need it next to the binary).
+          mkdir -p dist/AppDir/usr/bin/tools/photon
+          cp -f target/release/tools/photon/photon_worker.py dist/AppDir/usr/bin/tools/photon/ 2>/dev/null || true
           if ! ls dist/*.AppImage 1>/dev/null 2>&1; then
             echo "AppImage failed — building plain tarball payload"
             rm -rf dist/payload && mkdir -p dist/payload
@@ -150,7 +166,7 @@ jobs:
           modules: 'qtmultimedia'
       - name: Cargo build (Rust GUI)
         working-directory: quickstt-rust
-        run: cargo build -p quickstt-gui --release
+        run: cargo build -p quickstt-slint --release
       - name: CMake Configure
         shell: pwsh
         run: |

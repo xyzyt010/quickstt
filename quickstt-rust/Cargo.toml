@@ -1,9 +1,13 @@
 [workspace]
-members = ["quickstt-core", "quickstt-gui", "quickstt-ipc", "quickstt-slint"]
+# quickstt-gui (original egui widget) is intentionally NOT a member: its code
+# stays in the repo for reference, but the Slint widget is the product GUI.
+# Build it explicitly if ever needed: cargo build -p quickstt-gui --manifest-path quickstt-gui/Cargo.toml
+members = ["quickstt-core", "quickstt-ipc", "quickstt-slint"]
+exclude = ["quickstt-gui"]
 resolver = "2"
 
 [workspace.package]
-version = "2.0.0-alpha.11"
+version = "2.0.0-alpha.13"
 edition = "2021"
 authors = ["QuickSTT Team <support@quickstt.com>"]
 license = "MIT"
@@ -19,12 +23,15 @@ windows = { version = "0.52", features = [
     "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Imaging",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
     "Win32_UI_Shell",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Threading",
     "Win32_System_Performance",
     "Win32_System_Memory",
+    "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
+    "Win32_System_LibraryLoader",
     "Win32_Storage_FileSystem",
     "Win32_Security",
     "Win32_System_Registry",
@@ -52,6 +59,11 @@ hound = "3.5"
 # ML Dependencies — optional at crate level
 livekit-wakeword = "0.1"
 whisper-rs = "0.11"
+# Direct ort access for the bundled-phrase OWW runtime (same tract backend
+# livekit uses; versions pinned to livekit-wakeword 0.1.3's tree).
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["ndarray", "std"] }
+ort-tract = "=0.2.0+0.22"
+ndarray = "0.17"
 
 # Audio Dependencies — optional at crate level
 cpal = "0.15"
@@ -61,7 +73,10 @@ dasp = { version = "0.11", features = ["signal", "ring_buffer"] }
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# unwind (not abort): the widget's 50ms tick runs inside catch_unwind and all
+# hot locks self-heal via mlock — abort would turn any stray panic into an
+# instant silent death with no log. Costs ~1MB of unwind tables; worth it.
+panic = "unwind"
 strip = true
 overflow-checks = false
 

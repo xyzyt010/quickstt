@@ -1,111 +1,1381 @@
-import { Button, StandardTableView, TabWidget, CheckBox, ComboBox, LineEdit, Slider } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, Slider, ScrollView } from "std-widgets.slint";
+
+// Model card for the hardware-aware catalog (image-inspired): name, blurb,
+// badge (Active/Recommended/Legacy/"", pink pills), accuracy/speed 0-100,
+// languages label, size label, installed flag, entry index for callbacks.
+export struct ModelCard {
+    name: string,
+    blurb: string,
+    badge: string,
+    accuracy: int,
+    speed: int,
+    langs: string,
+    size: string,
+    installed: bool,
+    is_active: bool,
+    index: int,
+    downloading: bool,
+}
+
+// Modern Dark Theme QuickSTT Control Center Dashboard
+// Rendered via DirectWrite / Direct2D / D3D11 on Windows, fully native Slint.
 
 export component DashboardWidget inherits Window {
-    title: "QuickSTT Dashboard";
-    width: 720px;
-    height: 540px;
-    background: #111418;
+    title: "QuickSTT Control Center";
+    width: 860px;
+    height: 620px;
+    background: #0D1117;
 
     in-out property <int> active-tab: 0;
-    
-    // Some mock data properties that rust will fill
-    in property <[string]> models: ["base.en", "small", "medium"];
+
+    // Model & Language State
+    in property <[string]> models: ["Vosk Small EN (50M)", "NVIDIA Parakeet TDT 0.6B", "Nemotron 3.5 Streaming", "Vosk Large EN (US)", "Vosk Small Indian EN", "Vosk Small German"];
     in property <int> selected-model: 0;
-    
+    in property <[string]> languages: ["Auto", "English", "German"];
+    in property <int> selected-language: 0;
+    in property <string> models-info: "Local, ultra-fast neural speech recognition. Runs 100% offline.";
+
+    // Download & Progress Bar
+    in property <bool> is-downloading: false;
+    in property <int> download-progress: 0;
+    in property <string> download-status: "";
+    in property <string> download-speed: "";
+    in property <string> download-bytes: "";
+    in property <string> download-file: "";
+
+    // Style Properties
+    in property <int> ui-opacity: 100;
+    in property <int> ui-pill-radius: 25;
+    in property <bool> show-waveform: true;
+    in property <int> waveform-sensitivity: 5;
+    in property <int> tray-icon-size: 32;
+
+    // Wakeword & VAD Properties
+    in property <bool> wakeword-enabled: false;
+    in property <int> wakeword-sensitivity: 50;
+    // Exact enforced trigger rule, pushed from Rust (threshold × 3 hits).
+    in property <string> wakeword-threshold-text: "";
+    in property <int> vad-sensitivity: 50;
+    in property <int> live-audio-level: 0;
+    in property <bool> ww-hey-jarvis: true;
+    in property <bool> ww-jarvis: true;
+    in property <bool> ww-alexa: true;
+    in property <bool> ww-agent: true;
+    in property <bool> ww-hem: true;
+    // Clap action (0 = Start Dictation, 1 = Stop Dictation, 2 = Disabled).
+    // Active (Start) out of the box.
+    in property <int> transient-action: 0;
+
+    // General & System Settings
+    in property <bool> start-with-windows: false;
+    in property <bool> start-minimized: true;
+    in property <bool> lrc-enabled: true;
+    in property <bool> auto-stop-silence: false;
+    in property <int> silence-duration: 8;
+    in property <bool> auto-offload: true;
+    in property <int> offload-seconds: 15;
+    in property <bool> ctrl-space-enabled: true;
+    in property <int> ctrl-space-mode: 0;
+    in property <int> ctrl-space-output: 0;
+    in property <string> recording-dir: "C:\\Users\\hemsh_sfya5gq\\Recordings";
+    in property <string> app-version: "2.0.0-alpha.13 (Rust & Slint Edition)";
+
+    // Callbacks
     callback select-model(string);
+    callback select-language(string);
+    callback set-wakeword-enabled(bool);
+    callback set-wakeword-sensitivity(int);
+    callback set-vad-sensitivity(int);
+    callback set-ui-opacity(int);
+    callback set-ui-pill-radius(int);
+    callback set-start-with-windows(bool);
+    callback set-start-minimized(bool);
+    callback set-lrc-enabled(bool);
+    callback set-auto-stop-silence(bool);
+    callback set-silence-duration(int);
+    callback set-auto-offload(bool);
+    callback set-offload-seconds(int);
+    callback set-ctrl-space-enabled(bool);
+    callback set-ctrl-space-mode(int);
+    callback set-ctrl-space-output(int);
+    callback set-show-waveform(bool);
+    callback set-waveform-sensitivity(int);
+    callback set-tray-icon-size(int);
+    callback toggle-wakeword-phrase(string, bool);
+    callback set-transient-action(int);
+    callback download-catalog-model(int);
+    callback uninstall-catalog-model(int);
+    callback select-catalog-model(int);
+    callback use-recommended-model();
+    callback set-catalog-search(string);
+    callback set-catalog-lang-filter(string);
+    callback browse-recording-dir();
+    callback check-updates();
     callback close-dashboard();
 
-    VerticalLayout {
-        padding: 16px;
-        spacing: 12px;
-        
-        Text {
-            text: "QuickSTT Settings";
-            font-size: 20px;
-            font-weight: 700;
-            color: #E2E8F0;
-        }
+    // Hardware-aware catalog (dynamic cards, image-inspired)
+    in property <[ModelCard]> catalog: [];
+    in property <[string]> catalog-langs: ["All Languages"];
+    in property <int> catalog-lang-idx: 0;
+    in property <string> catalog-search: "";
+    in property <string> recommend-name: "";
+    in property <string> recommend-reason: "";
+    in property <string> hardware-info: "";
 
-        TabWidget {
-            Tab {
-                title: "Models";
+    // Borderless Window Dragging
+    callback drag_start();
+    callback drag_moved();
+    callback drag_end();
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+
+        // ══════════════════════════════════════════════════════════════════════════
+        // Main Body: Left Sidebar Navigation + Right Content Canvas
+        // ══════════════════════════════════════════════════════════════════════════
+        HorizontalLayout {
+            spacing: 0px;
+
+            // ── Left Navigation Sidebar ──
+            Rectangle {
+                width: 200px;
+                background: #111418;
+                border-width: 1px;
+                border-color: #21262D;
+
                 VerticalLayout {
-                    spacing: 16px;
-                    padding-top: 16px;
-                    Text { text: "Manage local and cloud STT models."; color: #94A3B8; }
-                    
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Text { text: "Selected Model:"; color: white; vertical-alignment: center; }
-                        ComboBox {
-                            model: root.models;
-                            current-index: root.selected-model;
-                            selected(val) => { root.select-model(val); }
-                        }
-                    }
-                    
-                    // placeholder list
+                    padding: 12px;
+                    spacing: 6px;
+
+                    // Navigation Item 0: General
                     Rectangle {
-                        background: #1E293B;
+                        height: 40px;
                         border-radius: 8px;
-                        VerticalLayout {
-                            padding: 8px;
-                            Text { text: "Installed Models List here..."; color: #94A3B8; }
+                        background: root.active-tab == 0 ? #21262D : (tab0_touch.has-hover ? #161B22 : transparent);
+                        border-width: root.active-tab == 0 ? 1px : 0px;
+                        border-color: #3898FF;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            spacing: 10px;
+                            Text {
+                                text: "⚙";
+                                font-size: 15px;
+                                color: root.active-tab == 0 ? #58A6FF : #8B949E;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "General";
+                                font-size: 13px;
+                                font-weight: root.active-tab == 0 ? 700 : 500;
+                                color: root.active-tab == 0 ? #F0F6FC : #8B949E;
+                                vertical-alignment: center;
+                            }
+                        }
+                        tab0_touch := TouchArea {
+                            clicked => { root.active-tab = 0; }
+                            mouse-cursor: pointer;
+                        }
+                    }
+
+                    // Navigation Item 1: Models
+                    Rectangle {
+                        height: 40px;
+                        border-radius: 8px;
+                        background: root.active-tab == 1 ? #21262D : (tab1_touch.has-hover ? #161B22 : transparent);
+                        border-width: root.active-tab == 1 ? 1px : 0px;
+                        border-color: #3898FF;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            spacing: 10px;
+                            Text {
+                                text: "🎙";
+                                font-size: 15px;
+                                color: root.active-tab == 1 ? #58A6FF : #8B949E;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Speech Models";
+                                font-size: 13px;
+                                font-weight: root.active-tab == 1 ? 700 : 500;
+                                color: root.active-tab == 1 ? #F0F6FC : #8B949E;
+                                vertical-alignment: center;
+                            }
+                        }
+                        tab1_touch := TouchArea {
+                            clicked => { root.active-tab = 1; }
+                            mouse-cursor: pointer;
+                        }
+                    }
+
+                    // Navigation Item 2: Style
+                    Rectangle {
+                        height: 40px;
+                        border-radius: 8px;
+                        background: root.active-tab == 2 ? #21262D : (tab2_touch.has-hover ? #161B22 : transparent);
+                        border-width: root.active-tab == 2 ? 1px : 0px;
+                        border-color: #3898FF;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            spacing: 10px;
+                            Text {
+                                text: "🎨";
+                                font-size: 15px;
+                                color: root.active-tab == 2 ? #58A6FF : #8B949E;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Widget Style";
+                                font-size: 13px;
+                                font-weight: root.active-tab == 2 ? 700 : 500;
+                                color: root.active-tab == 2 ? #F0F6FC : #8B949E;
+                                vertical-alignment: center;
+                            }
+                        }
+                        tab2_touch := TouchArea {
+                            clicked => { root.active-tab = 2; }
+                            mouse-cursor: pointer;
+                        }
+                    }
+
+                    // Navigation Item 3: Wakewords
+                    Rectangle {
+                        height: 40px;
+                        border-radius: 8px;
+                        background: root.active-tab == 3 ? #21262D : (tab3_touch.has-hover ? #161B22 : transparent);
+                        border-width: root.active-tab == 3 ? 1px : 0px;
+                        border-color: #3898FF;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            spacing: 10px;
+                            Text {
+                                text: "👂";
+                                font-size: 15px;
+                                color: root.active-tab == 3 ? #58A6FF : #8B949E;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Wake Words & VAD";
+                                font-size: 13px;
+                                font-weight: root.active-tab == 3 ? 700 : 500;
+                                color: root.active-tab == 3 ? #F0F6FC : #8B949E;
+                                vertical-alignment: center;
+                            }
+                        }
+                        tab3_touch := TouchArea {
+                            clicked => { root.active-tab = 3; }
+                            mouse-cursor: pointer;
+                        }
+                    }
+
+                    // Navigation Item 4: System & Updates
+                    Rectangle {
+                        height: 40px;
+                        border-radius: 8px;
+                        background: root.active-tab == 4 ? #21262D : (tab4_touch.has-hover ? #161B22 : transparent);
+                        border-width: root.active-tab == 4 ? 1px : 0px;
+                        border-color: #3898FF;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            spacing: 10px;
+                            Text {
+                                text: "🔄";
+                                font-size: 15px;
+                                color: root.active-tab == 4 ? #58A6FF : #8B949E;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "System & Info";
+                                font-size: 13px;
+                                font-weight: root.active-tab == 4 ? 700 : 500;
+                                color: root.active-tab == 4 ? #F0F6FC : #8B949E;
+                                vertical-alignment: center;
+                            }
+                        }
+                        tab4_touch := TouchArea {
+                            clicked => { root.active-tab = 4; }
+                            mouse-cursor: pointer;
+                        }
+                    }
+
+                    // Spacer
+                    Rectangle { }
+
+                    // Status Pill at Bottom of Sidebar
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: #161B22;
+                        border-width: 1px;
+                        border-color: #30363D;
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: #2EA043;
+                                y: 14px;
+                            }
+                            Text {
+                                text: "Offline Ready";
+                                font-size: 11px;
+                                color: #8B949E;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                 }
             }
-            Tab {
-                title: "GPU";
-                VerticalLayout {
-                    padding-top: 16px;
-                    Text { text: "Hardware Acceleration Settings"; color: white; }
-                }
-            }
-            Tab {
-                title: "SmartHome";
-                VerticalLayout {
-                    padding-top: 16px;
-                    Text { text: "Smart Home Integrations (Local/Tuya)"; color: white; }
-                }
-            }
-            Tab {
-                title: "Style";
-                VerticalLayout {
-                    spacing: 16px;
-                    padding-top: 16px;
-                    Text { text: "Appearance Settings"; color: white; }
-                    HorizontalLayout {
-                        Text { text: "Widget Opacity"; color: white; }
-                        Slider { minimum: 10; maximum: 100; value: 80; }
+
+            // ── Right Main Content Area ──
+            Rectangle {
+                background: #0D1117;
+
+                ScrollView {
+                    VerticalLayout {
+                        alignment: start;
+
+                        // ══════════════════════════════════════════════════════════════════
+                        // TAB 0: GENERAL SETTINGS
+                        // ══════════════════════════════════════════════════════════════════
+                        if root.active-tab == 0 : VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+
+                        Text {
+                            text: "General Configuration";
+                            font-size: 18px;
+                            font-weight: 700;
+                            color: #F0F6FC;
+                        }
+                        Text {
+                            text: "Configure Windows integration, silence auto-commit, memory auto-offload, and recording output.";
+                            font-size: 12px;
+                            color: #8B949E;
+                        }
+
+                        // Group 1: Startup & Behavior Card
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                Text { text: "System Startup & Behavior"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+
+                                CheckBox {
+                                    text: "Start with Windows on logon";
+                                    checked: root.start-with-windows;
+                                    toggled => { root.set-start-with-windows(self.checked); }
+                                }
+                                CheckBox {
+                                    text: "Start minimized to system tray";
+                                    checked: root.start-minimized;
+                                    toggled => { root.set-start-minimized(self.checked); }
+                                }
+                                CheckBox {
+                                    text: "Export synchronized .lrc (lyrics/timestamp) files with recordings";
+                                    checked: root.lrc-enabled;
+                                    toggled => { root.set-lrc-enabled(self.checked); }
+                                }
+                            }
+                        }
+
+                        // Group 2: Silence Detection Auto-Stop
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                Text { text: "Inactivity & Silence Auto-Stop"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+
+                                CheckBox {
+                                    text: "Automatically stop and commit transcription when silence is detected";
+                                    checked: root.auto-stop-silence;
+                                    toggled => { root.set-auto-stop-silence(self.checked); }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text {
+                                        text: "Silence threshold duration:";
+                                        font-size: 13px;
+                                        color: #F0F6FC;
+                                        vertical-alignment: center;
+                                        min-width: 180px;
+                                    }
+                                    Slider {
+                                        minimum: 1;
+                                        maximum: 60;
+                                        value: root.silence-duration;
+                                        enabled: root.auto-stop-silence;
+                                        changed(val) => { root.set-silence-duration(val); }
+                                    }
+                                    Text {
+                                        text: root.silence-duration + " sec";
+                                        font-size: 13px;
+                                        color: #58A6FF;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        min-width: 55px;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Group 3: Memory Auto-Offload
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                Text { text: "Memory Management & Model Offloading"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+
+                                CheckBox {
+                                    text: "Auto-offload speech model when widget is idle (Saves RAM, maintains < 5 MB idle footprint)";
+                                    checked: root.auto-offload;
+                                    toggled => { root.set-auto-offload(self.checked); }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text {
+                                        text: "Offload model after inactivity:";
+                                        font-size: 13px;
+                                        color: #F0F6FC;
+                                        vertical-alignment: center;
+                                        min-width: 180px;
+                                    }
+                                    Slider {
+                                        minimum: 5;
+                                        maximum: 180;
+                                        value: root.offload-seconds;
+                                        enabled: root.auto-offload;
+                                        changed(val) => { root.set-offload-seconds(val); }
+                                    }
+                                    Text {
+                                        text: root.offload-seconds + " sec";
+                                        font-size: 13px;
+                                        color: #58A6FF;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        min-width: 55px;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Group 4: Quick Transcription (Ctrl+Space)
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                Text { text: "Quick Transcription Hotkey (Ctrl+Space)"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+
+                                CheckBox {
+                                    text: "Enable global Ctrl+Space dictation overlay";
+                                    checked: root.ctrl-space-enabled;
+                                    toggled => { root.set-ctrl-space-enabled(self.checked); }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 16px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text { text: "Trigger Mode:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; }
+                                        ComboBox {
+                                            model: ["Push-to-Talk (Hold)", "Toggle (Press on/off)"];
+                                            current-index: root.ctrl-space-mode;
+                                            selected(v) => { root.set-ctrl-space-mode(self.current-index); }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text { text: "Output Target:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; }
+                                        ComboBox {
+                                            model: ["Type into active app", "Copy to clipboard", "Show only"];
+                                            current-index: root.ctrl-space-output;
+                                            selected(v) => { root.set-ctrl-space-output(self.current-index); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
-                    HorizontalLayout {
-                        Text { text: "Pill Radius"; color: white; }
-                        Slider { minimum: 0; maximum: 32; value: 16; }
+
+                    // ══════════════════════════════════════════════════════════════════
+                    // TAB 1: SPEECH MODELS & DOWNLOAD PROGRESS
+                    // ══════════════════════════════════════════════════════════════════
+                    if root.active-tab == 1 : VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+
+                        Text {
+                            text: "Speech Recognition Models";
+                            font-size: 18px;
+                            font-weight: 700;
+                            color: #F0F6FC;
+                        }
+                        Text {
+                            text: "Select your active transcription engine or download additional neural acoustic models.";
+                            font-size: 12px;
+                            color: #8B949E;
+                        }
+
+                        // Dynamic Download Progress Bar Card (Shows whenever downloading)
+                        if root.is-downloading || root.download-progress > 0 : Rectangle {
+                            background: #1C2128;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #3898FF;
+
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 8px;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text {
+                                        text: root.download-status != "" ? root.download-status : "Downloading Speech Model…";
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: #58A6FF;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.download-progress + "%";
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        color: #F0F6FC;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Throughput row: file • bytes • MB/s (Rust-preformatted).
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text {
+                                        text: root.download-file;
+                                        font-size: 11px;
+                                        color: #8B949E;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: (root.download-bytes != "" && root.download-speed != "") ? (root.download-bytes + " • " + root.download-speed) : root.download-bytes;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        color: #8B949E;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Modern Progress Track
+                                Rectangle {
+                                    height: 8px;
+                                    border-radius: 4px;
+                                    background: #21262D;
+
+                                    Rectangle {
+                                        x: 0px;
+                                        y: 0px;
+                                        height: 8px;
+                                        width: (parent.width * root.download-progress / 100);
+                                        border-radius: 4px;
+                                        background: #3898FF;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Active Model & Language Selector Card
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 14px;
+
+                                Text { text: "Active Recognition Engine"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text { text: "Selected Model:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 110px; }
+                                    ComboBox {
+                                        model: root.models;
+                                        current-index: root.selected-model;
+                                        selected(v) => { root.select-model(v); }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text { text: "Active Language:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 110px; }
+                                    ComboBox {
+                                        model: root.languages;
+                                        current-index: root.selected-language;
+                                        selected(v) => { root.select-language(v); }
+                                    }
+                                }
+
+                                Rectangle {
+                                    background: #21262D;
+                                    border-radius: 6px;
+                                    VerticalLayout {
+                                        padding: 10px;
+                                        Text {
+                                            text: root.models-info;
+                                            font-size: 12px;
+                                            color: #8B949E;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Model Catalog Overview Card
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                Text { text: "Transcription Models"; font-size: 16px; font-weight: 700; color: #F0F6FC; }
+
+                                Text {
+                                    text: "Select a transcription model or download additional models. Different models offer varying levels of accuracy and speed. The list is filtered for your hardware — search or filter by language anytime.";
+                                    font-size: 12px;
+                                    color: #8B949E;
+                                    wrap: word-wrap;
+                                }
+
+                                // ── Dynamic hardware-aware catalog (image-inspired) ──
+                                // Search + language filter row
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    LineEdit {
+                                        text: root.catalog-search;
+                                        placeholder-text: "Search models by name…";
+                                        edited(t) => { root.set-catalog-search(t); }
+                                    }
+                                    ComboBox {
+                                        model: root.catalog-langs;
+                                        current-index: root.catalog-lang-idx;
+                                        selected(v) => { root.set-catalog-lang-filter(v); }
+                                    }
+                                }
+
+                                // Recommendation banner (smart algorithm)
+                                if root.recommend-name != "": Rectangle {
+                                    background: #2A1F33;
+                                    border-radius: 10px;
+                                    border-width: 1px;
+                                    border-color: #F778BA;
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 6px;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text { text: "Recommended:"; font-size: 12px; font-weight: 700; color: #F778BA; vertical-alignment: center; }
+                                            Text { text: root.recommend-name; font-size: 13px; font-weight: 700; color: #F0F6FC; vertical-alignment: center; }
+                                            Rectangle {
+                                                width: 110px; height: 24px; border-radius: 12px; background: #F778BA;
+                                                Text { text: "Use it"; font-size: 11px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                                TouchArea {
+                                                    x: 0px;
+                                                    y: 0px;
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                    clicked => { root.use-recommended-model(); }
+                                                    mouse-cursor: pointer;
+                                                }
+                                            }
+                                        }
+                                        Text { text: root.recommend-reason; font-size: 11px; color: #D8B4C8; wrap: word-wrap; }
+                                        Text { text: root.hardware-info; font-size: 11px; color: #8B949E; wrap: word-wrap; }
+                                    }
+                                }
+
+                                Text { text: "Downloaded Models"; font-size: 13px; font-weight: 700; color: #F0F6FC; }
+                                for card in root.catalog: Rectangle {
+                                    height: card.installed ? 96px : 0px;
+                                    visible: card.installed;
+                                    border-radius: 10px;
+                                    background: card.is-active ? #2A1F33 : #21262D;
+                                    border-width: 1px;
+                                    border-color: card.is-active ? #F778BA : #30363D;
+                                    // Card tap = select model. Declared FIRST so it
+                                    // stays beneath the Delete button above.
+                                    TouchArea {
+                                        x: 0px;
+                                        y: 0px;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        clicked => { root.select-catalog-model(card.index); }
+                                        mouse-cursor: pointer;
+                                    }
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 4px;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            alignment: space-between;
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                Text { text: card.name; font-size: 13px; font-weight: 700; color: #F0F6FC; vertical-alignment: center; }
+                                                if card.badge != "": Rectangle {
+                                                    width: 96px; height: 22px; border-radius: 11px;
+                                                    background: card.badge == "Legacy" ? #30363D : #F778BA;
+                                                    Text { text: card.badge; font-size: 11px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                                }
+                                            }
+                                            HorizontalLayout {
+                                                spacing: 12px;
+                                                VerticalLayout {
+                                                    spacing: 2px;
+                                                    alignment: center;
+                                                    Text { text: "accuracy"; font-size: 10px; color: #8B949E; }
+                                                    Rectangle {
+                                                        width: 90px; height: 6px; border-radius: 3px; background: #30363D;
+                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.accuracy / 100; border-radius: 3px; background: #F778BA; }
+                                                    }
+                                                }
+                                                VerticalLayout {
+                                                    spacing: 2px;
+                                                    alignment: center;
+                                                    Text { text: "speed"; font-size: 10px; color: #8B949E; }
+                                                    Rectangle {
+                                                        width: 90px; height: 6px; border-radius: 3px; background: #30363D;
+                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.speed / 100; border-radius: 3px; background: #F778BA; }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Text { text: card.blurb; font-size: 12px; color: #C9D1D9; }
+                                        HorizontalLayout {
+                                            alignment: space-between;
+                                            Text { text: card.langs; font-size: 11px; color: #8B949E; vertical-alignment: center; }
+                                            // Explicit-size delete button: guaranteed hit area.
+                                            Rectangle {
+                                                width: 150px;
+                                                height: 26px;
+                                                border-radius: 6px;
+                                                background: del_hover.has-hover ? #2A1F33 : transparent;
+                                                HorizontalLayout {
+                                                    padding-left: 8px;
+                                                    padding-right: 8px;
+                                                    spacing: 10px;
+                                                    alignment: end;
+                                                    Text { text: card.size; font-size: 11px; color: #8B949E; vertical-alignment: center; }
+                                                    Text { text: "Delete"; font-size: 11px; font-weight: 700; color: #F778BA; vertical-alignment: center; }
+                                                }
+                                                del_hover := TouchArea {
+                                                    x: 0px;
+                                                    y: 0px;
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                    clicked => { root.uninstall-catalog-model(card.index); }
+                                                    mouse-cursor: pointer;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Text { text: "Available to Download"; font-size: 13px; font-weight: 700; color: #F0F6FC; }
+                                for card in root.catalog: Rectangle {
+                                    height: !card.installed ? 96px : 0px;
+                                    visible: !card.installed;
+                                    border-radius: 10px;
+                                    background: #21262D;
+                                    border-width: 1px;
+                                    border-color: #30363D;
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 4px;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            alignment: space-between;
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                Text { text: card.name; font-size: 13px; font-weight: 700; color: #F0F6FC; vertical-alignment: center; }
+                                                if card.badge != "": Rectangle {
+                                                    width: 110px; height: 22px; border-radius: 11px; background: #F778BA;
+                                                    Text { text: card.badge; font-size: 11px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                                }
+                                            }
+                                            HorizontalLayout {
+                                                spacing: 12px;
+                                                VerticalLayout {
+                                                    spacing: 2px;
+                                                    alignment: center;
+                                                    Text { text: "accuracy"; font-size: 10px; color: #8B949E; }
+                                                    Rectangle {
+                                                        width: 90px; height: 6px; border-radius: 3px; background: #30363D;
+                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.accuracy / 100; border-radius: 3px; background: #F778BA; }
+                                                    }
+                                                }
+                                                VerticalLayout {
+                                                    spacing: 2px;
+                                                    alignment: center;
+                                                    Text { text: "speed"; font-size: 10px; color: #8B949E; }
+                                                    Rectangle {
+                                                        width: 90px; height: 6px; border-radius: 3px; background: #30363D;
+                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.speed / 100; border-radius: 3px; background: #F778BA; }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Text { text: card.blurb; font-size: 12px; color: #C9D1D9; }
+                                        HorizontalLayout {
+                                            alignment: space-between;
+                                            Text { text: card.langs; font-size: 11px; color: #8B949E; vertical-alignment: center; }
+                                            // Explicit-size download button: guaranteed hit area
+                                            // (bare TouchAreas in layouts can collapse to 0×0).
+                                            dl_btn := Rectangle {
+                                                width: 170px;
+                                                height: 26px;
+                                                border-radius: 6px;
+                                                background: dl_hover.has-hover ? #2A2E35 : transparent;
+                                                HorizontalLayout {
+                                                    padding-left: 8px;
+                                                    padding-right: 8px;
+                                                    spacing: 6px;
+                                                    alignment: end;
+                                                    Text { text: "⬇"; font-size: 11px; color: #8B949E; vertical-alignment: center; }
+                                                    Text { text: card.size; font-size: 11px; color: #8B949E; vertical-alignment: center; }
+                                                    if card.downloading: Text {
+                                                        text: root.download-progress + "%";
+                                                        font-size: 11px;
+                                                        font-weight: 700;
+                                                        color: #58A6FF;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                                dl_hover := TouchArea {
+                                                    x: 0px;
+                                                    y: 0px;
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                    clicked => { if (!card.downloading) { root.download-catalog-model(card.index); } }
+                                                    mouse-cursor: pointer;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                            }
+                        }
                     }
-                }
-            }
-            Tab {
-                title: "General";
-                VerticalLayout {
-                    padding-top: 16px;
-                    Text { text: "General App Settings"; color: white; }
-                    CheckBox { text: "Start with Windows"; }
-                }
-            }
-            Tab {
-                title: "Wakeword";
-                VerticalLayout {
-                    spacing: 16px;
-                    padding-top: 16px;
-                    Text { text: "Voice Activation (Wakeword)"; color: white; }
-                    CheckBox { text: "Enable Wakeword"; checked: true; }
-                    HorizontalLayout {
-                        Text { text: "Sensitivity"; color: white; }
-                        Slider { minimum: 0; maximum: 100; value: 50; }
+
+                    // ══════════════════════════════════════════════════════════════════
+                    // TAB 2: WIDGET STYLE & LIVE PILL PREVIEW
+                    // ══════════════════════════════════════════════════════════════════
+                    if root.active-tab == 2 : VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+
+                        Text {
+                            text: "Widget Styling & Customization";
+                            font-size: 18px;
+                            font-weight: 700;
+                            color: #F0F6FC;
+                        }
+                        Text {
+                            text: "Customize the appearance of the floating mini pill widget. Sliders apply immediately with live preview.";
+                            font-size: 12px;
+                            color: #8B949E;
+                        }
+
+                        // Interactive Live Preview Box
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                Text { text: "Live Mini Pill Preview"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+
+                                Rectangle {
+                                    height: 90px;
+                                    background: #090D12;
+                                    border-radius: 8px;
+
+                                    HorizontalLayout {
+                                        alignment: center;
+
+                                        // Rendered Pill mirroring radius + opacity
+                                        Rectangle {
+                                            width: 250px;
+                                            height: 48px;
+                                            border-radius: (root.ui-pill-radius * 48px / 50);
+                                            background: #1A1E24;
+                                            border-width: 1px;
+                                            border-color: #3898FF;
+                                            opacity: root.ui-opacity / 100.0;
+                                            y: 21px;
+
+                                            HorizontalLayout {
+                                                padding-left: 14px;
+                                                padding-right: 14px;
+                                                spacing: 10px;
+                                                alignment: space-between;
+
+                                                HorizontalLayout {
+                                                    spacing: 8px;
+                                                    alignment: start;
+                                                    Rectangle {
+                                                        width: 10px;
+                                                        height: 10px;
+                                                        border-radius: 5px;
+                                                        background: #3898FF;
+                                                        y: 18px;
+                                                    }
+                                                    Text {
+                                                        text: "QuickSTT";
+                                                        font-size: 13px;
+                                                        font-weight: 700;
+                                                        color: #F0F6FC;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+
+                                                Text {
+                                                    text: "Dictate Ctrl+Win";
+                                                    font-size: 12px;
+                                                    color: #8B949E;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Sliders & Adjustments Card
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 14px;
+
+                                Text { text: "Dimensions & Opacity"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text { text: "Widget Opacity:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 160px; }
+                                    Slider {
+                                        minimum: 20;
+                                        maximum: 100;
+                                        value: root.ui-opacity;
+                                        changed(val) => { root.set-ui-opacity(val); }
+                                    }
+                                    Text { text: root.ui-opacity + "%"; font-size: 13px; color: #58A6FF; font-weight: 600; vertical-alignment: center; min-width: 50px; }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text { text: "Corner Roundness:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 160px; }
+                                    Slider {
+                                        minimum: 0;
+                                        maximum: 25;
+                                        value: root.ui-pill-radius;
+                                        changed(val) => { root.set-ui-pill-radius(val); }
+                                    }
+                                    Text { text: root.ui-pill-radius + " px"; font-size: 13px; color: #58A6FF; font-weight: 600; vertical-alignment: center; min-width: 50px; }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text { text: "System Tray Icon Size:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 160px; }
+                                    Slider {
+                                        minimum: 16;
+                                        maximum: 64;
+                                        value: root.tray-icon-size;
+                                        changed(val) => { root.set-tray-icon-size(val); }
+                                    }
+                                    Text { text: root.tray-icon-size + " px"; font-size: 13px; color: #58A6FF; font-weight: 600; vertical-alignment: center; min-width: 50px; }
+                                }
+
+                                CheckBox {
+                                    text: "Show animated waveform when actively listening";
+                                    checked: root.show-waveform;
+                                    toggled => { root.set-show-waveform(self.checked); }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text { text: "Waveform Sensitivity:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 160px; }
+                                    Slider {
+                                        minimum: 1;
+                                        maximum: 15;
+                                        value: root.waveform-sensitivity;
+                                        enabled: root.show-waveform;
+                                        changed(val) => { root.set-waveform-sensitivity(val); }
+                                    }
+                                    Text { text: root.waveform-sensitivity + ""; font-size: 13px; color: #58A6FF; font-weight: 600; vertical-alignment: center; min-width: 50px; }
+                                }
+                            }
+                        }
+                    }
+
+                    // ══════════════════════════════════════════════════════════════════
+                    // TAB 3: WAKEWORDS, VAD & SENSITIVITY
+                    // ══════════════════════════════════════════════════════════════════
+                    if root.active-tab == 3 : VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+
+                        Text {
+                            text: "Wakewords & Voice Activity Detection";
+                            font-size: 18px;
+                            font-weight: 700;
+                            color: #F0F6FC;
+                        }
+                        Text {
+                            text: "Hands-free voice triggers. Calibrated sensitivity and strict noise gates prevent false activations from room noise and TV audio.";
+                            font-size: 12px;
+                            color: #8B949E;
+                        }
+
+                        // Master Activation Switch
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    VerticalLayout {
+                                        Text { text: "Hands-Free Wakeword Detection"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                        Text { text: "When enabled, QuickSTT listens for wake phrases in the background (< 1 MB RAM)."; font-size: 11px; color: #8B949E; }
+                                    }
+                                    CheckBox {
+                                        text: "Active";
+                                        checked: root.wakeword-enabled;
+                                        toggled => { root.set-wakeword-enabled(self.checked); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Calibrated Sensitivity Sliders
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 14px;
+
+                                Text { text: "Sensitivity & Noise Gate Tuning"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+
+                                Text { text: root.wakeword-threshold-text; font-size: 11px; color: #8B949E; wrap: word-wrap; }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text { text: "Wakeword Sensitivity:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 170px; }
+                                    Slider {
+                                        minimum: 0;
+                                        maximum: 100;
+                                        value: root.wakeword-sensitivity;
+                                        changed(val) => { root.set-wakeword-sensitivity(val); }
+                                    }
+                                    Text {
+                                        text: root.wakeword-sensitivity <= 30 ? (root.wakeword-sensitivity + "% (Strict)") : (root.wakeword-sensitivity >= 70 ? (root.wakeword-sensitivity + "% (Hot)") : (root.wakeword-sensitivity + "% (Balanced)"));
+                                        font-size: 12px;
+                                        color: #58A6FF;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        min-width: 95px;
+                                    }
+                                }
+                                Text {
+                                    text: "Score bar for the phrases above — HIGHER (right) = triggers on quieter speech, LOWER (left) = needs louder, clearer speech. Too high answers TV and chatter; too low needs shouting. 50 is balanced.";
+                                    font-size: 11px;
+                                    color: #8B949E;
+                                    wrap: word-wrap;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text { text: "VAD Speech Gate:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 170px; }
+                                    Slider {
+                                        minimum: 0;
+                                        maximum: 100;
+                                        value: root.vad-sensitivity;
+                                        changed(val) => { root.set-vad-sensitivity(val); }
+                                    }
+                                    Text {
+                                        text: root.vad-sensitivity <= 30 ? (root.vad-sensitivity + "% (Strict)") : (root.vad-sensitivity >= 70 ? (root.vad-sensitivity + "% (Open)") : (root.vad-sensitivity + "% (Balanced)"));
+                                        font-size: 12px;
+                                        color: #58A6FF;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        min-width: 95px;
+                                    }
+                                }
+                                Text {
+                                    text: "Voice gate in front of the detector — HIGHER (right) = soft speech gets through, but so does more room noise. LOWER (left) = stricter; set too low, quiet phrases never reach the detector at all. Same direction as above: right = more sensitive. 50 is balanced.";
+                                    font-size: 11px;
+                                    color: #8B949E;
+                                    wrap: word-wrap;
+                                }
+
+                                // Live Microphone Input Level Visualizer
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text { text: "Microphone Audio Level:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 170px; }
+                                    Rectangle {
+                                        height: 10px;
+                                        border-radius: 5px;
+                                        background: #21262D;
+                                        Rectangle {
+                                            x: 0px;
+                                            y: 0px;
+                                            height: 10px;
+                                            width: (parent.width * root.live-audio-level / 100);
+                                            border-radius: 5px;
+                                            background: root.live-audio-level > 60 ? #DA3633 : (root.live-audio-level > 20 ? #2EA043 : #3898FF);
+                                        }
+                                    }
+                                    Text {
+                                        text: root.live-audio-level + "%";
+                                        font-size: 12px;
+                                        color: #8B949E;
+                                        vertical-alignment: center;
+                                        min-width: 45px;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Enabled Wakewords List
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 10px;
+
+                                Text { text: "Active Wakewords (community openWakeWord heads)"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+
+                                HorizontalLayout {
+                                    spacing: 20px;
+                                    CheckBox {
+                                        text: "\"Hey Jarvis\"";
+                                        checked: root.ww-hey-jarvis;
+                                        toggled => { root.toggle-wakeword-phrase("hey jarvis", self.checked); }
+                                    }
+                                    CheckBox {
+                                        text: "\"Alexa\"";
+                                        checked: root.ww-alexa;
+                                        toggled => { root.toggle-wakeword-phrase("alexa", self.checked); }
+                                    }
+                                }
+
+                                Text {
+                                    text: "Custom phrases (jarvis, agent, hem) are retired: their models answered ~0.5 to pure silence, so no threshold could ever separate them from nothing. They may return via retrained heads.";
+                                    font-size: 11px;
+                                    color: #8B949E;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        // Acoustic Sound Trigger (clap only — snap retired)
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                Text { text: "Acoustic Transient Trigger"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text { text: "Clap Action:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; }
+                                    ComboBox {
+                                        model: ["Start Dictation", "Stop Dictation", "Disabled"];
+                                        current-index: root.transient-action;
+                                        enabled: true;
+                                        selected(v) => { root.set-transient-action(self.current-index); }
+                                    }
+                                }
+                                Text {
+                                    text: "One sharp hand clap triggers the action above. Isolated impulses only — speech and sustained noise are vetoed. Wakewords work independently.";
+                                    font-size: 11px;
+                                    color: #8B949E;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    // ══════════════════════════════════════════════════════════════════
+                    // TAB 4: SYSTEM & UPDATES
+                    // ══════════════════════════════════════════════════════════════════
+                    if root.active-tab == 4 : VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+
+                        Text {
+                            text: "System Information & Updates";
+                            font-size: 18px;
+                            font-weight: 700;
+                            color: #F0F6FC;
+                        }
+                        Text {
+                            text: "Inspect active ML inference runtimes, build versions, and software update status.";
+                            font-size: 12px;
+                            color: #8B949E;
+                        }
+
+                        // System Runtime Status Card
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 10px;
+
+                                Text { text: "Runtime Diagnostic Status"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text { text: "Core Architecture:"; font-size: 13px; color: #8B949E; }
+                                    Text { text: "Pure Rust 64-bit (Tokio + Slint Direct2D)"; font-size: 13px; font-weight: 600; color: #F0F6FC; }
+                                }
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text { text: "Audio Driver:"; font-size: 13px; color: #8B949E; }
+                                    Text { text: "Windows WASAPI Shared Low-Latency (cpal)"; font-size: 13px; font-weight: 600; color: #F0F6FC; }
+                                }
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text { text: "Wakeword Engine:"; font-size: 13px; color: #8B949E; }
+                                    Text { text: "ONNX Tract (5 Models Loaded)"; font-size: 13px; font-weight: 600; color: #2EA043; }
+                                }
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text { text: "Speech Recognition:"; font-size: 13px; color: #8B949E; }
+                                    Text { text: "Vosk Native & ONNX Multilingual"; font-size: 13px; font-weight: 600; color: #2EA043; }
+                                }
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text { text: "Idle Memory Usage:"; font-size: 13px; color: #8B949E; }
+                                    Text { text: "< 5.0 MB (Aggressive Lazy Offloading)"; font-size: 13px; font-weight: 600; color: #3898FF; }
+                                }
+                            }
+                        }
+
+                        // Version & Updates Card
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                Text { text: "Version & Software Updates"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    VerticalLayout {
+                                        Text { text: "QuickSTT Release:"; font-size: 13px; color: #F0F6FC; font-weight: 600; }
+                                        Text { text: root.app-version; font-size: 12px; color: #8B949E; }
+                                    }
+                                    Rectangle {
+                                        width: 140px;
+                                        height: 32px;
+                                        border-radius: 6px;
+                                        background: #1F6FEB;
+                                        y: 4px;
+                                        Text {
+                                            text: "Check Updates";
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            color: white;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        TouchArea {
+                                            clicked => { root.check-updates(); }
+                                            mouse-cursor: pointer;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
+}
 }

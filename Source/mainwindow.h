@@ -119,6 +119,11 @@ private:
   QLabel *localModelDetailsLabel = nullptr;
   QComboBox *localModelBackendCombo = nullptr;
   QLabel *localModelBackendStatusLabel = nullptr;
+  // General-tab speech model + language selectors (handy-style).
+  QComboBox *sttModelCombo = nullptr;
+  QComboBox *sttLangCombo = nullptr;
+  QLabel *sttLangHintLabel = nullptr;
+  void refreshSttModelLanguageUi();
   QLabel *cloudSelectedModelLabel = nullptr;
   QPlainTextEdit *cloudProviderStatusPanel = nullptr;
   QPlainTextEdit *cloudInputSummaryPanel = nullptr;

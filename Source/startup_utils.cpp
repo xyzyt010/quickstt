@@ -40,6 +40,18 @@ void applyStartupSetting(bool enabled) {
 
   if (enabled) {
     QString appDir = QCoreApplication::applicationDirPath();
+    // Bundled Slint widget owns startup when present: it shows the pill +
+    // tray and spawns this dashboard --no-tray, keeping a single tray and a
+    // single startup entry. (--minimized = normal Slint start, no splash.)
+    QString slintPath =
+        QDir::cleanPath(appDir + "/../quickstt-slint.exe");
+    if (QFile::exists(slintPath)) {
+      slintPath.replace("/", "\\");
+      bootSettings.setValue(
+          "QuickSTT", QString("\"" + slintPath + "\" --minimized"));
+      removeLegacyStartupScript();
+      return;
+    }
     QString loaderPath = QDir(appDir).filePath("QuickSTT.exe");
     if (QFile::exists(loaderPath)) {
       bootSettings.setValue("QuickSTT",

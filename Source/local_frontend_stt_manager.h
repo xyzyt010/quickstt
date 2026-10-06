@@ -16,6 +16,9 @@ public:
   void transcribeFile(const QString &modelName, const QString &audioPath);
   void stopCrispAsrServer();
   void shutdownAllModels();
+  // Idle offload: release the worker's model from RAM (process stays alive
+  // for fast reload). Called by the pill's auto-offload timer.
+  void unloadIdleModels();
 
 signals:
   void statusChanged(const QString &statusText);

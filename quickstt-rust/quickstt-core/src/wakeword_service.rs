@@ -10,23 +10,13 @@
 //! `cpal::Stream` (Windows WASAPI) and the `livekit_wakeword` ONNX model are
 //! both `!Send` / `!Sync`. We therefore do ALL of this work on a single
 //! dedicated OS thread that runs the service event loop.
-//!
-//! ```text
-//!  ┌────────────────────────────┐    mpsc::SyncChannel<Vec<i16>>    ┌────────────────────────┐
-//!  │ cpal audio callback thread │ ───────────────────────────────▶ │  Service thread          │
-//!  └────────────────────────────┘                                    │  - WakeWordEngine        │
-//!                                                                    │  - inference             │
-//!  ┌────────────────────────────┐   mpsc::Sender<ServiceCommand>    │  - classification        │
-//!  │  GUI (tokio)               │ ───────────────────────────────▶ │  - emits orch commands   │
-//!  └────────────────────────────┘                                    └────────────────────────┘
-//! ```
-//!
-//! On the service thread we use `try_recv` on the audio chunk channel so we
-//! can also drain user commands (Start/Stop) without blocking on either.
-//! When Stop is called we drop the live stream → mic is released → engine is
-//! parked on the service thread awaiting the next Start.
 
-use crate::audio::normalize::{InputNormalizer, TARGET_CHUNK_FRAMES, TARGET_SAMPLE_RATE};
+use crate::audio::normalize::InputNormalizer;
+use crate::audio::transient::{
+    chunk_peak, TransientArbiter, TransientDetector, TRANSIENT_DISABLED, TRANSIENT_START,
+    TRANSIENT_STOP,
+};
+use crate::audio::vad::EnergyVad;
 use crate::ml::wakeword::{WakeWordEngine, WakeWordEvent};
 use crate::orchestration::OrchestratorCommand;
 use crate::wakeword_loader;
@@ -41,10 +31,18 @@ use tokio::sync::mpsc as tmpsc;
 use tracing::{info, warn};
 
 /// Public commands for the wakeword service.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum WakewordServiceCommand {
     Start,
     Stop,
+    SetSensitivity(u32),
+    /// Dashboard "VAD Speech Gate" slider (0..100). Drives ONLY the
+    /// background voice gate — independent of wakeword sensitivity.
+    SetVadSensitivity(u32),
+    SetPhraseEnabled(String, bool),
+    /// Shared clap action (0 = Start, 1 = Stop, 2 = Disabled).
+    SetTransientAction(u32),
+    Suppress(f32),
 }
 
 /// Opaque handle returned by [`spawn_background_service`].
@@ -61,6 +59,23 @@ impl WakewordHandle {
     pub fn stop(&self) {
         let _ = self.cmd_tx.send(WakewordServiceCommand::Stop);
     }
+    pub fn set_sensitivity(&self, sensitivity: u32) {
+        let _ = self.cmd_tx.send(WakewordServiceCommand::SetSensitivity(sensitivity));
+    }
+    pub fn set_vad_sensitivity(&self, sensitivity: u32) {
+        let _ = self
+            .cmd_tx
+            .send(WakewordServiceCommand::SetVadSensitivity(sensitivity));
+    }
+    pub fn set_phrase_enabled(&self, phrase: String, enabled: bool) {
+        let _ = self.cmd_tx.send(WakewordServiceCommand::SetPhraseEnabled(phrase, enabled));
+    }
+    pub fn set_transient_action(&self, action: u32) {
+        let _ = self.cmd_tx.send(WakewordServiceCommand::SetTransientAction(action));
+    }
+    pub fn suppress(&self, duration_secs: f32) {
+        let _ = self.cmd_tx.send(WakewordServiceCommand::Suppress(duration_secs));
+    }
     pub fn is_active(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
@@ -76,16 +91,18 @@ pub fn spawn_background_service(
     models_dir: &Path,
     orchestrator_tx: tmpsc::Sender<OrchestratorCommand>,
 ) -> Option<WakewordHandle> {
-    let discovered = wakeword_loader::discover_models(models_dir);
+    // Community openWakeWord heads only. The legacy custom heads are
+    // quarantined (proven non-discriminating) — see discover_oww_heads.
+    let discovered = wakeword_loader::discover_oww_heads(models_dir);
     if discovered.is_empty() {
         warn!(
-            "Wakeword background: no models in {:?} - background detection disabled",
+            "Wakeword background: no OWW heads in {:?} - background detection disabled",
             models_dir
         );
         return None;
     }
 
-    let engine = match WakeWordEngine::from_discovered_models(&discovered) {
+    let engine = match WakeWordEngine::from_oww_heads(&discovered) {
         Ok(e) => {
             info!(
                 "Wakeword background loaded {} models: {:?}",
@@ -121,7 +138,7 @@ pub fn spawn_background_service(
     Some(WakewordHandle { cmd_tx, running })
 }
 
-/// Service thread main loop. Owns the engine and the (optional) live stream
+/// Service thread main loop. Owns the engine, VAD, and the (optional) live stream
 /// for the lifetime of the thread.
 fn run_service_thread(
     mut engine: WakeWordEngine,
@@ -129,78 +146,100 @@ fn run_service_thread(
     running: Arc<AtomicBool>,
     orchestrator_tx: tmpsc::Sender<OrchestratorCommand>,
 ) {
-    // Live stream is `Some` while running. The channel for audio chunks that
-    // the cpal callback pushes into.
     let mut live: Option<(LiveStream, mpsc::Receiver<Vec<i16>>)> = None;
+    let mut vad = EnergyVad::with_default_threshold();
+    // Clap detector + shared action. Defaults Disabled until
+    // the UI syncs the persisted value at startup.
+    let mut transient = TransientDetector::new();
+    let mut arbiter = TransientArbiter::new();
+    let mut transient_action: u32 = TRANSIENT_DISABLED;
 
     loop {
-        // First, drain any pending Stop events so toggling is responsive.
-        // We process commands first if any are ready; otherwise we drain
-        // one audio chunk and process it.
-
         // 1. Drain queued commands (non-blocking).
-        match cmd_rx.try_recv() {
-            Ok(WakewordServiceCommand::Start) => {
-                if live.is_some() {
-                    continue;
-                }
-                match try_open_stream() {
-                    Ok((stream, rx)) => {
-                        live = Some((stream, rx));
-                        running.store(true, Ordering::Release);
-                        info!("Wakeword background streaming");
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                WakewordServiceCommand::Start => {
+                    if live.is_none() {
+                        match try_open_stream() {
+                            Ok((stream, rx)) => {
+                                live = Some((stream, rx));
+                                vad.reset();
+                                transient.reset();
+                                arbiter.reset();
+                                engine.reset();
+                                running.store(true, Ordering::Release);
+                                info!("Wakeword background streaming");
+                            }
+                            Err(e) => {
+                                warn!("Wakeword background failed to open stream: {e}");
+                            }
+                        }
                     }
-                    Err(e) => {
-                        warn!("Wakeword background failed to open stream: {e}");
+                }
+                WakewordServiceCommand::Stop => {
+                    if live.take().is_some() {
+                        running.store(false, Ordering::Release);
+                        vad.reset();
+                        transient.reset();
+                        arbiter.reset();
+                        engine.reset();
+                        info!("Wakeword background stopped");
                     }
                 }
-                continue;
-            }
-            Ok(WakewordServiceCommand::Stop) => {
-                if live.take().is_some() {
-                    running.store(false, Ordering::Release);
-                    info!("Wakeword background stopped");
+                WakewordServiceCommand::SetSensitivity(sens) => {
+                    engine.set_sensitivity(sens);
                 }
-                continue;
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                // Handle dropped; tear down and exit.
-                let _ = live.take();
-                running.store(false, Ordering::Release);
-                return;
-            }
-            Err(mpsc::TryRecvError::Empty) => {
-                // No commands ready; fall through to audio processing.
+                WakewordServiceCommand::SetVadSensitivity(sens) => {
+                    vad.set_sensitivity(sens);
+                }
+                WakewordServiceCommand::SetPhraseEnabled(phrase, enabled) => {
+                    engine.set_phrase_enabled(&phrase, enabled);
+                }
+                WakewordServiceCommand::SetTransientAction(action) => {
+                    transient_action = action.min(2);
+                    info!("Transient action → {}", transient_action);
+                }
+                WakewordServiceCommand::Suppress(secs) => {
+                    engine.suppress(secs);
+                }
             }
         }
 
-        // 2. If streaming, process up to one audio chunk (non-blocking).
+        // 2. If streaming, process up to one audio chunk.
         if let Some((_, rx_chunks)) = live.as_ref() {
             match rx_chunks.try_recv() {
                 Ok(chunk) => {
-                    if process_audio_chunk(&mut engine, &chunk, &orchestrator_tx, &running) {
+                    if process_audio_chunk(
+                        &mut engine,
+                        &mut vad,
+                        &mut transient,
+                        &mut arbiter,
+                        &mut transient_action,
+                        &chunk,
+                        &orchestrator_tx,
+                        &running,
+                    ) {
                         let _ = live.take();
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => {
-                    // Nothing to do this tick; sleep briefly to spin lightly.
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    // Stream was dropped; this shouldn't happen unless
-                    // somebody reach in and took the live stream out from
-                    // under us. Just stop.
                     let _ = live.take();
                     running.store(false, Ordering::Release);
                 }
             }
         } else {
-            // Idle: block waiting for a command so we don't burn CPU when the
-            // service isn't in use.
+            // Idle: block waiting for a command so we don't burn CPU when idle.
             match cmd_rx.recv() {
                 Ok(WakewordServiceCommand::Start) => match try_open_stream() {
                     Ok((stream, rx)) => {
                         live = Some((stream, rx));
+                        vad.reset();
+                        transient.reset();
+                        arbiter.reset();
+                        engine.reset();
                         running.store(true, Ordering::Release);
                         info!("Wakeword background streaming");
                     }
@@ -208,8 +247,22 @@ fn run_service_thread(
                         warn!("Wakeword background failed to open stream: {e}");
                     }
                 },
-                Ok(WakewordServiceCommand::Stop) => {
-                    // Already idle; nothing to do.
+                Ok(WakewordServiceCommand::Stop) => {}
+                Ok(WakewordServiceCommand::SetSensitivity(sens)) => {
+                    engine.set_sensitivity(sens);
+                }
+                Ok(WakewordServiceCommand::SetVadSensitivity(sens)) => {
+                    vad.set_sensitivity(sens);
+                }
+                Ok(WakewordServiceCommand::SetPhraseEnabled(phrase, enabled)) => {
+                    engine.set_phrase_enabled(&phrase, enabled);
+                }
+                Ok(WakewordServiceCommand::SetTransientAction(action)) => {
+                    transient_action = action.min(2);
+                    info!("Transient action → {}", transient_action);
+                }
+                Ok(WakewordServiceCommand::Suppress(secs)) => {
+                    engine.suppress(secs);
                 }
                 Err(_) => {
                     running.store(false, Ordering::Release);
@@ -222,11 +275,126 @@ fn run_service_thread(
 
 fn process_audio_chunk(
     engine: &mut WakeWordEngine,
+    vad: &mut EnergyVad,
+    transient: &mut TransientDetector,
+    arbiter: &mut TransientArbiter,
+    transient_action: &mut u32,
     chunk: &[i16],
     orchestrator_tx: &tmpsc::Sender<OrchestratorCommand>,
     running: &Arc<AtomicBool>,
 ) -> bool {
-    let events = engine.process_chunk(chunk);
+    // Clap first: detections go through the one-chunk arbiter: only
+    // ISOLATED impulses act, while sustained sounds (speech syllables,
+    // laughter, coughing fits) are vetoed on the follow-up chunk. A clap's
+    // tail must not score as a wakeword, so suppress the engine briefly on
+    // every detection.
+    // Background handles START (idle → listen); STOP is handled in the
+    // foreground thread, which owns the mic while a session is live.
+    // The level meter below always runs regardless of the clap action.
+    if *transient_action != TRANSIENT_DISABLED {
+        let detected = transient.process(chunk);
+        if detected.is_some() {
+            engine.suppress(0.4);
+        }
+        // Raw detections log at info (pre-arbiter): separates "clap never
+        // heard" from "heard but vetoed as sustained" in the log.
+        if let Some(kind) = detected {
+            let (peak, ratio, jump, _, _, floor, width) = transient.last_stats();
+            info!(
+                "Background acoustic {} onset (peak={:.0} ratio={:.1} jump={:.1} floor={:.0} width={})",
+                kind.as_str(),
+                peak,
+                ratio,
+                jump,
+                floor,
+                width
+            );
+        }
+        if let Some(kind) = arbiter.update(detected, chunk_peak(chunk)) {
+            arbiter.reset();
+            if *transient_action == TRANSIENT_START {
+                // NOTE: `last_stats()` here is the QUIET confirmation chunk
+                // (the arbiter holds one chunk), so the onset numbers come
+                // from `last_onset_stats()` — the detection chunk.
+                let (cpeak, cratio, cjump, _, _, cfloor, cwidth) = transient.last_stats();
+                if let Some((opeak, oratio, ojump, ofloor, owidth)) =
+                    transient.last_onset_stats()
+                {
+                    info!(
+                        "Background acoustic {} fired (onset peak={:.0} ratio={:.1} jump={:.1} floor={:.0} width={} / confirm peak={:.0} ratio={:.1} jump={:.1} floor={:.0} width={}) — popping widget",
+                        kind.as_str(),
+                        opeak,
+                        oratio,
+                        ojump,
+                        ofloor,
+                        owidth,
+                        cpeak,
+                        cratio,
+                        cjump,
+                        cfloor,
+                        cwidth
+                    );
+                } else {
+                    info!(
+                        "Background acoustic {} fired (confirm peak={:.0} ratio={:.1} jump={:.1} floor={:.0} width={}) — popping widget",
+                        kind.as_str(),
+                        cpeak,
+                        cratio,
+                        cjump,
+                        cfloor,
+                        cwidth
+                    );
+                }
+                let _ = orchestrator_tx
+                    .try_send(OrchestratorCommand::TransientStart(kind.as_str().to_string()));
+                let _ = orchestrator_tx.try_send(OrchestratorCommand::ShowWidget);
+                running.store(false, Ordering::Release);
+                return true;
+            } else if *transient_action == TRANSIENT_STOP {
+                // Parked background has no session to stop; the foreground
+                // detector covers STOP while recording.
+            }
+        }
+    }
+
+    let vad_speech = vad.process(chunk).speech_likely;
+
+    // Dashboard level meter: the background mic is the only open mic while
+    // idle, so it must report levels too (previously foreground-only, which
+    // is why the meter sat flat during background listening and made audio
+    // look dead). Throttled: every 4th chunk is plenty for a meter.
+    {
+        use std::sync::atomic::{AtomicU32, Ordering as AOrd};
+        static TICKS: AtomicU32 = AtomicU32::new(0);
+        if TICKS.fetch_add(1, AOrd::Relaxed) % 4 == 0 {
+            let level = crate::audio::vad::audio_level_0_100(chunk);
+            let _ = orchestrator_tx.try_send(OrchestratorCommand::AudioLevel(level));
+        }
+    }
+
+    let events = engine.process_chunk(chunk, vad_speech);
+    // Heartbeat every ~5s of streaming: mic level, gate verdict, cache
+    // fullness. Reads like "rms=0.023 peak=1800 vad=true mel=210 emb=18
+    // heads=42" — proves audio reaches the detector and shows WHY quiet
+    // speech never fires (gated) vs scores low (heads).
+    {
+        use std::sync::atomic::{AtomicU32, Ordering as AOrd};
+        static TICKS: AtomicU32 = AtomicU32::new(0);
+        if TICKS.fetch_add(1, AOrd::Relaxed) % 64 == 0 {
+            let mut sum = 0f64;
+            let mut peak = 0f64;
+            for &s in chunk.iter() {
+                sum += (s as f64) * (s as f64);
+                peak = peak.max((s as f64).abs());
+            }
+            let rms = ((sum / chunk.len().max(1) as f64).sqrt() / 32768.0) as f32;
+            let (mel, emb, heads) = engine.cache_stats();
+            info!(
+                "bg stats: rms={:.4} peak={:.0} vad={} mel={} emb={} heads={}",
+                rms, peak, vad_speech, mel, emb, heads
+            );
+        }
+    }
     for event in events {
         if let WakeWordEvent::Triggered(name, confidence) = event {
             info!(
@@ -235,10 +403,7 @@ fn process_audio_chunk(
             );
             let _ = orchestrator_tx.try_send(OrchestratorCommand::WakewordTriggered(confidence));
             let _ = orchestrator_tx.try_send(OrchestratorCommand::ShowWidget);
-            let _ = orchestrator_tx.try_send(OrchestratorCommand::StartListening);
 
-            // Stop the mic so transcription can take over; user already has
-            // the widget back. The service loop drops the stream immediately.
             running.store(false, Ordering::Release);
             return true;
         }
@@ -274,6 +439,7 @@ fn try_open_stream() -> Result<(LiveStream, mpsc::Receiver<Vec<i16>>), OpenError
     let device = host
         .default_input_device()
         .ok_or(OpenError::NoInputDevice)?;
+    let dev_name = device.name().unwrap_or_else(|_| "<unknown>".into());
 
     let supported = device
         .default_input_config()
@@ -311,41 +477,14 @@ fn try_open_stream() -> Result<(LiveStream, mpsc::Receiver<Vec<i16>>), OpenError
                 None,
             )
         }
-        SampleFormat::U16 => {
-            let mut normalizer = InputNormalizer::new(channels, sample_rate);
-            device.build_input_stream(
-                &config,
-                move |data: &[u16], _: &_| {
-                    normalizer.process_u16(data, |chunk| {
-                        let _ = tx_chunks.try_send(chunk);
-                    });
-                },
-                |err| tracing::error!("Wakeword bg stream error: {err}"),
-                None,
-            )
-        }
-        SampleFormat::I32 => {
-            let mut normalizer = InputNormalizer::new(channels, sample_rate);
-            device.build_input_stream(
-                &config,
-                move |data: &[i32], _: &_| {
-                    normalizer.process_i32(data, |chunk| {
-                        let _ = tx_chunks.try_send(chunk);
-                    });
-                },
-                |err| tracing::error!("Wakeword bg stream error: {err}"),
-                None,
-            )
-        }
-        other => return Err(OpenError::UnsupportedFormat(other)),
+        format => return Err(OpenError::UnsupportedFormat(format)),
     }
     .map_err(OpenError::BuildStream)?;
 
     stream.play().map_err(OpenError::PlayStream)?;
     info!(
-        "Wakeword bg input stream: {:?}, {} channel(s), {} Hz -> {} Hz mono ({} frames)",
-        sample_format, channels, sample_rate, TARGET_SAMPLE_RATE, TARGET_CHUNK_FRAMES
+        "Wakeword mic open: '{}' {}Hz {}ch {:?}",
+        dev_name, sample_rate, channels, sample_format
     );
-
     Ok((LiveStream(stream), rx_chunks))
 }

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+description = "QuickSTT — floating offline voice typing mini pill (Slint) for Linux and Windows"
 
 [dependencies]
 slint = { version = "1.9", features = ["raw-window-handle-06"] }
@@ -12,12 +13,50 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 tray-icon = "0.17"
 muda = "0.14"
-quickstt-core = { path = "../quickstt-core", features = ["audio-capture"] }
+global-hotkey = "0.6"
+anyhow = "1"
+dirs = "5"
+quickstt-core = { path = "../quickstt-core", features = ["audio-capture", "wakeword"] }
 raw-window-handle = "0.6"
-image = "0.25.10"
+# Lean decoders for the tray icon PNG/ICO only (no SVG stack, no extra codecs).
+image = { version = "0.25.10", default-features = false, features = ["png", "ico"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_Registry", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_LibraryLoader", "Win32_System_IO", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Threading"] }
 
 [build-dependencies]
 slint-build = "1.9"
+winresource = "0.1"
+
+# Debian packaging: the Slint widget is the product GUI (replaces the
+# original egui widget; its code stays in quickstt-gui/ for reference).
+# Installed as /usr/bin/quickstt so the desktop file + actions keep working.
+[package.metadata.deb]
+name = "quickstt"
+maintainer = "QuickSTT Team <support@quickstt.com>"
+copyright = "2024-2026, QuickSTT Team <support@quickstt.com>"
+extended-description = """\
+Floating voice typing widget for Linux — X11 & Wayland, transparent always-on-top.
+ Includes integrated STT backends: Vosk small EN, Parakeet TDT 0.6B, Nemotron 3.5 streaming."""
+section = "utils"
+priority = "optional"
+depends = "libgtk-3-0, libayatana-appindicator3-1 | libappindicator3-1, librsvg2-2, libasound2, libpulse0, libportaudio2, libx11-6, libxi6, libxtst6, xdotool, libglib2.0-0"
+recommends = "wtype, wl-clipboard, ydotool, libqt6core6, libqt6gui6, libqt6widgets6, libqt6svg6, libqt6network6"
+assets = [
+  ["../target/release/quickstt-slint", "usr/bin/quickstt", "755"],
+  ["../assets/quickstt.desktop", "usr/share/applications/quickstt.desktop", "644"],
+  ["../assets/icon_app.png", "usr/share/pixmaps/quickstt.png", "644"],
+  ["../assets/icon_app.png", "usr/share/icons/hicolor/256x256/apps/quickstt.png", "644"],
+  ["../assets/quickstt-app-wrapper.sh", "usr/bin/quickstt-app", "755"],
+  ["../../build/quickstt-app", "usr/lib/quickstt/quickstt-app", "755"],
+  ["../../build/stt_service", "usr/lib/quickstt/stt_service", "755"],
+  ["../../Source/mic_active.svg", "usr/lib/quickstt/mic_active.svg", "644"],
+  ["../../Source/mic_inactive.svg", "usr/lib/quickstt/mic_inactive.svg", "644"],
+  ["../../Source/Untitled-1.svg", "usr/lib/quickstt/Untitled-1.svg", "644"],
+  ["../assets/icon_app.png", "usr/lib/quickstt/icon_app.png", "644"],
+  ["../target/release/tools/parakeet/parakeet_engine", "usr/lib/quickstt/tools/parakeet/parakeet_engine", "755"],
+  ["../target/release/tools/nemotron/transcribe-cli", "usr/lib/quickstt/tools/nemotron/transcribe-cli", "755"],
+  ["../tools/photon/photon_worker.py", "usr/lib/quickstt/tools/photon/photon_worker.py", "644"],
+  ["../../wakeword_models/hey_jarvis_v0.1.onnx", "usr/lib/quickstt/wakeword_models/hey_jarvis_v0.1.onnx", "644"],
+  ["../../wakeword_models/alexa_v0.1.onnx", "usr/lib/quickstt/wakeword_models/alexa_v0.1.onnx", "644"],
+]

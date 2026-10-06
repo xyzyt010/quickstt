@@ -21,8 +21,12 @@ async-trait = { workspace = true }
 hound = { workspace = true }
 
 # ML — optional
-livekit-wakeword = { workspace = true, optional = true }
 whisper-rs = { workspace = true, optional = true }
+# Direct ort access for the bundled-phrase OWW runtime (same tract backend
+# livekit uses; versions pinned to livekit-wakeword 0.1.3's tree).
+ort = { workspace = true, optional = true }
+ort-tract = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
 
 # Audio — optional
 cpal = { workspace = true, optional = true }
@@ -33,6 +37,7 @@ ureq = "2.10"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
+bzip2 = "0.4"
 libloading = "0.8"
 
 [target.'cfg(windows)'.dependencies]
@@ -40,6 +45,10 @@ windows = { workspace = true }
 
 [features]
 default = []
-wakeword = ["livekit-wakeword", "audio-capture"]
+wakeword = ["ort", "ort-tract", "ndarray", "audio-capture"]
 audio-capture = ["cpal", "dasp"]
 native-ml = ["wakeword", "audio-capture", "whisper-rs"]
+
+# Mirror livekit-wakeword: tract backend everywhere except aarch64 Windows.
+[target.'cfg(not(all(target_arch = "aarch64", target_os = "windows", target_env = "msvc")))'.dependencies]
+ort = { workspace = true, features = ["alternative-backend"], optional = true }

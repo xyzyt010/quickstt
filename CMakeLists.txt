@@ -19,7 +19,7 @@ find_package(Qt6 COMPONENTS Multimedia QUIET)
 if(Qt6_FOUND)
   add_subdirectory(third_party/QtAwesome EXCLUDE_FROM_ALL)
 else()
-  message(STATUS "Qt6 not found on Linux — C++ GUI targets disabled, use cargo build -p quickstt-gui")
+  message(STATUS "Qt6 not found on Linux — C++ GUI targets disabled, use cargo build -p quickstt-slint")
 endif()
 endif()
 

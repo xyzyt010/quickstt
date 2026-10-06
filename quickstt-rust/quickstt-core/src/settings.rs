@@ -20,6 +20,8 @@ use windows::Win32::System::Registry::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub selected_model: String,
+    #[serde(default = "default_selected_language")]
+    pub selected_language: String,
     pub widget_models: Vec<String>,
     pub cloud_widget_models: Vec<String>,
     pub favorite_models: Vec<String>,
@@ -75,6 +77,39 @@ pub struct Settings {
     pub on_command_transcription: bool,
     #[serde(default = "default_wake_word_mode")]
     pub wake_word_mode: String,
+    #[serde(default = "default_wakeword_sensitivity")]
+    pub wakeword_sensitivity: u32,
+    #[serde(default = "default_vad_sensitivity")]
+    pub vad_sensitivity: u32,
+    #[serde(default = "default_auto_stop_silence")]
+    pub auto_stop_silence: bool,
+    #[serde(default = "default_silence_duration")]
+    pub silence_duration: u32,
+    #[serde(default = "default_lrc_enabled")]
+    pub lrc_enabled: bool,
+    #[serde(default = "default_ww_phrase_enabled")]
+    pub ww_hey_jarvis: bool,
+    #[serde(default = "default_ww_phrase_enabled")]
+    pub ww_jarvis: bool,
+    #[serde(default = "default_ww_phrase_enabled")]
+    pub ww_alexa: bool,
+    #[serde(default = "default_ww_phrase_enabled")]
+    pub ww_agent: bool,
+    #[serde(default = "default_ww_phrase_enabled")]
+    pub ww_hem: bool,
+    #[serde(default)]
+    pub clap_action: u32,
+    #[serde(default = "default_snap_action")]
+    pub snap_action: u32,
+    /// Clap action (0 = Start Dictation, 1 = Stop Dictation,
+    /// 2 = Disabled). One detector, one setting. `clap_action`/`snap_action`
+    /// are kept mirrored for backward compat but no longer read
+    /// (`snap_action` is a retired alias).
+    #[serde(default = "default_transient_action")]
+    pub transient_action: u32,
+    /// Selected microphone (OS device name). Empty = system default input.
+    #[serde(default)]
+    pub selected_microphone: String,
     /// extra unknown keys preserved for forward compat
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, String>,
@@ -86,11 +121,21 @@ fn default_ctrl_space_mode() -> u32 { DEFAULT_CTRL_SPACE_MODE }
 fn default_ctrl_space_output() -> u32 { DEFAULT_CTRL_SPACE_OUTPUT }
 fn default_on_command_transcription() -> bool { DEFAULT_ON_COMMAND_TRANSCRIPTION }
 fn default_wake_word_mode() -> String { DEFAULT_WAKE_WORD_MODE.to_string() }
+fn default_wakeword_sensitivity() -> u32 { 50 }
+fn default_vad_sensitivity() -> u32 { 50 }
+fn default_auto_stop_silence() -> bool { false }
+fn default_silence_duration() -> u32 { 8 }
+fn default_lrc_enabled() -> bool { true }
+fn default_ww_phrase_enabled() -> bool { true }
+fn default_snap_action() -> u32 { 0 }
+fn default_transient_action() -> u32 { 0 }
+fn default_selected_language() -> String { "Auto".to_string() }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             selected_model: String::new(),
+            selected_language: "Auto".to_string(),
             widget_models: vec![],
             cloud_widget_models: vec![],
             favorite_models: vec![],
@@ -140,6 +185,20 @@ impl Default for Settings {
             ctrl_space_output: DEFAULT_CTRL_SPACE_OUTPUT,
             on_command_transcription: DEFAULT_ON_COMMAND_TRANSCRIPTION,
             wake_word_mode: DEFAULT_WAKE_WORD_MODE.to_string(),
+            wakeword_sensitivity: 50,
+            vad_sensitivity: 50,
+            auto_stop_silence: false,
+            silence_duration: 8,
+            lrc_enabled: true,
+            ww_hey_jarvis: true,
+            ww_jarvis: true,
+            ww_alexa: true,
+            ww_agent: true,
+            ww_hem: true,
+            clap_action: 0,
+            snap_action: 0,
+            transient_action: 0,
+            selected_microphone: String::new(),
             extra: HashMap::new(),
         }
     }
@@ -197,6 +256,9 @@ impl Settings {
         settings.selected_model = read_string(key, "selectedModel")
             .or_else(|| read_string(key, "selected_model"))
             .unwrap_or_default();
+        settings.selected_language = read_string(key, "selectedLanguage")
+            .or_else(|| read_string(key, "selected_language"))
+            .unwrap_or_else(|| "Auto".to_string());
         settings.widget_models = read_multi_string(key, "widgetModels").unwrap_or_default();
         if settings.widget_models.len() == 1
             && settings.widget_models[0].trim().eq_ignore_ascii_case("Vosk Small En")
@@ -288,9 +350,43 @@ impl Settings {
             read_bool(key, "onCommandTranscription").unwrap_or(DEFAULT_ON_COMMAND_TRANSCRIPTION);
         settings.wake_word_mode =
             read_string(key, "wakeWordMode").unwrap_or_else(|| DEFAULT_WAKE_WORD_MODE.to_string());
+        settings.wakeword_sensitivity =
+            read_dword(key, "wakewordSensitivity").unwrap_or(50);
+        settings.vad_sensitivity =
+            read_dword(key, "vadSensitivity").unwrap_or(50);
+        settings.auto_stop_silence =
+            read_bool(key, "autoStopSilence").unwrap_or(false);
+        settings.silence_duration =
+            read_dword(key, "silenceDuration").unwrap_or(8);
+        settings.lrc_enabled =
+            read_bool(key, "lrcEnabled").unwrap_or(true);
+        settings.ww_hey_jarvis =
+            read_bool(key, "wwHeyJarvis").unwrap_or(true);
+        settings.ww_jarvis =
+            read_bool(key, "wwJarvis").unwrap_or(true);
+        settings.ww_alexa =
+            read_bool(key, "wwAlexa").unwrap_or(true);
+        settings.ww_agent =
+            read_bool(key, "wwAgent").unwrap_or(true);
+        settings.ww_hem =
+            read_bool(key, "wwHem").unwrap_or(true);
+        settings.clap_action =
+            read_dword(key, "clapAction").unwrap_or(0);
+        settings.snap_action =
+            read_dword(key, "snapAction").unwrap_or(1);
+        // Unified transient action: stored value wins (explicit user choice
+        // is never overridden); installs without the key get the default
+        // (Start — transients are active out of the box).
+        settings.transient_action = read_dword(key, "transientAction").unwrap_or(0).min(2);
+        settings.selected_microphone = read_string(key, "selectedMicrophone")
+            .or_else(|| read_string(key, "selected_microphone"))
+            .unwrap_or_default();
 
         // Migrate legacy extra keys if Registry had them as strings
         Self::migrate_extra(&mut settings);
+        // Unified control: legacy mirrors always follow the shared action.
+        settings.clap_action = settings.transient_action;
+        settings.snap_action = settings.transient_action;
 
         unsafe {
             let _ = RegCloseKey(key);
@@ -318,6 +414,16 @@ impl Settings {
         let mut settings: Self = toml::from_str(&content)
             .map_err(|e| crate::error::QuickSttError::SettingsError(e.to_string()))?;
         Self::migrate_extra(&mut settings);
+        // Same rule as the Registry path: stored value wins, otherwise the
+        // default (Start — transients are active out of the box).
+        if !content.contains("transient_action") {
+            settings.transient_action = 0;
+        } else {
+            settings.transient_action = settings.transient_action.min(2);
+        }
+        // Keep the legacy mirrors in sync going forward.
+        settings.clap_action = settings.transient_action;
+        settings.snap_action = settings.transient_action;
         Ok(settings)
     }
 
@@ -480,6 +586,7 @@ impl Settings {
     fn set_string_field(&mut self, key: &str, value: &str) {
         match key {
             "selectedModel" | "selected_model" => self.selected_model = value.to_string(),
+            "selectedLanguage" | "selected_language" => self.selected_language = value.to_string(),
             "wakeEngine" => self.wake_engine = value.to_string(),
             "porcupineAccessKey" => self.porcupine_access_key = value.to_string(),
             "recordingDir" => self.recording_dir = value.to_string(),
@@ -498,6 +605,7 @@ impl Settings {
             "ctrlSpaceEnabled" | "ctrl_space_enabled" => self.ctrl_space_enabled = value.eq_ignore_ascii_case("true") || value == "1",
             "onCommandTranscription" | "on_command_transcription" => self.on_command_transcription = value.eq_ignore_ascii_case("true") || value == "1",
             "wakeWordMode" | "wake_word_mode" => self.wake_word_mode = value.to_string(),
+            "selectedMicrophone" | "selected_microphone" => self.selected_microphone = value.to_string(),
             _ => { self.extra.insert(key.to_string(), value.to_string()); }
         }
     }
@@ -519,6 +627,9 @@ impl Settings {
             "waveformSensitivity" => self.waveform_sensitivity = value,
             "ctrlSpaceMode" | "ctrl_space_mode" => self.ctrl_space_mode = value,
             "ctrlSpaceOutput" | "ctrl_space_output" => self.ctrl_space_output = value,
+            "wakewordSensitivity" | "wakeword_sensitivity" => {
+                self.wakeword_sensitivity = value.clamp(0, 100)
+            }
             _ => { self.extra.insert(key.to_string(), value.to_string()); }
         }
     }
@@ -572,6 +683,7 @@ impl Settings {
                 Ok(())
             };
             let _ = write_str("selectedModel", &self.selected_model);
+            let _ = write_str("selectedLanguage", &self.selected_language);
             let _ = write_multi("widgetModels", &self.widget_models);
             let _ = write_multi("cloudWidgetModels", &self.cloud_widget_models);
             let _ = write_multi("favoriteModels", &self.favorite_models);
@@ -621,6 +733,20 @@ impl Settings {
             let _ = write_dword("ctrlSpaceOutput", self.ctrl_space_output);
             let _ = write_str("onCommandTranscription", if self.on_command_transcription { "true" } else { "false" });
             let _ = write_str("wakeWordMode", &self.wake_word_mode);
+            let _ = write_dword("wakewordSensitivity", self.wakeword_sensitivity);
+            let _ = write_dword("vadSensitivity", self.vad_sensitivity);
+            let _ = write_str("autoStopSilence", if self.auto_stop_silence { "true" } else { "false" });
+            let _ = write_dword("silenceDuration", self.silence_duration);
+            let _ = write_str("lrcEnabled", if self.lrc_enabled { "true" } else { "false" });
+            let _ = write_str("wwHeyJarvis", if self.ww_hey_jarvis { "true" } else { "false" });
+            let _ = write_str("wwJarvis", if self.ww_jarvis { "true" } else { "false" });
+            let _ = write_str("wwAlexa", if self.ww_alexa { "true" } else { "false" });
+            let _ = write_str("wwAgent", if self.ww_agent { "true" } else { "false" });
+            let _ = write_str("wwHem", if self.ww_hem { "true" } else { "false" });
+            let _ = write_dword("clapAction", self.clap_action);
+            let _ = write_dword("snapAction", self.snap_action);
+            let _ = write_dword("transientAction", self.transient_action);
+            let _ = write_str("selectedMicrophone", &self.selected_microphone);
             unsafe { let _ = RegCloseKey(key); }
             let _ = self.save_to_toml();
             return Ok(());

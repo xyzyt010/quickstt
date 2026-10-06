@@ -1,99 +1,142 @@
-export component TextBoardWidget inherits Window {
-    width: 420px;
-    height: 180px;
+// TextBoard — compact floating transcript window (current turn only).
+// Title bar with live status, close button, title-drag, and a tight
+// scrollable transcript (current turn + live partial, never history).
+// Rust drives title/body text and shows it on transcription activity;
+// × closes it until the next session starts.
+
+export component TextBoard inherits Window {
+    title: "";
+    width: 340px;
+    height: 140px;
     background: transparent;
+    no-frame: true;
 
-    in property <string> text_content: "";
-    in property <string> header_text: "Idling...";
-    in property <bool> is_attached: true;
-    in property <int> text_size: 14;
-    in property <float> window_opacity: 0.87;
+    in property <string> title_text: "QuickSTT TextBoard";
+    in property <string> body_text: "Transcript will appear here...";
+    in property <bool> copied_indicator: false;
 
-    callback toggle_attach();
+    callback close_board();
+    callback copy_text();
+    callback drag_start();
+    callback drag_moved();
+    callback drag_end();
 
     Rectangle {
+        x: 0;
+        y: 0;
         width: parent.width;
         height: parent.height;
-        opacity: window_opacity;
-        border-radius: is_attached ? 0px : 6px;
-        clip: true;
+        background: #01000000;
+    }
 
-        VerticalLayout {
-            spacing: 0px;
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        border-radius: 10px;
+        background: #0A0A0A;
+        border-width: 0px;
+        border-color: transparent;
+    }
 
-            // Title Bar
-            Rectangle {
-                height: 28px;
-                background: #1E1E1E;
-                
-                HorizontalLayout {
-                    padding-left: 8px;
-                    padding-right: 4px;
-                    alignment: space-between;
-                    spacing: 4px;
-
-                    Text {
-                        text: header_text;
-                        color: #CCCCCC;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                    }
-
-                    // Chain Button
-                    VerticalLayout {
-                        alignment: center;
-                        Rectangle {
-                            width: 26px;
-                            height: 26px;
-                            background: chain_touch.has-hover ? #444444 : transparent;
-                            border-radius: chain_touch.has-hover ? 4px : 0px;
-
-                            Text {
-                                // U+26D3 (⛓) if attached, U+1F517 (🔗) if detached
-                                text: is_attached ? "⛓" : "🔗"; 
-                                font-size: 13px;
-                                color: #FFFFFF;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-
-                            chain_touch := TouchArea {
-                                clicked => { toggle_attach(); }
-                                mouse-cursor: pointer;
-                            }
-                        }
-                    }
-                }
+    // Title bar (drag handle, compact 26px).
+    title_touch := TouchArea {
+        x: 0px;
+        y: 0px;
+        width: 260px;
+        height: 26px;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                drag_start();
             }
-
-            // Top Border 
-            Rectangle {
-                height: 1px;
-                background: #333333;
+            if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
+                drag_end();
             }
+        }
+        moved => { drag_moved(); }
+        mouse-cursor: move;
+    }
+    Text {
+        x: 10px;
+        y: 0px;
+        width: 250px;
+        height: 26px;
+        text: title_text;
+        color: #B0B0B0;
+        font-size: 11px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
 
-            // Text Area
-            Rectangle {
-                background: rgba(20, 20, 20, 240);
-                
-                Flickable {
-                    viewport-height: ta_text.preferred-height;
-                    width: parent.width;
-                    height: parent.height;
-                    
-                    ta_text := Text {
-                        width: parent.width - 12px;
-                        x: 6px;
-                        y: 6px;
-                        text: text_content;
-                        color: #FFFFFF;
-                        font-family: "Consolas";
-                        font-size: text_size * 1px;
-                        wrap: word-wrap;
-                        vertical-alignment: top;
-                    }
-                }
-            }
+    // Copy button
+    copy_btn := Rectangle {
+        x: 268px;
+        y: 4px;
+        width: 36px;
+        height: 18px;
+        border-radius: 4px;
+        background: copied_indicator ? #1A3A1A : (copy_touch.has-hover ? #2A2A2A : #161616);
+        border-width: copied_indicator ? 1px : 0px;
+        border-color: copied_indicator ? #51E088 : transparent;
+
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: copied_indicator ? "✓" : "Copy";
+            color: copied_indicator ? #51E088 : #EDEDED;
+            font-size: 10px;
+            font-weight: 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        copy_touch := TouchArea {
+            clicked => { copy_text(); }
+            mouse-cursor: pointer;
+        }
+    }
+
+    // Close button
+    Text {
+        x: 314px;
+        y: 0px;
+        width: 20px;
+        height: 26px;
+        text: "×";
+        color: close_touch.has-hover ? #FFFFFF : #808080;
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    close_touch := TouchArea {
+        x: 310px;
+        y: 0px;
+        width: 26px;
+        height: 26px;
+        clicked => { close_board(); }
+        mouse-cursor: pointer;
+    }
+
+    Flickable {
+        x: 12px;
+        y: 30px;
+        width: 316px;
+        height: 98px;
+        viewport-width: self.width;
+        viewport-height: body.preferred-height;
+        body := TextInput {
+            x: 0px;
+            y: 0px;
+            width: 316px;
+            text: body_text;
+            color: #FFFFFF;
+            font-size: 14px;
+            font-weight: 500;
+            font-family: "Segoe UI";
+            wrap: word-wrap;
+            read-only: true;
+            single-line: false;
         }
     }
 }

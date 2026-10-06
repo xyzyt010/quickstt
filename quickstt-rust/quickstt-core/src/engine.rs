@@ -47,12 +47,203 @@ impl WakeEngine {
 }
 
 /// Detect available compute targets (GPU/CPU)
+///
+/// Discrete-GPU rules follow handy_discrete_gpu_asr_integration.md:
+/// iGPUs (Intel UHD/Iris, AMD 780M/APU, Apple integrated, NPUs) must NOT
+/// count as discrete — those systems stay on the CPU path.
 #[derive(Debug, Clone)]
 pub struct ComputeTarget {
     pub name: String,
     pub is_gpu: bool,
     pub memory_mb: u64,
     pub vendor: String,
+    /// Dedicated VRAM in MB (DXGI DedicatedVideoMemory; 0 when unknown).
+    pub dedicated_vram_mb: u64,
+    /// True only for a physical discrete GPU (see `is_discrete_gpu_name`).
+    pub is_discrete: bool,
+    /// Raw adapter description for UI display.
+    pub device_name: String,
+}
+
+/// Single selected compute backend + device for the recommendation engine.
+#[derive(Debug, Clone)]
+pub struct HardwareInfo {
+    pub has_discrete_gpu: bool,
+    pub vendor: String,
+    pub device_name: String,
+    pub vram_mb: u64,
+    /// cuda | rocm | vulkan | cpu (shipped: cpu + vulkan; cuda needs CUDA build).
+    pub backend: String,
+    pub system_ram_gb: u64,
+}
+
+impl HardwareInfo {
+    pub fn detect() -> Self {
+        let targets = ComputeTarget::detect_all();
+        let system_ram_gb = system_ram_gb();
+        // Priority after iGPU filtering: NVIDIA > AMD > Intel > CPU.
+        let pick = targets
+            .iter()
+            .filter(|t| t.is_gpu && t.is_discrete)
+            .find(|t| t.vendor == "NVIDIA")
+            .or_else(|| {
+                targets
+                    .iter()
+                    .filter(|t| t.is_gpu && t.is_discrete)
+                    .find(|t| t.vendor == "AMD")
+            })
+            .or_else(|| {
+                targets
+                    .iter()
+                    .filter(|t| t.is_gpu && t.is_discrete)
+                    .find(|t| t.vendor == "Intel")
+            });
+        match pick {
+            Some(d) => {
+                let backend = if d.vendor == "NVIDIA" {
+                    // CUDA when a CUDA whisper build is present, else Vulkan/CPU
+                    // fallback (shipped binaries are CPU+Vulkan; no CUDA yet).
+                    if cuda_runtime_present() { "cuda" } else { "vulkan" }
+                } else if d.vendor == "AMD" {
+                    if rocm_available() { "rocm" } else { "vulkan" }
+                } else {
+                    "vulkan"
+                };
+                Self {
+                    has_discrete_gpu: true,
+                    vendor: d.vendor.clone(),
+                    device_name: d.device_name.clone(),
+                    vram_mb: d.dedicated_vram_mb,
+                    backend: backend.to_string(),
+                    system_ram_gb,
+                }
+            }
+            None => Self {
+                has_discrete_gpu: false,
+                vendor: "CPU".to_string(),
+                device_name: "CPU".to_string(),
+                vram_mb: 0,
+                backend: "cpu".to_string(),
+                system_ram_gb,
+            },
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        if self.has_discrete_gpu {
+            format!(
+                "{} {} • {} • {} MB VRAM",
+                self.vendor, self.device_name, self.backend, self.vram_mb
+            )
+        } else {
+            format!("CPU • {} GB RAM", self.system_ram_gb)
+        }
+    }
+}
+
+fn system_ram_gb() -> u64 {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        unsafe {
+            let mut st = MEMORYSTATUSEX {
+                dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+                ..Default::default()
+            };
+            if GlobalMemoryStatusEx(&mut st).is_ok() {
+                return (st.ullTotalPhys / (1024 * 1024 * 1024)).max(1);
+            }
+        }
+        16
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+            for line in text.lines() {
+                if line.starts_with("MemTotal:") {
+                    let kb: u64 = line
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(16 * 1024 * 1024);
+                    return (kb / (1024 * 1024)).max(1);
+                }
+            }
+        }
+        16
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn cuda_runtime_present() -> bool {
+    // A CUDA whisper build ships nvcuda-adjacent DLLs next to the exe.
+    // Shipped 2.0.0-alpha binaries are CPU+Vulkan only → false for now.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for cand in ["nvcuda.dll", "cublas64_12.dll", "whisper-cuda.dll"] {
+                if dir.join(cand).exists() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+#[cfg(not(target_os = "windows"))]
+fn cuda_runtime_present() -> bool {
+    std::path::Path::new("/usr/local/cuda/lib64/libcudart.so").exists()
+}
+
+fn rocm_available() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        false // ROCm on Windows: Vulkan fallback per spec.
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("rocm-smi")
+            .arg("--showid")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
+/// Discrete-GPU name heuristic (spec: never trust "GPU present" alone).
+/// Returns true only for physical discrete cards:
+/// NVIDIA RTX/GTX/Quadro/Tesla, AMD RX/PRO/WX (not 780M/760M/680M/APU/m series),
+/// Intel Arc A/B-series. Everything else (UHD, Iris, Radeon 780M, Apple, NPU)
+/// is integrated.
+pub fn is_discrete_gpu_name(name: &str, vendor: &str) -> bool {
+    let n = name.to_lowercase();
+    match vendor {
+        "NVIDIA" => {
+            // Exclude Jetson/embedded + GRID virtual (no local VRAM advantage).
+            if n.contains("jetson") || n.contains("grid") || n.contains("virtual") {
+                return false;
+            }
+            n.contains("rtx") || n.contains("gtx") || n.contains("quadro") || n.contains("tesla")
+        }
+        "AMD" => {
+            if n.contains("780m")
+                || n.contains("760m")
+                || n.contains("680m")
+                || n.contains("660m")
+                || n.contains("apu")
+                || n.contains("ryzen")
+                || n.contains("radeon graphics")
+                    && !n.contains("rx")
+            {
+                return false;
+            }
+            n.contains(" rx ") || n.contains("rx ") || n.contains(" rx") || n.contains("radeon rx") || n.contains("radeon pro") || n.contains(" wx ")
+        }
+        "Intel" => {
+            // Arc discrete only; UHD/Iris/Iris Xe are iGPU.
+            n.contains("arc") && (n.contains(" a") || n.contains(" b") || n.contains("a3") || n.contains("a5") || n.contains("a7") || n.contains("b5") || n.contains("b7"))
+        }
+        _ => false,
+    }
 }
 
 impl ComputeTarget {
@@ -65,6 +256,9 @@ impl ComputeTarget {
             is_gpu: false,
             memory_mb: 0,
             vendor: "System".to_string(),
+            dedicated_vram_mb: 0,
+            is_discrete: false,
+            device_name: "CPU".to_string(),
         });
 
         if let Ok(gpus) = detect_gpus_dxgi() {
@@ -109,11 +303,20 @@ fn detect_gpus_dxgi() -> Result<Vec<ComputeTarget>> {
                             0x8086 => "Intel",
                             _ => "Unknown",
                         };
+                        // Adapter description for discrete heuristics + UI.
+                        let raw: &[u16] = &desc.Description;
+                        let end = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+                        let dev_name = String::from_utf16_lossy(&raw[..end]);
+                        let dedicated_mb = (dedicated_memory as u64) / (1024 * 1024);
+                        let short = format!("GPU {} ({})", adapter_index, vendor);
                         targets.push(ComputeTarget {
-                            name: format!("GPU {} ({})", adapter_index, vendor),
+                            name: format!("{} — {}", short, dev_name.trim()),
                             is_gpu: true,
                             memory_mb: (dedicated_memory as u64 + shared_memory as u64) / (1024 * 1024),
                             vendor: vendor.to_string(),
+                            dedicated_vram_mb: dedicated_mb,
+                            is_discrete: is_discrete_gpu_name(dev_name.trim(), vendor),
+                            device_name: dev_name.trim().to_string(),
                         });
                         adapter_index += 1;
                     }
@@ -144,11 +347,17 @@ fn detect_gpus_linux() -> Result<Vec<ComputeTarget>> {
             if let Some(v) = vendor {
                 // Only treat VGA/3D/display controllers as GPUs
                 if lower.contains("vga") || lower.contains("3d") || lower.contains("display") {
+                    // Linux has no cheap VRAM query here — discrete flag comes
+                    // from the name heuristic; VRAM stays 0 (Tiny fallback).
+                    let dev = line.trim().to_string();
                     targets.push(ComputeTarget {
                         name: format!("GPU ({})", v),
                         is_gpu: true,
                         memory_mb: 0,
                         vendor: v.to_string(),
+                        dedicated_vram_mb: 0,
+                        is_discrete: is_discrete_gpu_name(&dev, v),
+                        device_name: dev,
                     });
                 }
             }

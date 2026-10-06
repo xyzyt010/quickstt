@@ -1,0 +1,278 @@
+// PillMenu — dark left-click menu (Hide / Settings / Microphone / Model /
+// History / Paste), plus MenuFlyout for the Microphone + Model submenus.
+// Dark theme: #1B1D22 card, hover #262932, selected #233246 + check.
+// Rust drives submenu data/selection/placement and all actions; hover
+// highlight animates per-row.
+
+export component PillMenu inherits Window {
+    title: "";
+    width: 248px;
+    height: 234px;
+    background: transparent;
+    no-frame: true;
+
+    in-out property <float> menu_op: 1.0;
+    animate menu_op { duration: 130ms; easing: ease-out; }
+
+    callback hide_row();
+    callback settings_row();
+    callback mic_row();
+    callback model_row();
+    callback history_row();
+    callback paste_row();
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        background: #01000000;
+    }
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 248px;
+        height: 234px;
+        border-radius: 14px;
+        background: #1B1B1C;
+        opacity: menu_op;
+        border-width: 0px;
+        border-color: transparent;
+
+        VerticalLayout {
+            x: 6px;
+            y: 6px;
+            width: 236px;
+            height: 222px;
+            spacing: 0px;
+
+            Rectangle {
+                height: 34px;
+                border-radius: 8px;
+                background: h_hide.has-hover ? #2A2A2C : transparent;
+                animate background { duration: 100ms; }
+                h_hide := TouchArea {
+                    clicked => { hide_row(); }
+                    mouse-cursor: pointer;
+                }
+                Text {
+                    x: 10px;
+                    height: 34px;
+                    text: "Hide for 1 hour";
+                    color: #FFFFFF;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle {
+                height: 34px;
+                border-radius: 8px;
+                background: h_set.has-hover ? #2A2A2C : transparent;
+                animate background { duration: 100ms; }
+                h_set := TouchArea {
+                    clicked => { settings_row(); }
+                    mouse-cursor: pointer;
+                }
+                Text {
+                    x: 10px;
+                    height: 34px;
+                    text: "Settings";
+                    color: #FFFFFF;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle {
+                height: 9px;
+                Rectangle { x: 10px; y: 4px; width: 216px; height: 1px; background: #2A2A2C; }
+            }
+            Rectangle {
+                height: 34px;
+                border-radius: 8px;
+                background: h_mic.has-hover ? #2A2A2C : transparent;
+                animate background { duration: 100ms; }
+                h_mic := TouchArea {
+                    clicked => { mic_row(); }
+                    mouse-cursor: pointer;
+                }
+                Text {
+                    x: 10px;
+                    height: 34px;
+                    text: "Microphone";
+                    color: #FFFFFF;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    x: 204px;
+                    width: 22px;
+                    height: 34px;
+                    text: "›";
+                    color: #A0A0A0;
+                    font-size: 16px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle {
+                height: 34px;
+                border-radius: 8px;
+                background: h_mod.has-hover ? #2A2A2C : transparent;
+                animate background { duration: 100ms; }
+                h_mod := TouchArea {
+                    clicked => { model_row(); }
+                    mouse-cursor: pointer;
+                }
+                Text {
+                    x: 10px;
+                    height: 34px;
+                    text: "Model";
+                    color: #FFFFFF;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    x: 204px;
+                    width: 22px;
+                    height: 34px;
+                    text: "›";
+                    color: #A0A0A0;
+                    font-size: 16px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle {
+                height: 9px;
+                Rectangle { x: 10px; y: 4px; width: 216px; height: 1px; background: #2A2A2C; }
+            }
+            Rectangle {
+                height: 34px;
+                border-radius: 8px;
+                background: h_hist.has-hover ? #2A2A2C : transparent;
+                animate background { duration: 100ms; }
+                h_hist := TouchArea {
+                    clicked => { history_row(); }
+                    mouse-cursor: pointer;
+                }
+                Text {
+                    x: 10px;
+                    height: 34px;
+                    text: "Transcript history";
+                    color: #FFFFFF;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle {
+                height: 34px;
+                border-radius: 8px;
+                background: h_paste.has-hover ? #2A2A2C : transparent;
+                animate background { duration: 100ms; }
+                h_paste := TouchArea {
+                    clicked => { paste_row(); }
+                    mouse-cursor: pointer;
+                }
+                Text {
+                    x: 10px;
+                    height: 34px;
+                    text: "Paste last transcript";
+                    color: #FFFFFF;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+// MenuFlyout — submenu panel shared by Microphone + Model. Rust sets the
+// header, items, selection, size and screen position on every open.
+export component MenuFlyout inherits Window {
+    title: "";
+    width: 264px;
+    height: 300px;
+    background: transparent;
+    no-frame: true;
+
+    in-out property <float> fly_op: 1.0;
+    animate fly_op { duration: 130ms; easing: ease-out; }
+    in property <string> head_text: "";
+    in property <[string]> items: [];
+    in property <int> item_count: 0;
+    in property <int> selected_idx: -1;
+
+    callback item_clicked(int);
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        background: #01000000;
+    }
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 264px;
+        height: (44 + item_count * 32) * 1px;
+        border-radius: 12px;
+        background: #1B1B1C;
+        opacity: fly_op;
+        border-width: 0px;
+        border-color: transparent;
+
+        Text {
+            x: 12px;
+            y: 0px;
+            width: 240px;
+            height: 32px;
+            text: head_text;
+            color: #A0A0A0;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Rectangle { x: 12px; y: 31px; width: 240px; height: 1px; background: #2A2A2C; }
+
+        VerticalLayout {
+            x: 6px;
+            y: 38px;
+            width: 252px;
+            spacing: 0px;
+            for i in item_count: Rectangle {
+                height: 32px;
+                border-radius: 7px;
+                background: fi.has-hover ? #2A2A2C : (i == selected_idx ? #333336 : transparent);
+                animate background { duration: 100ms; }
+                fi := TouchArea {
+                    clicked => { item_clicked(i); }
+                    mouse-cursor: pointer;
+                }
+                Text {
+                    x: 10px;
+                    width: 196px;
+                    height: 32px;
+                    text: items[i];
+                    color: #FFFFFF;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if i == selected_idx: Text {
+                    x: 212px;
+                    width: 30px;
+                    height: 32px;
+                    text: "✓";
+                    color: #FFFFFF;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

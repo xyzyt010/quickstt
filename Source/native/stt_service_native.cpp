@@ -1329,6 +1329,14 @@ public:
   std::chrono::steady_clock::time_point lastActivationTime;
   std::chrono::steady_clock::time_point cloudSettleUntil;
   double wakeSuppressedUntil = 0.0;
+  double sleepHoldUntil = 0.0;
+  // forceSleep() hold expiry (absolute getTimeSeconds()): a WAKEWORDMODE
+  // re-enable must never clobber an in-progress close cooldown, or the
+  // widget would wake itself up seconds after the user dismissed it.
+  // Explicit-consent gate: wake detectors only run when the user opted in
+  // via WAKEWORDMODE ("Always On" / "On with Widget"). Defaults to false so
+  // the service never transcribes without permission.
+  bool wakewordsEnabled = false;
   int silenceLimitSec = 999999;  // Default: no auto-stop (only close words / button)
   std::atomic<bool> cloudTranscription{false};
   std::atomic<bool> cloudAwaitingFrontend{false};
@@ -1349,15 +1357,22 @@ public:
   // Wakeword hit counting
   std::unordered_map<std::string, int> owwHitCounts;
   int voskWakeHits = 0;
-  // Single-token wake words score more reliably with 1 consecutive hit;
-  // multi-word phrases still benefit from 2. Default lean sensitive so users
-  // do not need to shout (threshold itself is also lowered below).
-  int wakeHitRequirement = 1;
+  // Wake diagnostics: per-model peak score since last periodic report.
+  // Proves the detectors are scoring (and at what level) without per-chunk spam.
+  std::unordered_map<std::string, float> wakePeakScores;
+  std::chrono::steady_clock::time_point lastWakeDiagTime{};
+  // Consecutive over-threshold windows required to fire. A genuine phrase
+  // scores high across 3+ back-to-back 80ms windows (~240ms of sustained
+  // match); a noise/TV blip spikes once and dies. 3 hits at a sensitive
+  // 0.50 threshold fires reliably on real speech without phantom popups.
+  // (1 hit = TV chatter wakes; 2 hits at 0.60 = quiet phrases missed.)
+  int wakeHitRequirement = 3;
   bool voskFallbackRequired = true;
   bool frontendRequestedOffload = false;
 
   bool canOffloadVosk() const {
-    if (voskFallbackRequired && !frontendRequestedOffload) return false;
+    if ((voskFallbackRequired || voskKeywordNeeded) && !frontendRequestedOffload)
+      return false;
     return true;
   }
 
@@ -1497,16 +1512,35 @@ public:
   int parakeetConsecutiveSpeechFrames = 0;
   int parakeetConsecutiveSilenceFrames = 0;
 
+  // ── Instant-mic background model load ──
+  // TOGGLE goes ACTIVE + STATE 1 immediately; when the direct worker is
+  // offloaded, the GGUF reload happens on a background thread while early
+  // mic audio accumulates in streamWarmupBuf (cap ~10s) and is flushed
+  // into the stream session once ready. No spoken syllable is lost to load
+  // latency, and the UI/command/audio threads never block on model load.
+  std::atomic<bool> streamModelLoading{false};
+  std::vector<int16_t> streamWarmupBuf;
+  std::mutex streamWarmupMutex;
+  static constexpr size_t kStreamWarmupMaxSamples = 16000 * 10;
+  std::chrono::steady_clock::time_point lastStreamBeginAttempt{};
+  // Vosk keyword duty for wake phrases with no neural model on disk
+  // (e.g. custom phrases when only some ONNX/TFLite models shipped).
+  bool voskKeywordNeeded = false;
+
   // VAD-gated wake word detection state
   int wakeVadSpeechFrames = 0;     // Sustained speech frame counter
   int wakeVadSilenceFrames = 0;    // Sustained silence frame counter
   std::chrono::steady_clock::time_point wakeVadLastSpeechTime{};
-  // 1 frame is enough to open the gate for short wake phrases spoken at a
-  // normal volume; the old value of 2 + high OWW threshold forced shouting.
-  static constexpr int kWakeVadMinSpeechFrames = 1;
+  // VAD gate stays LOW-sensitivity on purpose: 2 sustained speech frames
+  // (~160ms) open it, so isolated noise blips never reach the scorer while
+  // a real spoken phrase opens it almost instantly. False-trigger rejection
+  // then lives in the 3-consecutive-hit score rule, so quiet phrases still
+  // get scored once the gate opens instead of starving at the gate.
+  static constexpr int kWakeVadMinSpeechFrames = 2;
   // Keep accepting a model score briefly after speech ends. OpenWakeWord needs
   // the following context to score a short phrase such as "alexa" correctly.
-  static constexpr auto kWakeVadDecisionHold = std::chrono::milliseconds(1800);
+  // 800ms (not 1200ms) so TV chatter can't bridge two far-apart blips.
+  static constexpr auto kWakeVadDecisionHold = std::chrono::milliseconds(800);
 
   STTEngine() {
     exeDir = getExeDir();
@@ -1603,6 +1637,7 @@ public:
     }
     initOWW();
     initPV();
+    refreshVoskKeywordNeed();
   }
 
   void initOWW() {
@@ -1620,13 +1655,16 @@ public:
       voskFallbackRequired = true;
       return;
     }
-    // 0.25f provides high sensitivity to normal spoken volume.
-    owwReady = owwDetector.init(tflLoader, owwDir, settings.wakeWords, 0.25f);
+    // 0.50f: sensitive enough for normal spoken volume at arm's length,
+    // strict enough with the 3-hit rule + strict VAD gate that TV chatter
+    // and room noise don't wake the widget. (0.25f = constant phantoms,
+    // 0.60f = quiet phrases missed.)
+    owwReady = owwDetector.init(tflLoader, owwDir, settings.wakeWords, 0.50f);
 
     // Initialize WakeWordNet ONNX detector for custom models (agent, hem, jarvis)
     std::string ortDll = findOrtDll();
     if (!ortDll.empty() && ortLoader.load(ortDll)) {
-      wakeNetReady = wakeNetDetector.init(ortLoader, owwDir, settings.wakeWords, 0.25f);
+      wakeNetReady = wakeNetDetector.init(ortLoader, owwDir, settings.wakeWords, 0.50f);
       if (wakeNetReady) {
         svc_log("WakeWordNet ready with %d/%d wake models",
                 (int)wakeNetDetector.wake_models_.size(), (int)settings.wakeWords.size());
@@ -2350,12 +2388,18 @@ public:
       return true;
     }
     // Wait for a real final (has "text") — skip pure partial/committed acks.
-    // Cap at 2.5s: Nemotron finalize is usually fast once audio is flushed;
-    // the old 10s wait felt like "no apparent reason" delay.
+    // Cap at 1.5s: Nemotron finalize is fast once audio is flushed. While
+    // waiting, keep draining the capture device (non-blocking) so its ring
+    // never overruns — an overrun is the "mic dies for a few seconds" gap
+    // users hear after every turn. Drained audio is intentionally discarded:
+    // the 0.75s pre-roll re-seeds the next turn's onset.
     bool gotFinalLine = false;
     auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    std::vector<int16_t> spill;
     while (std::chrono::steady_clock::now() < deadline) {
+      while (audio.getChunk(spill, 0)) {
+      }
       std::string line = parakeetPipe.tryReadLine(100);
       if (line.empty())
         continue;
@@ -2769,6 +2813,7 @@ public:
     popupSessionHeld = false;
     mode = EngineMode::SLEEP;
     suppressWakeword(10.0);  // 10s — long enough that ambient noise won't re-trigger
+    sleepHoldUntil = getTimeSeconds() + 10.0;
     finishCloudTurn();
     if (streamSessionActive)
       endStreamSession();
@@ -2777,7 +2822,71 @@ public:
     sendEvent("STATE", "-1,Hidden");
   }
 
-  void activateSTT() {
+  void appendStreamWarmup(const std::vector<int16_t> &chunk) {
+    std::lock_guard<std::mutex> lock(streamWarmupMutex);
+    streamWarmupBuf.insert(streamWarmupBuf.end(), chunk.begin(), chunk.end());
+    if (streamWarmupBuf.size() > kStreamWarmupMaxSamples) {
+      streamWarmupBuf.erase(
+          streamWarmupBuf.begin(),
+          streamWarmupBuf.begin() +
+              (streamWarmupBuf.size() - kStreamWarmupMaxSamples));
+    }
+  }
+
+  // Background direct-worker (re)load for instant mic response. TOGGLE goes
+  // ACTIVE + STATE 1 immediately; the GGUF load + stream_start happen here
+  // while early mic audio accumulates in streamWarmupBuf and is flushed in
+  // order once the session is live. Guarded so only one loader runs; the
+  // audio loop never touches the pipe while loading (warmup instead), so no
+  // lock is needed around the worker during load.
+  void ensureDirectWorkerAsync() {
+    bool expected = false;
+    if (!streamModelLoading.compare_exchange_strong(expected, true))
+      return; // load already in flight
+    {
+      std::lock_guard<std::mutex> lock(streamWarmupMutex);
+      streamWarmupBuf.clear();
+    }
+    const uint64_t gen = streamGeneration;
+    std::thread([this, gen]() {
+      const bool ok = reloadParakeetModel();
+      bool began = false;
+      if (ok && mode == EngineMode::ACTIVE && gen == streamGeneration)
+        began = beginStreamSession();
+      if (began && mode == EngineMode::ACTIVE && gen == streamGeneration) {
+        // Flush everything captured during load, in order, then hand the
+        // live stream back to the audio loop.
+        std::vector<int16_t> warm;
+        {
+          std::lock_guard<std::mutex> lock(streamWarmupMutex);
+          warm.swap(streamWarmupBuf);
+        }
+        constexpr size_t kFeed = 2560; // ~160ms pieces, like the live path
+        for (size_t off = 0;
+             off < warm.size() && mode == EngineMode::ACTIVE &&
+             gen == streamGeneration;
+             off += kFeed) {
+          const size_t n = std::min(kFeed, warm.size() - off);
+          processStreamingChunk(
+              std::vector<int16_t>(warm.begin() + off, warm.begin() + off + n));
+        }
+        // Session live, buffered audio delivered — the turn continues live.
+        // (No extra STATE needed: the pill has shown Listening since TOGGLE.)
+      } else {
+        std::lock_guard<std::mutex> lock(streamWarmupMutex);
+        streamWarmupBuf.clear();
+        if (!began && mode == EngineMode::ACTIVE && gen == streamGeneration) {
+          // Worker truly unavailable (missing files, dead exe): release the
+          // turn honestly instead of a silent dead mic.
+          mode = EngineMode::IDLE;
+          sendEvent("STATE", "0,Model unavailable");
+        }
+      }
+      streamModelLoading = false;
+    }).detach();
+  }
+
+  void activateSTT(bool fromWakeword = false) {
     suppressWakeword(0.0);
     lastActivationTime = std::chrono::steady_clock::now();
     owwHitCounts.clear();
@@ -2804,13 +2913,32 @@ public:
       streamSessionActive = false;
     }
 
-    // Reload direct worker if preferred but offloaded/killed — Handy-style.
-    if (parakeetPreferred &&
-        (!parakeetPipe.ready || !parakeetPipe.isProcessAlive() ||
-         !parakeetPipe.modelLoaded)) {
-      sendEvent("STATE",
-                streamingPreferred ? "3,Loading Nemotron..."
-                                   : "3,Loading model...");
+    // Direct worker preferred but offloaded/killed.
+    // STREAMING (Nemotron Live) = INSTANT MIC: go ACTIVE + STATE 1 right
+    // now and load in the background (ensureDirectWorkerAsync). Blocking on
+    // GGUF load is what made every post-idle mic press dead for seconds —
+    // the mic icon flips the instant the user presses; early audio is
+    // preserved in the warmup buffer and flushed once the session is live.
+    const bool workerReady = parakeetPipe.ready &&
+                             parakeetPipe.isProcessAlive() &&
+                             parakeetPipe.modelLoaded;
+    if (parakeetPreferred && streamingPreferred && !workerReady) {
+      parakeetDirectMode = true; // route the audio loop to stream/warmup
+      ensureDirectWorkerAsync();
+      mode = EngineMode::ACTIVE;
+      streamCommittedText.clear();
+      streamSessionActive = false;
+      // WAKEWORD_DETECTED is reserved for genuine detector fires (see
+      // below); mic-click TOGGLE must not emit it.
+      if (fromWakeword)
+        sendEvent("WAKEWORD_DETECTED", "0,Wakeword");
+      sendEvent("STATE", "1,Listening...");
+      return;
+    }
+    if (parakeetPreferred && !workerReady) {
+      // Batch Parakeet: utterance buffering already preserves speech across
+      // load, so keep the proven synchronous reload and ordered endpointing.
+      sendEvent("STATE", "3,Loading model...");
       reloadParakeetModel();
       // After reload, ensure parakeetDirectMode is set so we enter ACTIVE below
       if (parakeetPipe.ready && parakeetPipe.isProcessAlive() && parakeetPipe.modelLoaded) {
@@ -2828,7 +2956,12 @@ public:
       if (streamingPreferred) {
         beginStreamSession();
       }
-      sendEvent("WAKEWORD_DETECTED", "0,Wakeword");
+      // WAKEWORD_DETECTED is reserved for genuine detector fires (OWW /
+      // WakeNet / Vosk-keyword / acoustic-wake). Mic-click TOGGLE, popup and
+      // explicit START also activate, but emitting a wake event for those made
+      // the frontend unable to tell a real wakeword from a button press.
+      if (fromWakeword)
+        sendEvent("WAKEWORD_DETECTED", "0,Wakeword");
       sendEvent("STATE", "1,Listening...");
       return;
     }
@@ -2851,7 +2984,7 @@ public:
     settings.wakeWords = words;
     owwDetector.cleanup();
     pvDetector.cleanup_porcupine();
-    initWakeEngines();
+    initWakeEngines(); // also refreshes Vosk keyword duty for the new list
     sendEvent("STATE", "0,Wakewords updated");
   }
 
@@ -2862,6 +2995,63 @@ public:
 
   void suppressWakewordPublic(double seconds, bool resetCloudCapture = true) {
     suppressWakeword(seconds, resetCloudCapture);
+  }
+
+  // Normalized alnum-only token for fuzzy phrase/model matching.
+  static std::string normWakeToken(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+      if (c >= 'A' && c <= 'Z')
+        out.push_back(char(c - 'A' + 'a'));
+      else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+        out.push_back(c);
+    }
+    return out;
+  }
+
+  // True when a dashboard phrase is covered by a loaded neural model
+  // (OWW-TFLite or WakeNet). Uncovered phrases (e.g. "hey mycroft" when
+  // only alexa/hey_jarvis models shipped) would otherwise be silently
+  // dead — Vosk keyword spotting covers them instead.
+  bool wakePhraseNeurallyCovered(const std::string &phrase) {
+    const std::string p = normWakeToken(phrase);
+    if (p.empty())
+      return true;
+    for (const auto &wm : owwDetector.wake_models_) {
+      const std::string n = normWakeToken(wm.name);
+      if (!n.empty() &&
+          (n.find(p) != std::string::npos || p.find(n) != std::string::npos))
+        return true;
+    }
+    for (const auto &wm : wakeNetDetector.wake_models_) {
+      const std::string n = normWakeToken(wm.name);
+      if (!n.empty() &&
+          (n.find(p) != std::string::npos || p.find(n) != std::string::npos))
+        return true;
+    }
+    return false;
+  }
+
+  void refreshVoskKeywordNeed() {
+    voskKeywordNeeded = false;
+    for (const auto &w : settings.wakeWords) {
+      if (!wakePhraseNeurallyCovered(w)) {
+        voskKeywordNeeded = true;
+        break;
+      }
+    }
+    if (voskKeywordNeeded)
+      svc_log("Vosk keyword duty ON: some wake phrases lack neural models");
+  }
+
+  // Remaining forceSleep() cooldown (seconds, 0 when none): lets a
+  // WAKEWORDMODE re-enable preserve the close cooldown instead of
+  // clearing it and waking the widget back up.
+  double wakeReenableHoldSeconds() {
+    std::lock_guard<std::recursive_mutex> lock(modelMutex);
+    const double remain = sleepHoldUntil - getTimeSeconds();
+    return remain > 0.0 ? remain : 0.0;
   }
 
   void setWakeEngine(const std::string &engine) {
@@ -3104,12 +3294,14 @@ private:
         segmentationMode == FrontendSegmentationMode::Balanced;
     const bool accurateFrontendMode =
         segmentationMode == FrontendSegmentationMode::Accurate;
+    // Pre-roll must cover the 700ms post-activate settle window so speech
+    // starting the instant the mic opens is backfilled, not clipped.
     const double kCloudPreRollSec = fastFrontendMode
                                         ? 0.08
                                         : accurateFrontendMode
                                               ? 1.25
-                                              : (balancedFrontendMode ? 0.18
-                                                                      : 0.14);
+                                              : (balancedFrontendMode ? 0.75
+                                                                      : 0.75);
     const double kCloudMinUtteranceSec = fastFrontendMode
                                              ? 0.12
                                              : accurateFrontendMode
@@ -3289,7 +3481,19 @@ private:
       // Audio level
       int level = computeAudioLevel(audioChunk.data(), audioChunk.size());
       bool vadActive = preprocessed.vadAvailable;
-      sendEvent("AUDIO_LEVEL", std::to_string(level));
+      // Audio level (throttled ~11Hz: per-chunk level lines woke the UI
+      // thread 20-50x/sec to parse + repaint, which is what made the pill
+      // feel glitchy while listening — the waveform timer already animates
+      // smoothly between level updates).
+      {
+        static auto lastLevelTime = std::chrono::steady_clock::now();
+        const auto nowLvl = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double, std::milli>(nowLvl - lastLevelTime)
+                .count() >= 90.0) {
+          lastLevelTime = nowLvl;
+          sendEvent("AUDIO_LEVEL", std::to_string(level));
+        }
+      }
 
       if (!vadActive && mode == EngineMode::ACTIVE) {
         // optionally fall-back without VAD, but here we just log.
@@ -3300,9 +3504,12 @@ private:
       if (acEvt != AcousticEventType::None) {
         std::string act = (acEvt == AcousticEventType::Snap) ? acousticDetector.snapAction : acousticDetector.clapAction;
         if (act == "wakeword" && mode == EngineMode::IDLE && wakeSuppressedUntil < 999999.0) {
+          if (!wakewordsEnabled) {
+            continue;
+          }
           if (secondsSince(lastActivationTime) > 0.6) {
             svc_log("Acoustic %s triggered WAKEWORD action — activating STT", acEvt == AcousticEventType::Snap ? "Snap" : "Clap");
-            activateSTT();
+            activateSTT(true);
             continue;
           }
         } else if (act == "closeword" && mode == EngineMode::ACTIVE) {
@@ -3314,6 +3521,25 @@ private:
 
       // ── Wakeword mode (IDLE / SLEEP) ──
       if (mode != EngineMode::ACTIVE) {
+        // Airtight Off: when the user never opted into wakewords, no
+        // detector may run at all — regardless of suppress timers.
+        if (!wakewordsEnabled) {
+          continue;
+        }
+        // Self-heal: the keyword spotter may never have loaded (fresh boot
+        // starts IDLE with voskRec null — only SLEEP expiry reloaded it) or
+        // an offload path may have dropped it. Reload once, in place —
+        // rate-limited so a missing model file retries every 30s, not every
+        // audio chunk.
+        if (voskFallbackRequired && !voskRec) {
+          static auto lastWakeReloadTry = std::chrono::steady_clock::now() -
+                                          std::chrono::seconds(31);
+          if (std::chrono::steady_clock::now() - lastWakeReloadTry >
+              std::chrono::seconds(30)) {
+            lastWakeReloadTry = std::chrono::steady_clock::now();
+            reloadVoskModel();
+          }
+        }
         // The command thread can rebuild the TFLite/Picovoice detectors while
         // settings are changed. Keep that rebuild and every streaming predict
         // call in the same lock; otherwise a cleanup can free an interpreter
@@ -3323,28 +3549,34 @@ private:
           continue;
 
         // Transition SLEEP → IDLE once suppression expires so wakewords
-        // can operate.  We reload the lightweight Vosk keyword model here
-        // (if needed) so wakeword detection has a model to run against.
+        // can operate — but ONLY when the user opted in. Otherwise a
+        // forceSleep() (10s suppress) would silently re-arm detection and
+        // the app would start transcribing without permission.
         if (mode == EngineMode::SLEEP) {
+          if (!wakewordsEnabled) {
+            continue;
+          }
           mode = EngineMode::IDLE;
           wakeSuppressedUntil = 0.0;  // clear stale value
           // Reload the small Vosk keyword model for wakeword detection
-          if (voskFallbackRequired && !voskRec) {
+          if ((voskFallbackRequired || voskKeywordNeeded) && !voskRec) {
             reloadVoskModel();
           }
           sendEvent("STATE", "0,Wakewords active");
         }
 
         // Feed the wake-word model continuously with the original 16 kHz PCM.
-        // TEN-VAD gates *acceptance*, not feature extraction: a hard VAD gate
-        // starves the streaming model before short wake phrases can score.
-        // Wake path uses a lower energy floor than dictation so quiet speech
-        // still opens the gate without making endpointing hypersensitive.
+        // VAD gate is LOW-sensitivity by design: speechLikely (TenVAD 0.45)
+        // AND prob>=0.28 AND level>=3 must agree, so distant TV/room noise
+        // never reaches the scorer. The level>=8 escape hatch keeps loud
+        // close-mic speech working even if the VAD DLL mis-scores one hop.
+        // Dictation endpointing keeps its own (more sensitive) thresholds.
         const bool vadSpeechNow = preprocessed.vadAvailable
-                                      ? (preprocessed.speechLikely ||
-                                         preprocessed.vadProbability >= 0.12f ||
-                                         level >= 2)
-                                      : (level >= 2);
+                                      ? ((preprocessed.speechLikely &&
+                                          preprocessed.vadProbability >= 0.28f &&
+                                          level >= 3) ||
+                                         level >= 8)
+                                      : (level >= 4);
         // Periodically trim working set memory when idle to optimize RAM usage (~45MB)
         static auto lastTrimTime = std::chrono::steady_clock::now();
         const auto nowTime = std::chrono::steady_clock::now();
@@ -3368,10 +3600,17 @@ private:
             wakeNow - wakeVadLastSpeechTime <= kWakeVadDecisionHold;
         const bool wakeGateOpen =
             wakeVadSpeechFrames >= kWakeVadMinSpeechFrames || recentlySpoke;
+        if (!wakeGateOpen) {
+          // Gate closed: drop stale hit counts so two far-apart noise
+          // blips can never add up to a phantom wake.
+          if (!owwHitCounts.empty())
+            owwHitCounts.clear();
+          voskWakeHits = 0;
+        }
 
         const bool needPV = pvReady;
         const bool needOWW = owwReady || wakeNetReady;
-        const bool needVosk = voskRec && voskFallbackRequired;
+        const bool needVosk = voskRec && (voskFallbackRequired || voskKeywordNeeded);
 
         if (needPV) {
           if (pvChunkBuffer.size() > 32000) pvChunkBuffer.clear();
@@ -3382,9 +3621,9 @@ private:
             
             int32_t keyword_index = pvDetector.predict(processData.data());
             if (keyword_index >= 0 && secondsSince(lastActivationTime) > 2.0 &&
-                mode == EngineMode::IDLE) {
+                mode == EngineMode::IDLE && wakeGateOpen) {
               svc_log("Picovoice Detected index: %d", (int)keyword_index);
-              activateSTT();
+              activateSTT(true);
               pvChunkBuffer.clear();
               break;
             }
@@ -3406,10 +3645,29 @@ private:
                 }
               }
               for (auto &[mdl, score] : scores) {
-                if (score >= 0.55f && secondsSince(lastActivationTime) > 2.0 &&
-                    mode == EngineMode::IDLE) {
-                  svc_log("OWW Wakeword Triggered: %s (score=%.2f)", mdl.c_str(), score);
-                  activateSTT();
+                // Diagnostics peak (reported periodically below).
+                auto peakIt = wakePeakScores.find(mdl);
+                if (peakIt == wakePeakScores.end() || score > peakIt->second)
+                  wakePeakScores[mdl] = score;
+                // Consecutive-hit acceptance at 0.50 x 3 hits: a real spoken
+                // wakeword sustains mid-high scores across ~240ms and fires
+                // reliably at normal volume; a one-window noise/TV spike
+                // (even a loud 0.7 blip) never reaches 3 consecutive hits.
+                // owwHitCounts doubles as the per-model counter.
+                int &hits = owwHitCounts[mdl];
+                if (score >= 0.50f) {
+                  ++hits;
+                } else {
+                  hits = 0;
+                  continue;
+                }
+                if (hits >= wakeHitRequirement &&
+                    secondsSince(lastActivationTime) > 2.0 &&
+                    mode == EngineMode::IDLE && wakeGateOpen) {
+                  svc_log("OWW Wakeword Triggered: %s (score=%.2f, hits=%d)",
+                          mdl.c_str(), score, hits);
+                  owwHitCounts.clear();
+                  activateSTT(true);
                   owwChunkBuffer.clear();
                   pvChunkBuffer.clear();
                   break;
@@ -3434,27 +3692,58 @@ private:
               
               std::string lowerPartial = partialText;
               std::transform(lowerPartial.begin(), lowerPartial.end(), lowerPartial.begin(), ::tolower);
-              
+
+              // Whole-word/phrase match with word boundaries — a plain
+              // substring test fires on "hem" inside "them"/"he" and pops the
+              // widget (plus a transcription turn) out of background speech.
+              // Normalize both sides (non-alnum -> space, collapsed) and
+              // require boundary padding, so "hey jarvis" still matches as a
+              // phrase but "hem" no longer matches "them".
+              auto normWords = [](const std::string &s) {
+                std::string out;
+                out.reserve(s.size() + 2);
+                bool lastSpace = true;
+                for (char c : s) {
+                  const bool alnum = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+                  if (alnum) {
+                    out.push_back(c);
+                    lastSpace = false;
+                  } else if (!lastSpace) {
+                    out.push_back(' ');
+                    lastSpace = true;
+                  }
+                }
+                return out;
+              };
+              const std::string hay = " " + normWords(lowerPartial) + " ";
               bool matched = false;
               for (const auto &w : settings.wakeWords) {
                 std::string lw = w;
                 std::transform(lw.begin(), lw.end(), lw.begin(), ::tolower);
-                if (lowerPartial.find(lw) != std::string::npos) {
+                const std::string needle = " " + normWords(lw) + " ";
+                if (needle.size() > 2 && hay.find(needle) != std::string::npos) {
                   matched = true;
                   break;
                 }
               }
               if (matched) {
-                if (secondsSince(lastActivationTime) > 2.0 &&
-                    mode == EngineMode::IDLE) {
-                  svc_log("Vosk fallback wakeword match: '%s'", partialText.c_str());
-                  activateSTT();
+                // Same consecutive-hit discipline as the neural path: one
+                // lucky partial must not start a turn on background speech.
+                if (++voskWakeHits >= wakeHitRequirement &&
+                    secondsSince(lastActivationTime) > 2.0 &&
+                    mode == EngineMode::IDLE && wakeGateOpen) {
+                  svc_log("Vosk fallback wakeword match: '%s' (hits=%d)",
+                          partialText.c_str(), voskWakeHits);
+                  voskWakeHits = 0;
+                  activateSTT(true);
                   std::lock_guard<std::recursive_mutex> lock(modelMutex);
                   if (voskRec)
                     vosk.recognizer_reset(voskRec);
                   owwChunkBuffer.clear();
                   pvChunkBuffer.clear();
                 }
+              } else {
+                voskWakeHits = 0;
               }
 
               if (mode != EngineMode::ACTIVE) {
@@ -3472,6 +3761,32 @@ private:
             }
           }
         }
+        // Periodic wake diagnostics (every 15s while listening for wake):
+        // proves which detectors are scoring and how hot the room is, so
+        // thresholds can be tuned from the log instead of by guesswork.
+        {
+          const auto nowDiag = std::chrono::steady_clock::now();
+          if (lastWakeDiagTime == std::chrono::steady_clock::time_point{}) {
+            lastWakeDiagTime = nowDiag;
+          } else if (std::chrono::duration<double>(nowDiag - lastWakeDiagTime)
+                         .count() >= 15.0) {
+            lastWakeDiagTime = nowDiag;
+            if (!wakePeakScores.empty()) {
+              std::string top;
+              for (const auto &[mdl, peak] : wakePeakScores) {
+                if (!top.empty())
+                  top += ", ";
+                char buf[96];
+                snprintf(buf, sizeof(buf), "%s=%.2f", mdl.c_str(), peak);
+                top += buf;
+              }
+              svc_log("Wake peaks(15s): %s", top.c_str());
+            } else if (needOWW || needVosk || needPV) {
+              svc_log("Wake peaks(15s): none scored (quiet room or starved gate)");
+            }
+            wakePeakScores.clear();
+          }
+        }
       }
 
       // ── Dictation mode (ACTIVE) ──
@@ -3480,18 +3795,43 @@ private:
         // ── Parakeet Direct Mode: VAD-driven, zero file I/O (like Handy) ──
         // Use RAW audio for Parakeet (model handles noise internally, like Handy)
         // RNNoise's crude 16k→48k resampling distorts audio and reduces accuracy
-        if (parakeetDirectMode && parakeetPipe.modelLoaded) {
+        // (modelLoaded is not required for the streaming arm: while the
+        // worker loads in the background, chunks accumulate in the warmup
+        // buffer instead of falling through to the Vosk/cloud branches.)
+        if (parakeetDirectMode &&
+            (parakeetPipe.modelLoaded || streamingPreferred)) {
           // Streaming (Nemotron): feed every chunk for live partials.
           // Batch (Parakeet): VAD-segment then transcribe_pcm on endpoint.
           if (streamingPreferred && streamSessionActive) {
             processStreamingChunk(chunk);
           } else if (streamingPreferred && !streamSessionActive) {
-            // Session should have started in activateSTT; retry once.
-            if (beginStreamSession())
-              processStreamingChunk(chunk);
-            else
-              processParakeetDirectChunk(chunk, preprocessed.speechLikely,
-                                         preprocessed.vadAvailable, level);
+            // No live session (worker still loading, or a mid-turn death):
+            // NEVER block this audio thread on begin/reload — a blocking
+            // begin (1s ack wait + GGUF load) per chunk is what stalled the
+            // mic into overruns and UI glitches.
+            if (streamModelLoading) {
+              appendStreamWarmup(chunk);
+            } else if (parakeetPipe.ready && parakeetPipe.isProcessAlive() &&
+                       parakeetPipe.modelLoaded) {
+              if (beginStreamSession())
+                processStreamingChunk(chunk);
+              else
+                appendStreamWarmup(chunk);
+            } else {
+              // Worker cold and no loader running (load failed after
+              // TOGGLE, or session died): preserve audio and re-arm the
+              // background loader at most every 2s.
+              appendStreamWarmup(chunk);
+              const auto nowRetry = std::chrono::steady_clock::now();
+              if (lastStreamBeginAttempt ==
+                      std::chrono::steady_clock::time_point{} ||
+                  std::chrono::duration<double>(nowRetry -
+                                                lastStreamBeginAttempt)
+                          .count() >= 2.0) {
+                lastStreamBeginAttempt = nowRetry;
+                ensureDirectWorkerAsync();
+              }
+            }
           } else {
             processParakeetDirectChunk(chunk, preprocessed.speechLikely,
                                         preprocessed.vadAvailable, level);
@@ -3640,7 +3980,8 @@ private:
           std::lock_guard<std::recursive_mutex> lock(modelMutex);
           modelLoaded = (voskModel != nullptr);
         }
-        if (voskFallbackRequired && !modelLoaded && !frontendRequestedOffload) {
+        if ((voskFallbackRequired || voskKeywordNeeded) && !modelLoaded &&
+            !frontendRequestedOffload) {
           svc_log("Vosk fallback wakeword active — reloading model");
           reloadVoskModel();
         } else if (settings.autoOffloadEnabled && canOffloadVosk()) {
@@ -3744,7 +4085,11 @@ static void inputLoop(STTEngine &engine) {
                   (int)engine.streamSessionActive);
         } else {
           engine.frontendRequestedOffload = true;
-          engine.offloadVoskModel();
+          // Keep the tiny Vosk keyword spotter resident while wakewords are
+          // enabled — unloading it kills Always-On detection with no reload
+          // path in steady IDLE (only the big transcription worker offloads).
+          if (!engine.wakewordsEnabled)
+            engine.offloadVoskModel();
           engine.offloadParakeetModel();
           svc_log("Frontend requested offload (forced)");
         }
@@ -3776,8 +4121,13 @@ static void inputLoop(STTEngine &engine) {
     }
     else if (action == "ACOUSTIC_SENSITIVITY") {
       try {
-        engine.acousticDetector.sensitivity = std::stof(payload);
-        svc_log("Acoustic sensitivity set to %.2f", engine.acousticDetector.sensitivity);
+        // Clamp: above 2.0 a slammed door fires "wakeword"; the dashboard
+        // slider can persist hyper-sensitive values across restarts.
+        float sens = std::stof(payload);
+        if (sens < 0.25f) sens = 0.25f;
+        if (sens > 2.0f) sens = 2.0f;
+        engine.acousticDetector.sensitivity = sens;
+        svc_log("Acoustic sensitivity set to %.2f", sens);
       } catch (...) {}
     }
     else if (action == "WAKEMODE")
@@ -3787,11 +4137,15 @@ static void inputLoop(STTEngine &engine) {
       svc_log("WAKEWORDMODE set to: %s", payload.c_str());
       if (payload == "Off") {
         // Disable wakeword detection entirely
+        engine.wakewordsEnabled = false;
         engine.suppressWakewordPublic(999999.0);
         sendEvent("STATE", "0,Wakewords disabled");
       } else {
-        // "Always On" or "On with Widget" — re-enable wake detection
-        engine.suppressWakewordPublic(0.0);
+        // "Always On" or "On with Widget" — re-enable wake detection,
+        // but preserve an in-progress forceSleep() cooldown so a mode
+        // re-sync after dismiss can't wake the widget back up.
+        engine.wakewordsEnabled = true;
+        engine.suppressWakewordPublic(engine.wakeReenableHoldSeconds());
         sendEvent("STATE", "0,Wakewords active");
       }
     }

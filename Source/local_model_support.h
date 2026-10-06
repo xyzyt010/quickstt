@@ -110,6 +110,27 @@ QString localModelRuntimePackageId(const QString &modelName);
 QString localModelRunnerModelId(const QString &modelName);
 QString localModelBackendKey(const QString &modelName);
 
+/// Per-model speech language support (dashboard model/language dropdowns,
+/// handy-style). Multilingual engines (plain whisper.cpp, Nemotron
+/// streaming) offer "Auto (detect)" plus the full language list; single-
+/// language engines (vosk, whisper .en, parakeet, NeMo, moonshine) offer
+/// exactly their one language. An empty code means Auto.
+struct LocalModelLanguage {
+  QString code;
+  QString label;
+};
+QVector<LocalModelLanguage>
+localModelSupportedLanguages(const QString &modelName);
+/// True when the model offers a real language choice (Auto + N languages).
+bool localModelSupportsLanguageChoice(const QString &modelName);
+/// Default language code: "auto" for multilingual, the single code otherwise.
+QString localModelDefaultLanguageCode(const QString &modelName);
+/// Effective language code: stored per-model override, else the default.
+QString localModelSelectedLanguageCode(const QString &modelName);
+void setLocalModelSelectedLanguageCode(const QString &modelName,
+                                       const QString &code);
+QString localModelLanguageSettingKey(const QString &modelName);
+
 QString quickSttDataRoot();
 QString quickSttModelsRoot();
 QString installRootPathForKey(const QString &rootKey);

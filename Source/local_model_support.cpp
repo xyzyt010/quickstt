@@ -1325,8 +1325,7 @@ QString installRootPathForKey(const QString &rootKey) {
   return quickSttModelsRoot();
 }
 
-QStringList configuredServerUrls() {
-  QSettings settings(QStringLiteral("QuickSTT"), QStringLiteral("Config"));
+QStringList configuredServerUrls() {  QSettings settings(QStringLiteral("QuickSTT"), QStringLiteral("Config"));
   QStringList urls = settings.value(QStringLiteral("serverUrls")).toStringList();
   if (urls.isEmpty()) {
     QFile serverFile(QDir(QCoreApplication::applicationDirPath())
@@ -1341,4 +1340,181 @@ QStringList configuredServerUrls() {
   urls.removeAll(QString());
   urls.removeDuplicates();
   return urls;
+}
+
+// ── Per-model speech languages (dashboard model/language dropdowns) ──
+
+namespace {
+
+struct WhisperLang {
+  const char *code;
+  const char *label;
+};
+
+// whisper.cpp supported `--language` codes (plus "auto" handled separately).
+const WhisperLang kWhisperLanguages[] = {
+    {"en", "English"},       {"zh", "Chinese"},      {"de", "German"},
+    {"es", "Spanish"},       {"ru", "Russian"},      {"ko", "Korean"},
+    {"fr", "French"},        {"ja", "Japanese"},     {"pt", "Portuguese"},
+    {"tr", "Turkish"},       {"pl", "Polish"},       {"ca", "Catalan"},
+    {"nl", "Dutch"},         {"ar", "Arabic"},       {"sv", "Swedish"},
+    {"it", "Italian"},       {"id", "Indonesian"},   {"hi", "Hindi"},
+    {"fi", "Finnish"},       {"vi", "Vietnamese"},   {"he", "Hebrew"},
+    {"uk", "Ukrainian"},     {"el", "Greek"},        {"ms", "Malay"},
+    {"cs", "Czech"},         {"ro", "Romanian"},     {"da", "Danish"},
+    {"hu", "Hungarian"},     {"ta", "Tamil"},        {"no", "Norwegian"},
+    {"th", "Thai"},          {"ur", "Urdu"},         {"hr", "Croatian"},
+    {"bg", "Bulgarian"},     {"lt", "Lithuanian"},   {"la", "Latin"},
+    {"mi", "Maori"},         {"ml", "Malayalam"},    {"cy", "Welsh"},
+    {"sk", "Slovak"},        {"te", "Telugu"},       {"fa", "Persian"},
+    {"lv", "Latvian"},       {"bn", "Bengali"},      {"sr", "Serbian"},
+    {"az", "Azerbaijani"},   {"sl", "Slovenian"},    {"kn", "Kannada"},
+    {"et", "Estonian"},      {"mk", "Macedonian"},   {"br", "Breton"},
+    {"eu", "Basque"},        {"is", "Icelandic"},    {"hy", "Armenian"},
+    {"ne", "Nepali"},        {"mn", "Mongolian"},    {"bs", "Bosnian"},
+    {"kk", "Kazakh"},        {"sq", "Albanian"},     {"sw", "Swahili"},
+    {"gl", "Galician"},      {"mr", "Marathi"},      {"pa", "Punjabi"},
+    {"si", "Sinhala"},       {"km", "Khmer"},        {"sn", "Shona"},
+    {"yo", "Yoruba"},        {"so", "Somali"},       {"af", "Afrikaans"},
+    {"oc", "Occitan"},       {"ka", "Georgian"},     {"be", "Belarusian"},
+    {"tg", "Tajik"},         {"sd", "Sindhi"},       {"gu", "Gujarati"},
+    {"am", "Amharic"},       {"yi", "Yiddish"},      {"lo", "Lao"},
+    {"uz", "Uzbek"},         {"my", "Myanmar"},      {"jw", "Javanese"},
+    {"mg", "Malagasy"},      {"haw", "Hawaiian"},    {"ln", "Lingala"},
+    {"ha", "Hausa"},         {"tt", "Tatar"},        {"su", "Sundanese"},
+    {"tl", "Tagalog"},       {"lb", "Luxembourgish"},{"mt", "Maltese"},
+    {"gd", "Gaelic"},        {"xh", "Xhosa"},        {"zu", "Zulu"},
+};
+
+struct VoskLangToken {
+  const char *token;
+  const char *code;
+  const char *label;
+};
+
+// Single-language vosk packages: match whole tokens of the model id/display
+// name (lower-cased, split on non-alphanumerics).
+const VoskLangToken kVoskTokens[] = {
+    {"indian", "en", "English"},     {"english", "en", "English"},
+    {"en", "en", "English"},         {"chinese", "zh", "Chinese"},
+    {"cn", "zh", "Chinese"},         {"zh", "zh", "Chinese"},
+    {"russian", "ru", "Russian"},    {"ru", "ru", "Russian"},
+    {"french", "fr", "French"},      {"fr", "fr", "French"},
+    {"german", "de", "German"},      {"de", "de", "German"},
+    {"spanish", "es", "Spanish"},    {"es", "es", "Spanish"},
+    {"portuguese", "pt", "Portuguese"}, {"pt", "pt", "Portuguese"},
+    {"italian", "it", "Italian"},    {"it", "it", "Italian"},
+    {"japanese", "ja", "Japanese"},  {"ja", "ja", "Japanese"},
+    {"persian", "fa", "Persian"},    {"fa", "fa", "Persian"},
+    {"turkish", "tr", "Turkish"},    {"tr", "tr", "Turkish"},
+    {"arabic", "ar", "Arabic"},      {"ar", "ar", "Arabic"},
+    {"dutch", "nl", "Dutch"},        {"nl", "nl", "Dutch"},
+    {"polish", "pl", "Polish"},      {"pl", "pl", "Polish"},
+    {"czech", "cs", "Czech"},        {"cs", "cs", "Czech"},
+    {"esperanto", "eo", "Esperanto"}, {"eo", "eo", "Esperanto"},
+};
+
+QStringList tokenizeModelWords(const QString &text) {
+  QStringList toks;
+  QString cur;
+  for (const QChar ch : text.toLower()) {
+    if (ch.isLetterOrNumber())
+      cur += ch;
+    else if (!cur.isEmpty()) {
+      toks << cur;
+      cur.clear();
+    }
+  }
+  if (!cur.isEmpty())
+    toks << cur;
+  return toks;
+}
+
+} // namespace
+
+QString localModelLanguageSettingKey(const QString &modelName) {
+  return QStringLiteral("localModels/%1/language")
+      .arg(cleanIdPart(modelName));
+}
+
+QVector<LocalModelLanguage>
+localModelSupportedLanguages(const QString &modelName) {
+  const QString canonical = canonicalLocalModelName(modelName);
+  const LocalModelDescriptor descriptor = localModelDescriptor(canonical);
+  const QString family = descriptor.engineFamily;
+  const QStringList toks = tokenizeModelWords(
+      descriptor.id + QLatin1Char(' ') + descriptor.variantKey +
+      QLatin1Char(' ') + canonical);
+  QVector<LocalModelLanguage> out;
+  if (family == QStringLiteral("whisper_cpp") && !toks.contains(QStringLiteral("en"))) {
+    // Multilingual whisper: Auto (detect) + full list, handy-style.
+    out << LocalModelLanguage{QStringLiteral("auto"), QStringLiteral("Auto (detect)")};
+    for (const WhisperLang &lang : kWhisperLanguages)
+      out << LocalModelLanguage{QString::fromLatin1(lang.code),
+                                QString::fromLatin1(lang.label)};
+    return out;
+  }
+  if (family == QStringLiteral("nemotron_streaming")) {
+    // Handy's Nemotron streaming stack is multilingual: same choice.
+    out << LocalModelLanguage{QStringLiteral("auto"), QStringLiteral("Auto (detect)")};
+    for (const WhisperLang &lang : kWhisperLanguages)
+      out << LocalModelLanguage{QString::fromLatin1(lang.code),
+                                QString::fromLatin1(lang.label)};
+    return out;
+  }
+  if (family == QStringLiteral("vosk")) {
+    for (const VoskLangToken &tok : kVoskTokens) {
+      if (toks.contains(QString::fromLatin1(tok.token))) {
+        out << LocalModelLanguage{QString::fromLatin1(tok.code),
+                                  QString::fromLatin1(tok.label)};
+        return out;
+      }
+    }
+  }
+  // whisper .en, parakeet, NeMo, moonshine, sherpa and anything unrecognized
+  // in this catalog are English-only.
+  out << LocalModelLanguage{QStringLiteral("en"), QStringLiteral("English")};
+  return out;
+}
+
+bool localModelSupportsLanguageChoice(const QString &modelName) {
+  return localModelSupportedLanguages(modelName).size() > 1;
+}
+
+QString localModelDefaultLanguageCode(const QString &modelName) {
+  const QVector<LocalModelLanguage> langs = localModelSupportedLanguages(modelName);
+  if (langs.isEmpty())
+    return QStringLiteral("auto");
+  return langs.first().code;
+}
+
+QString localModelSelectedLanguageCode(const QString &modelName) {
+  const QString stored =
+      QSettings(QStringLiteral("QuickSTT"), QStringLiteral("Config"))
+          .value(localModelLanguageSettingKey(modelName))
+          .toString()
+          .trimmed()
+          .toLower();
+  if (stored.isEmpty())
+    return localModelDefaultLanguageCode(modelName);
+  for (const LocalModelLanguage &lang : localModelSupportedLanguages(modelName)) {
+    if (lang.code == stored)
+      return stored;
+  }
+  // Stale/foreign code (e.g. carried from another model): fall back.
+  return localModelDefaultLanguageCode(modelName);
+}
+
+void setLocalModelSelectedLanguageCode(const QString &modelName,
+                                       const QString &code) {
+  const QString clean = code.trimmed().toLower();
+  QString use = localModelDefaultLanguageCode(modelName);
+  for (const LocalModelLanguage &lang : localModelSupportedLanguages(modelName)) {
+    if (lang.code == clean) {
+      use = clean;
+      break;
+    }
+  }
+  QSettings(QStringLiteral("QuickSTT"), QStringLiteral("Config"))
+      .setValue(localModelLanguageSettingKey(modelName), use);
 }

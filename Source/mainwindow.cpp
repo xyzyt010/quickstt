@@ -4757,6 +4757,72 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   wmLayout->addWidget(wakeWordModeCombo, 1);
   gLayout->addWidget(wakeModeGroup);
 
+  // Speech model + language Section (handy-style pickers). The model box
+  // lists downloaded local models and always shows the model currently in
+  // use; the language box lists that model's supported languages — Auto
+  // (detect) first for multilingual engines, the single fixed language
+  // otherwise. Choices persist to QSettings; the pill follows through the
+  // shared "selectedModel" key on its next combo refresh, and the local
+  // transcriber reads the per-model language for its next run.
+  QGroupBox *sttGroup = new QGroupBox("Speech Recognition Model");
+  sttGroup->setStyleSheet(
+      "QGroupBox { border: 1px solid #333; border-radius: 6px; margin-top: "
+      "18px; padding: 14px 8px 8px 8px; font-weight: bold; }"
+      "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 "
+      "4px; }");
+  QVBoxLayout *sttLayout = new QVBoxLayout(sttGroup);
+  sttLayout->setContentsMargins(10, 16, 10, 10);
+  sttLayout->setSpacing(8);
+  QHBoxLayout *sttModelRow = new QHBoxLayout();
+  sttModelRow->setContentsMargins(0, 2, 0, 0);
+  sttModelRow->setSpacing(8);
+  QLabel *sttModelLabel = new QLabel("Model:");
+  sttModelCombo = new QComboBox();
+  sttModelCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  sttModelRow->addWidget(sttModelLabel);
+  sttModelRow->addWidget(sttModelCombo, 1);
+  sttLayout->addLayout(sttModelRow);
+  QHBoxLayout *sttLangRow = new QHBoxLayout();
+  sttLangRow->setContentsMargins(0, 2, 0, 0);
+  sttLangRow->setSpacing(8);
+  QLabel *sttLangLabel = new QLabel("Language:");
+  sttLangCombo = new QComboBox();
+  sttLangCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  sttLangRow->addWidget(sttLangLabel);
+  sttLangRow->addWidget(sttLangCombo, 1);
+  sttLayout->addLayout(sttLangRow);
+  sttLangHintLabel = new QLabel();
+  sttLangHintLabel->setWordWrap(true);
+  sttLangHintLabel->setStyleSheet("font-size: 11px; color: #888;");
+  sttLayout->addWidget(sttLangHintLabel);
+  gLayout->addWidget(sttGroup);
+
+  connect(sttModelCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, [this](int index) {
+            if (!sttModelCombo)
+              return;
+            const QString name = sttModelCombo->itemData(index).toString();
+            if (name.isEmpty())
+              return; // "No models available" placeholder.
+            QSettings settings("QuickSTT", "Config");
+            settings.setValue("selectedModel", name);
+            emit settingChanged("selectedModel", name);
+            refreshSttModelLanguageUi();
+          });
+  connect(sttLangCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, [this](int index) {
+            if (!sttModelCombo || !sttLangCombo)
+              return;
+            const QString model = sttModelCombo->currentData().toString();
+            const QString code = sttLangCombo->itemData(index).toString();
+            if (model.isEmpty() || code.isEmpty())
+              return;
+            setLocalModelSelectedLanguageCode(model, code);
+            emit settingChanged(localModelLanguageSettingKey(model), code);
+            refreshSttModelLanguageUi();
+          });
+  refreshSttModelLanguageUi();
+
   // Recording Management Section
   QGroupBox *recGroup = new QGroupBox("Recording Management");
   recGroup->setStyleSheet(
@@ -5504,7 +5570,11 @@ void MainWindow::setLocalModelManager(LocalModelManager *manager) {
           [this](const QString &modelName) {
             QMessageBox::information(this, "Model Installed",
                                      modelName + " installed successfully and is ready to use.");
+            refreshSttModelLanguageUi();
           },
+          Qt::UniqueConnection);
+  connect(localModelManager, &LocalModelManager::modelUninstalled, this,
+          [this](const QString &) { refreshSttModelLanguageUi(); },
           Qt::UniqueConnection);
 }
 
@@ -8071,6 +8141,73 @@ void MainWindow::refreshLocalModelBackendUi() {
   localModelBackendStatusLabel->setText(localModelBackendStatusText(modelName));
 }
 
+void MainWindow::refreshSttModelLanguageUi() {
+  if (!sttModelCombo || !sttLangCombo || !sttLangHintLabel)
+    return;
+  QSettings settings("QuickSTT", "Config");
+  // Downloaded local models; always include the model currently in use so
+  // the box never disagrees with the pill, even for cloud/legacy names.
+  QStringList installed;
+  for (const QString &name : allModelCatalog()) {
+    if (isLocalModelInstalled(name) && !installed.contains(name))
+      installed << name;
+  }
+  const QString current =
+      canonicalLocalModelName(settings.value("selectedModel").toString());
+  {
+    QSignalBlocker blocker(sttModelCombo);
+    sttModelCombo->clear();
+    if (installed.isEmpty() && current.isEmpty()) {
+      sttModelCombo->addItem("No models available", QString());
+      sttModelCombo->setEnabled(false);
+    } else {
+      if (!current.isEmpty() && !installed.contains(current))
+        installed.prepend(current);
+      for (const QString &name : installed)
+        sttModelCombo->addItem(name, name);
+      sttModelCombo->setCurrentIndex(
+          current.isEmpty() ? 0 : qMax(0, sttModelCombo->findData(current)));
+      sttModelCombo->setEnabled(true);
+    }
+  }
+  const QString model = sttModelCombo->currentData().toString();
+  {
+    QSignalBlocker blocker(sttLangCombo);
+    sttLangCombo->clear();
+    if (model.isEmpty()) {
+      sttLangCombo->addItem("No models available", QString());
+      sttLangCombo->setEnabled(false);
+      sttLangHintLabel->setText(
+          "Download a model from the Models tab to enable speech recognition here.");
+      return;
+    }
+    if (isCloudModel(model)) {
+      sttLangCombo->addItem("Auto", QStringLiteral("auto"));
+      sttLangCombo->setEnabled(false);
+      sttLangHintLabel->setText(
+          "Cloud model in use — its language is configured on its provider card.");
+      return;
+    }
+    const QVector<LocalModelLanguage> langs =
+        localModelSupportedLanguages(model);
+    for (const LocalModelLanguage &lang : langs)
+      sttLangCombo->addItem(lang.label, lang.code);
+    const QString sel = localModelSelectedLanguageCode(model);
+    sttLangCombo->setCurrentIndex(qMax(0, sttLangCombo->findData(sel)));
+    const bool choice = localModelSupportsLanguageChoice(model);
+    sttLangCombo->setEnabled(choice);
+    if (!choice && !langs.isEmpty()) {
+      sttLangHintLabel->setText(
+          QStringLiteral("%1 supports %2 only — the backend runs it fixed to that language.")
+              .arg(model, langs.first().label));
+    } else {
+      sttLangHintLabel->setText(
+          QStringLiteral("Auto lets %1 detect the language; pick one to force it. Applies to the next transcription.")
+              .arg(model));
+    }
+  }
+}
+
 void MainWindow::refreshSelectionDetails() {
   if (localModelDetailsLabel) {
     localModelDetailsLabel->setText(
@@ -8985,4 +9122,5 @@ void MainWindow::onRefreshModels() {
   refreshDashboardModelStatuses();
   syncDashboardSelectionFromSettings();
   refreshSelectionDetails();
+  refreshSttModelLanguageUi();
 }

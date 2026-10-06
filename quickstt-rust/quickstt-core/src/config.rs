@@ -31,7 +31,7 @@ pub const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
 pub const AUTO_RESTART_DELAY_SECS: u64 = 2;
 
 /// Default auto-offload delay (seconds)
-pub const DEFAULT_OFFLOAD_DELAY_SECS: u32 = 15;
+pub const DEFAULT_OFFLOAD_DELAY_SECS: u32 = 300;
 
 /// Default wake word engine label kept compatible with the legacy Qt app.
 pub const DEFAULT_WAKE_ENGINE: &str = "OpenWakeWord (TFLite)";
@@ -73,7 +73,7 @@ pub const DEFAULT_SHOW_WAVEFORM: bool = true;
 pub const DEFAULT_WAVEFORM_SENSITIVITY: u32 = 50;
 
 /// Default boolean settings
-pub const DEFAULT_AUTO_OFFLOAD: bool = true;
+pub const DEFAULT_AUTO_OFFLOAD: bool = false;
 pub const DEFAULT_AUTO_MODEL_LOAD: bool = true;
 pub const DEFAULT_STARTUP_ENABLED: bool = false;
 pub const DEFAULT_STARTUP_BACKGROUND: bool = false;
@@ -112,4 +112,6 @@ pub const DEFAULT_CTRL_SPACE_ENABLED: bool = true;
 pub const DEFAULT_CTRL_SPACE_MODE: u32 = 0; // 0 push-to-talk, 1 toggle
 pub const DEFAULT_CTRL_SPACE_OUTPUT: u32 = 0; // 0 type, 1 clipboard, 2 none
 pub const DEFAULT_ON_COMMAND_TRANSCRIPTION: bool = false;
-pub const DEFAULT_WAKE_WORD_MODE: &str = "Off";
+/// Wakewords listen out of the box ("Always On"). The dashboard toggle
+/// remains the explicit opt-out (sets "Off").
+pub const DEFAULT_WAKE_WORD_MODE: &str = "Always On";

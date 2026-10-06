@@ -1,0 +1,1 @@
+[info] parakeet: promoted 48 conv pointwise weights from F16 → F32 for CPU backend

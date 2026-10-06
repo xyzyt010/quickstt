@@ -49,8 +49,8 @@ static inline bool ort_ok(const OrtApi *api, OrtStatus *status,
 
 class NativeWakeWordDetector {
 public:
-  // 0.42 is wake-friendly at normal speaking volume; 0.60 forced shouting.
-  float threshold = 0.42f;
+  // 0.50 balanced with the 3-hit + strict-VAD rule (0.42 = phantoms).
+  float threshold = 0.50f;
   bool active = false;
 
   struct WakeModel {
@@ -64,7 +64,7 @@ public:
   ~NativeWakeWordDetector() { cleanup(); }
 
   bool init(OrtLoader &ort, const std::string &model_dir,
-            const std::vector<std::string> &wake_words, float thresh = 0.42f) {
+            const std::vector<std::string> &wake_words, float thresh = 0.50f) {
     threshold = thresh;
     api_ = ort.api;
     if (!api_)

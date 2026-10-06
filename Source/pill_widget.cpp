@@ -15,6 +15,7 @@
 #include <QApplication>
 #include <QBrush>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QColor>
 #include <QComboBox>
 #include <QListView>
@@ -528,10 +529,15 @@ void repairLegacyWakewordState(QSettings &settings) {
     touched = true;
   }
 
-  // Force default wakeword mode to "Off" and disable acoustic triggers
-  settings.setValue("wakeWordMode", "Off");
-  settings.setValue("clapAction", "disabled");
-  settings.setValue("snapAction", "disabled");
+  // Default wakeword mode + acoustic triggers ONLY when never set — the
+  // user's choice must survive restarts (unconditionally forcing Off here
+  // made wakewords permanently dead: the backend never got WAKEWORDMODE).
+  if (!settings.contains("wakeWordMode"))
+    settings.setValue("wakeWordMode", "Off");
+  if (!settings.contains("clapAction"))
+    settings.setValue("clapAction", "disabled");
+  if (!settings.contains("snapAction"))
+    settings.setValue("snapAction", "disabled");
 
   QStringList closeWords =
       normalizedWordList(settings.value("closeWords").toStringList());
@@ -561,7 +567,8 @@ void repairLegacyWakewordState(QSettings &settings) {
 }
 } // namespace
 
-PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
+PillWidget::PillWidget(bool noTray, QWidget *parent) : QWidget(parent) {
+  m_noTray = noTray;
   qDebug() << "PillWidget Constructor Start";
   QSettings settings("QuickSTT", "Config");
   repairLegacyWakewordState(settings);
@@ -581,7 +588,10 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
   if (!settings.contains("startupBackground")) {
     settings.setValue("startupBackground", true);
   }
-  QTimer::singleShot(0, this, []() { applyStartupSetting(true); });
+  // In Slint-managed (--no-tray) mode the widget owns startup: don't rewrite
+  // the Run key back to the dashboard or boot ends up with two trays/pills.
+  if (!m_noTray)
+    QTimer::singleShot(0, this, []() { applyStartupSetting(true); });
 
   setWindowOpacity(activeOpacity / 100.0);
   setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool |
@@ -603,7 +613,10 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
     update();
   });
   waveformAnimationTimer = new QTimer(this);
-  waveformAnimationTimer->setInterval(24);
+  // 30fps is plenty for the pill waveform; 24ms (~42fps) repainted the
+  // whole widget with antialiasing + ~100 rounded bars and made the pill
+  // feel glitchy while listening.
+  waveformAnimationTimer->setInterval(33);
   connect(waveformAnimationTimer, &QTimer::timeout, this,
           &PillWidget::updateWaveformFrame);
 
@@ -975,8 +988,14 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
       {QStringLiteral(":/quickstt/app.svg"),
        QCoreApplication::applicationDirPath() + "/Untitled-1.svg"});
 
-  setupTray();
-  updateCachedIcons(); // This calls updateTrayIcon internally
+  if (m_noTray) {
+    qDebug() << "Single-tray mode (--no-tray): Slint owns the tray icon, "
+                "skipping QSystemTrayIcon";
+  } else {
+    setupTray();
+  }
+  updateCachedIcons(); // mic pixmaps only (cheap)
+  updateTrayIcon(); // uses cache from setupTray; one-time render only
 
   qDebug() << "Setup AHK...";
 #ifdef _WIN32
@@ -1051,6 +1070,11 @@ PillWidget::PillWidget(QWidget *parent) : QWidget(parent) {
     }
     qDebug() << "Auto-offload: unloading model to save RAM";
     sendBackendCommand("OFFLOAD\n");
+    // Backend worker is covered by OFFLOAD above; the frontend worker
+    // (parakeet/nemotron child) has no backend FINAL path, so release it
+    // here too — otherwise 640MB+ stays resident after every turn.
+    if (m_localFrontendSttManager)
+      m_localFrontendSttManager->unloadIdleModels();
     m_modelOffloaded = true;
   });
 
@@ -1143,6 +1167,11 @@ void PillWidget::startBackend() {
   backendProcess->setWorkingDirectory(appDir);
   backendProcess->setProgram(backendPath);
   backendProcess->setArguments({});
+  // Merge the engine's stderr into the stdout line stream: [ENGINE] /
+  // [WAKENET] / [OWW-TFLITE] diagnostics then land in startup_log.txt via
+  // the message handler, so wake thresholds and worker health can be tuned
+  // from real data. Non-event lines are ignored by onProcessOutput().
+  backendProcess->setProcessChannelMode(QProcess::MergedChannels);
   backendProcess->start();
   // Non-blocking: success/failure arrives via started/errorOccurred signals.
   QTimer::singleShot(1500, this, [this]() {
@@ -1237,6 +1266,23 @@ void PillWidget::startBackend() {
     // Sync wakeword activation mode (Off by default)
     QString wakeWordMode = ss.value("wakeWordMode", "Off").toString();
     sendBackendCommand(("WAKEWORDMODE:" + wakeWordMode + "\n").toUtf8());
+
+    // Sync the word lists + wake engine at startup too: previously these
+    // were only forwarded when the dashboard changed them, so a fresh
+    // backend kept compiled-in defaults until the user touched settings.
+    const QStringList wakeWords =
+        ss.value("wakeWords", QStringList{"hey jarvis"}).toStringList();
+    if (!wakeWords.isEmpty())
+      sendBackendCommand(("WAKEWORDS:" + wakeWords.join(",") + "\n").toUtf8());
+    const QStringList closeWords =
+        ss.value("closeWords",
+                 QStringList{"stop listening", "go to sleep"})
+            .toStringList();
+    if (!closeWords.isEmpty())
+      sendBackendCommand(("CLOSEWORDS:" + closeWords.join(",") + "\n").toUtf8());
+    const QString wakeEngineStartup = canonicalWakeEngineLabel(
+        ss.value("wakeEngine", "OpenWakeWord (TFLite)").toString());
+    sendBackendCommand(("WAKEMODE:" + wakeEngineStartup + "\n").toUtf8());
   }
 
 }
@@ -1303,16 +1349,32 @@ void PillWidget::closeEvent(QCloseEvent *event) {
   }
   if (trayIcon && trayIcon->isVisible()) {
     suppressAutoShowBriefly(12000);
+    sendBackendCommand("SLEEP\n");
+    isListening = false;
+    isRecording = false;
     hide();
+    if (textBoardWindow)
+      textBoardWindow->hide();
+    syncWakeModeForVisibility(false);
     trayIcon->showMessage("QuickSTT", "Minimized to Tray",
                           QSystemTrayIcon::Information, 1000);
     event->ignore();
   } else {
-    // Fully shut down all model processes before accepting close
-    if (m_localFrontendSttManager) {
-      m_localFrontendSttManager->shutdownAllModels();
-    }
-    event->accept();
+    // Slint-managed (--no-tray) mode: there is no tray icon of our own, but
+    // the Slint app owns the real tray and kills us on Quit. Accepting the
+    // close here used to leave a headless zombie (quit-on-close is off)
+    // whose backend kept waking "nothing" up. Hide + sleep instead so X
+    // always dismisses the widget; Slint's Quit still ends the process.
+    suppressAutoShowBriefly(12000);
+    sendBackendCommand("SLEEP\n");
+    isListening = false;
+    isRecording = false;
+    canShowWaveform = false;
+    if (textBoardWindow)
+      textBoardWindow->hide();
+    syncWakeModeForVisibility(false);
+    hide();
+    event->ignore();
   }
 }
 
@@ -1402,6 +1464,17 @@ void PillWidget::quitApp() {
   if (m_localFrontendSttManager)
     m_localFrontendSttManager->shutdownAllModels();
 
+  // Symmetric lifecycle: Slint quits us via quit_both — return the favour
+  // so the Rust pill + tray don't linger orphaned (Slint IPC QUIT).
+  {
+    QTcpSocket quitSock;
+    quitSock.connectToHost("127.0.0.1", 47631);
+    if (quitSock.waitForConnected(300)) {
+      quitSock.write("QUIT\n");
+      quitSock.waitForBytesWritten(300);
+    }
+  }
+
   qApp->quit();
 }
 
@@ -1444,22 +1517,54 @@ void PillWidget::centerOnScreen() {
   }
 }
 
+void PillWidget::ensureOnScreen() {
+  bool offScreen = true;
+  const QPoint center = geometry().center();
+  for (QScreen *screen : QGuiApplication::screens()) {
+    if (screen->availableGeometry().contains(center)) {
+      offScreen = false;
+      break;
+    }
+  }
+  if (!m_placedOnce || offScreen) {
+    centerOnScreen();
+    m_placedOnce = true;
+  }
+}
+
+void PillWidget::hideFromExternalTrigger() {
+  suppressAutoShowBriefly(12000);
+  sendBackendCommand("SLEEP\n");
+  isListening = false;
+  isRecording = false;
+  canShowWaveform = false;
+  if (textBoardWindow)
+    textBoardWindow->hide();
+  syncWakeModeForVisibility(false);
+  hide();
+}
+
 void PillWidget::restoreFromExternalTrigger() {
   if (m_popupClient || m_popupActive || isAutoShowSuppressed()) {
     qDebug() << "[PILL] Suppressing external restore trigger (popup active / auto-show suppressed)";
     return;
   }
   suppressAutoShowBriefly(1200);
-  ensureBackendRunning();
-  centerOnScreen();
+  // Show FIRST for instant tray response; backend/wake/textboard follow on
+  // the next event-loop turn so the widget paints before any I/O.
+  ensureOnScreen();
   if (isMinimized())
     showNormal();
   show();
   raise();
   activateWindow();
-  if (textBoardWindow && textBoardOpen)
-    textBoardWindow->show();
-  repositionTextBoard();
+  QTimer::singleShot(0, this, [this]() {
+    ensureBackendRunning();
+    syncWakeModeForVisibility(true);
+    if (textBoardWindow && textBoardOpen)
+      textBoardWindow->show();
+    repositionTextBoard();
+  });
 
   if (currentStatusText.compare(QStringLiteral("Hidden"), Qt::CaseInsensitive) ==
       0) {
@@ -1479,16 +1584,22 @@ void PillWidget::showMainWidgetExplicitly() {
   m_temporarilySuppressAutoShow = false;
   if (autoShowSuppressTimer)
     autoShowSuppressTimer->stop();
-  ensureBackendRunning();
-  centerOnScreen();
+  // Show FIRST — tray clicks must paint instantly. Backend ensure, wake
+  // re-arm and textboard sync are deferred so no process/file I/O blocks
+  // the show path (model RELOAD stays async via sendBackendCommand).
+  ensureOnScreen();
   if (isMinimized())
     showNormal();
   show();
   raise();
   activateWindow();
-  if (textBoardWindow && textBoardOpen)
-    textBoardWindow->show();
-  repositionTextBoard();
+  QTimer::singleShot(0, this, [this]() {
+    ensureBackendRunning();
+    syncWakeModeForVisibility(true);
+    if (textBoardWindow && textBoardOpen)
+      textBoardWindow->show();
+    repositionTextBoard();
+  });
 
   if (currentStatusText.compare(QStringLiteral("Hidden"), Qt::CaseInsensitive) ==
       0) {
@@ -1605,13 +1716,23 @@ void PillWidget::updateCachedIcons() {
     p.drawEllipse(2, 2, s - 4, s - 4);
     p.end();
   }
-
-  updateTrayIcon();
+  // NOTE: tray icon is intentionally NOT rebuilt here. It is static (app
+  // icon) and cached — rebuilding 8 SVG sizes on every mic toggle is what
+  // made on/off feel slow. Call updateTrayIcon(true) only when the icon
+  // source actually changes.
 }
 
-void PillWidget::updateTrayIcon() {
+void PillWidget::updateTrayIcon(bool force) {
   if (!trayIcon)
     return;
+  // Static icon — reuse the cached render. The mic on/off path calls
+  // updateCachedIcons() (mic pixmaps only) and must never pay this cost.
+  if (m_trayIconCached && !force && !m_cachedTrayIcon.isNull()) {
+    trayIcon->setIcon(m_cachedTrayIcon);
+    if (!trayIcon->isVisible())
+      trayIcon->show();
+    return;
+  }
 
   // Build the app icon from the embedded SVG at every standard size so panel
   // zoom levels stay crisp (a single-pixmap QIcon looks blurry in trays).
@@ -1654,6 +1775,8 @@ void PillWidget::updateTrayIcon() {
   }
 
   trayIcon->setIcon(appIcon);
+  m_cachedTrayIcon = appIcon;
+  m_trayIconCached = true;
   setWindowIcon(appIcon);
   applyNativeWindowIcons();
 
@@ -1824,6 +1947,9 @@ void PillWidget::paintEvent(QPaintEvent *) {
   QColor dotColor;
   if (m_mp3Recording) {
     dotColor = blinkState ? QColor("#3898FF") : QColor("#1A5090");
+  } else if (m_modelLoading && !isListening) {
+    // Small load/offload pulse while the model loads (STATE 3).
+    dotColor = blinkState ? QColor("#5AACFF") : QColor("#2A4A6A");
   } else if (isListening) {
     dotColor = QColor("#2060AA"); // steady blue during transcription
   } else {
@@ -1934,9 +2060,10 @@ void PillWidget::onSettingChanged(QString key, QVariant val) {
   if (key == "iconSize") {
     iconSize = val.toInt();
     updateCachedIcons();
+    update(micBtn->geometry());
   } else if (key == "trayIconSize") {
     trayIconSize = val.toInt();
-    updateCachedIcons();
+    updateTrayIcon(true);
   } else if (key == "showWaveform") {
     showWaveform = val.toBool();
   } else if (key == "specialCommandsEnabled") {
@@ -1988,6 +2115,56 @@ void PillWidget::onSettingChanged(QString key, QVariant val) {
     sendBackendCommand(("SNAP_ACTION:" + val.toString() + "\n").toUtf8());
   } else if (key == "acousticSensitivity") {
     sendBackendCommand(("ACOUSTIC_SENSITIVITY:" + QString::number(val.toDouble(), 'f', 2) + "\n").toUtf8());
+  } else if (key == "selectedModel") {
+    // Dashboard model switch: previously this signal had NO handler, so
+    // the backend kept the stale model until the pill combo was touched
+    // or the app restarted. Drive the same backend switch as onModelChanged
+    // (combo UI synced silently to avoid a signal loop).
+    const QString modelName = val.toString();
+    if (!modelName.isEmpty()) {
+      m_currentModelName = modelName;
+      if (modelCombo) {
+        const QSignalBlocker blocker(modelCombo);
+        const int idx = modelCombo->findText(
+            modelName, Qt::MatchExactly | Qt::MatchCaseSensitive);
+        if (idx < 0)
+          refreshModelCombo();
+        const int idx2 = modelCombo->findText(modelName);
+        if (idx2 >= 0)
+          modelCombo->setCurrentIndex(idx2);
+        updateModelDownloadButton();
+      }
+      if (usesFrontendManagedModel(modelName)) {
+        if (usesNativeParakeetPipeline(modelName)) {
+          const bool streaming = localModelSupportsStreaming(modelName);
+          sendBackendCommand(streaming ? "TRANSCRIBE_MODE:STREAMING\n"
+                                       : "TRANSCRIBE_MODE:PARAKEET\n");
+          sendBackendCommand(streaming ? "MODEL_CAP:streaming=1\n"
+                                       : "MODEL_CAP:streaming=0\n");
+          sendBackendCommand("PRELOAD:1\n");
+          forwardEventToPopup(QStringLiteral("MODEL_CAP"),
+                              streaming ? QStringLiteral("streaming=1")
+                                        : QStringLiteral("streaming=0"));
+        } else {
+          sendBackendCommand("TRANSCRIBE_MODE:CLOUD\n");
+          sendBackendCommand("MODEL_CAP:streaming=0\n");
+          forwardEventToPopup(QStringLiteral("MODEL_CAP"),
+                              QStringLiteral("streaming=0"));
+        }
+        sendBackendCommand(frontendSegmentationCommandForModel(modelName));
+        if (isModelInstalled(baseBackendModelName()))
+          sendBackendCommand(("MODEL:" + baseBackendModelName() + "\n").toUtf8());
+      } else {
+        sendBackendCommand("TRANSCRIBE_MODE:LOCAL\n");
+        sendBackendCommand(frontendSegmentationCommandForModel(modelName));
+        if (supportsRuntimeModel(modelName) && isModelInstalled(modelName))
+          sendBackendCommand(("MODEL:" + modelName + "\n").toUtf8());
+      }
+      currentStatusText = "Switching to " + modelName + "...";
+      statusLabel->show();
+      statusLabel->setText(currentStatusText);
+      update();
+    }
   } else if (key == "ctrlSpaceEnabled") {
     bool enabled = val.toBool();
     if (enabled) {
@@ -2115,6 +2292,52 @@ static void nativeSendText(const QString &text) {
 }
 #endif
 
+namespace {
+// Raw tail of `full` not yet covered by `typed`, tolerating the case and
+// trailing-punctuation drift between live STREAM commits and the FINAL
+// transcript ("Hello world" vs "hello world."). Returns empty when FINAL
+// adds nothing new; returns `full` on genuine word divergence (caller
+// types it as a new segment). This is what stops the pill re-typing the
+// tail of every utterance as a "divergence".
+QString uncoveredRawTail(const QString &typed, const QString &full) {
+  auto isIgnorableChar = [](QChar c) {
+    return c.isSpace() ||
+           QStringLiteral(".,!?;:\"'()[]{}-\u2013\u2014\u2026\u201c\u201d\u2018\u2019")
+               .contains(c);
+  };
+  int i = 0, j = 0;
+  while (i < typed.size() && j < full.size()) {
+    if (typed[i].toLower() == full[j].toLower()) {
+      ++i;
+      ++j;
+      continue;
+    }
+    if (isIgnorableChar(typed[i])) {
+      ++i;
+      continue;
+    }
+    if (isIgnorableChar(full[j])) {
+      ++j;
+      continue;
+    }
+    break; // genuine word divergence
+  }
+  while (i < typed.size() && isIgnorableChar(typed[i]))
+    ++i;
+  while (j < full.size() && isIgnorableChar(full[j]))
+    ++j;
+  const bool typedDone = (i >= typed.size());
+  const bool fullDone = (j >= full.size());
+  if (typedDone && fullDone)
+    return QString(); // identical modulo drift
+  if (typedDone)
+    return full.mid(j).trimmed(); // pure growth — tail only
+  if (fullDone)
+    return QString(); // FINAL is a subset of what is on screen
+  return full;        // diverged — type as a new segment
+}
+} // namespace
+
 void PillWidget::onProcessOutput() {
   while (backendProcess->canReadLine()) {
     QString l = backendProcess->readLine().trimmed();
@@ -2156,6 +2379,11 @@ void PillWidget::onProcessOutput() {
           commaPos >= 0 ? payload.mid(commaPos + 1).trimmed() : QString();
       qDebug() << "[STATE] code=" << c << " text=" << stateText;
 
+      // Any STATE line proves the backend process is alive and talking —
+      // clear the restart circuit-breaker so a past failure streak can
+      // never wedge the engine dead until app restart.
+      m_backendStartFailures = 0;
+
       if (c == 1 || c == 2) {
         if (waveformAnimationTimer && !waveformAnimationTimer->isActive())
           waveformAnimationTimer->start();
@@ -2175,6 +2403,21 @@ void PillWidget::onProcessOutput() {
         }
 
         isListening = true;
+        // Model is live — clear any load pulse (unless MP3 REC owns the blink).
+        m_modelLoading = false;
+        if (!m_mp3Recording) {
+          blinkTimer->stop();
+          blinkState = false;
+        }
+        // Hand focus back to the app the user was in when they hit the mic,
+        // so SendInput types there instead of tripping the [UI-ONLY] gate.
+        // Pill already sets WindowDoesNotAcceptFocus; this covers the cases
+        // where one of our own windows (dashboard/textboard) held focus.
+        // Best-effort here — the handle is KEPT so FINAL_TEXT can retry
+        // (Windows foreground-lock often refuses this first attempt).
+#ifdef _WIN32
+        tryRestoreTypingFocus();
+#endif
         // Keep the selected model warm for the whole turn.
         if (m_offloadTimer && m_offloadTimer->isActive())
           m_offloadTimer->stop();
@@ -2192,11 +2435,15 @@ void PillWidget::onProcessOutput() {
           waveformAnimationTimer->stop();
         isListening = false;
         isRecording = false;
+#ifdef _WIN32
+        m_preListenFgWnd = nullptr; // turn over — drop the focus handle
+#endif
         canShowWaveform = false;
         waveformDelayTimer->stop();
         audioWaveform.clear();
         waveformTargetLevels.clear();
         waveformDisplayLevels.clear();
+        m_modelLoading = false;
         currentStatusText = stateText.isEmpty() ? "Ready" : stateText;
         if (currentStatusText.startsWith("Switched to ") ||
             currentStatusText == "Ready") {
@@ -2239,6 +2486,9 @@ void PillWidget::onProcessOutput() {
           waveformAnimationTimer->stop();
         isListening = false;
         isRecording = false;
+#ifdef _WIN32
+        m_preListenFgWnd = nullptr; // session over — drop the focus handle
+#endif
         canShowWaveform = false;
         audioWaveform.clear();
         waveformTargetLevels.clear();
@@ -2254,6 +2504,10 @@ void PillWidget::onProcessOutput() {
         currentStatusText = stateText;
         if (!stateText.isEmpty())
           statusLabel->setText(stateText);
+        // Tiny load/offload animation: pulse the status dot until STATE 1/0.
+        m_modelLoading = true;
+        if (!m_mp3Recording && !blinkTimer->isActive())
+          blinkTimer->start(250);
         updateCachedIcons();
       }
       if (m_popupActive && (m_popupFinalDelivered || m_popupStopRequested) &&
@@ -2344,38 +2598,49 @@ void PillWidget::onProcessOutput() {
           QString delta;
           if (m_streamTypedPrefix.isEmpty()) {
             delta = committed;
-            m_streamTypedPrefix = committed;
-          } else if (committed.startsWith(m_streamTypedPrefix)) {
-            delta = committed.mid(m_streamTypedPrefix.size());
-            m_streamTypedPrefix = committed;
           } else {
-            // Check for longest common prefix to avoid repeating words
-            int commonLen = 0;
-            while (commonLen < m_streamTypedPrefix.size() &&
-                   commonLen < committed.size() &&
-                   m_streamTypedPrefix[commonLen] == committed[commonLen]) {
-              commonLen++;
-            }
-            if (commonLen == m_streamTypedPrefix.size()) {
-              delta = committed.mid(commonLen);
-              m_streamTypedPrefix = committed;
-            } else {
-              delta.clear(); // Wait for FINAL_TEXT to commit clean transcript
-            }
+            // Tolerance for case/punct drift between commits; a genuine
+            // model revision mid-stream is left for FINAL_TEXT so we
+            // never guess (and duplicate) a rewritten head.
+            const QString tail =
+                uncoveredRawTail(m_streamTypedPrefix, committed);
+            if (!tail.isEmpty() && tail != committed)
+              delta = tail;
           }
           if (!delta.isEmpty()) {
-            const bool appHasFocus = (QApplication::activeWindow() != nullptr);
-            if (!appHasFocus)
+            bool typed = false;
+            if (QApplication::activeWindow() == nullptr) {
               nativeSendText(delta);
-            m_lastHandledTranscript = committed;
-            m_lastHandledTranscriptMs = QDateTime::currentMSecsSinceEpoch();
-            qDebug() << "[STREAM-TYPED]" << delta;
+              typed = true;
+            }
+#ifdef _WIN32
+            else if (tryRestoreTypingFocus()) {
+              nativeSendText(delta);
+              typed = true;
+            }
+#endif
+            if (typed) {
+              m_streamTypedPrefix = committed;
+              m_lastHandledTranscript = committed;
+              m_lastHandledTranscriptMs = QDateTime::currentMSecsSinceEpoch();
+              qDebug() << "[STREAM-TYPED]" << delta;
+            } else {
+              // Our own window kept focus and Windows refused the
+              // restore: do NOT advance the prefix — FINAL_TEXT still
+              // covers this span, so nothing is lost.
+              qDebug() << "[STREAM-HELD] waiting for FINAL:" << delta;
+            }
           }
         }
       }
     } else if (eventType == "PARTIAL_TEXT") {
-      qDebug() << "[PARTIAL]" << payload.trimmed();
       // Tentative only — main pill types committed STREAM_TEXT + FINAL residual.
+      // Log a stub, not the full ever-growing text: full-text PARTIAL logging
+      // at chunk rate is what ballooned startup_log.txt to tens of MB and
+      // churned the UI thread with file I/O while listening.
+      const QString stub = payload.trimmed();
+      qDebug() << "[PARTIAL] len=" << stub.size()
+               << (stub.isEmpty() ? QString() : stub.left(48));
 
     } else if (eventType == "CLOUD_AUDIO") {
       const QString audioPath = payload.trimmed();
@@ -2424,47 +2689,67 @@ void PillWidget::onProcessOutput() {
         continue;
       }
 
-      // If streaming already pasted a committed prefix, only type the residual
-      // so Nemotron does not double-paste the whole utterance on finalize.
+      // If streaming already pasted a committed prefix, only type the
+      // residual so Nemotron does not double-paste the whole utterance on
+      // finalize. The compare tolerates case/punctuation drift between the
+      // last live commit and FINAL ("hello world" vs "Hello world.").
       if (!m_popupActive && !m_streamTypedPrefix.isEmpty()) {
-        QString residual;
-        if (trimmed.startsWith(m_streamTypedPrefix)) {
-          residual = trimmed.mid(m_streamTypedPrefix.size()).trimmed();
-        } else if (trimmed != m_streamTypedPrefix) {
-          // Final diverged from live commit — type full final as new segment.
-          residual = trimmed;
-        }
+        const QString tail = uncoveredRawTail(m_streamTypedPrefix, trimmed);
         m_streamTypedPrefix.clear();
-        if (residual.isEmpty()) {
+        if (tail.isEmpty()) {
           qDebug() << "[FINAL] fully covered by stream prefix:" << trimmed;
+          // Already typed — but the Text Board must still show it.
+          if (textBoardWindow)
+            textBoardWindow->appendText(trimmed);
           update();
           continue;
         }
         // residual path still goes through command/routing via processRecognizedText
-        processRecognizedText(residual, false);
+        processRecognizedText(tail, false);
         update();
         continue;
       }
       m_streamTypedPrefix.clear();
 
-      // Dedup guard: skip if same text received within 800ms
+      // Dedup guard: skip if same text received within 4s (backends often
+      // emit a late second FINAL for one utterance — 800ms missed it).
       static QString s_lastTypedText;
       static qint64 s_lastTypedMs = 0;
       qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-      if (trimmed == s_lastTypedText && (nowMs - s_lastTypedMs) < 800) {
+      if (trimmed.compare(s_lastTypedText, Qt::CaseInsensitive) == 0 &&
+          (nowMs - s_lastTypedMs) < 4000) {
         qDebug() << "[DEDUP] Skipping duplicate:" << trimmed;
+        // Typing skipped, but the Text Board keeps every segment.
+        if (textBoardWindow)
+          textBoardWindow->appendText(trimmed);
         continue;
       }
       s_lastTypedText = trimmed;
       s_lastTypedMs = nowMs;
 
       processRecognizedText(trimmed, false);
+      // Main-pill turn is done: re-arm the idle-offload timer (the popup
+      // path already does this; the main path never did — the model stayed
+      // resident until the next hide/close).
+      evaluateAutoOffload();
 
       update();
     } else if (eventType == "ERROR") {
       statusLabel->show();
       currentStatusText = payload;
       statusLabel->setText(payload);
+      // Backend failed — drop the optimistic listening state, or the mic
+      // stays red while recording nothing (silent-stop reports).
+      isListening = false;
+      isRecording = false;
+      canShowWaveform = false;
+      if (waveformAnimationTimer)
+        waveformAnimationTimer->stop();
+      if (!m_mp3Recording) {
+        blinkTimer->stop();
+        blinkState = false;
+      }
+      updateCachedIcons();
       update();
     } else if (eventType == "AUDIO_LEVEL") {
       int rawLevel = payload.toInt();
@@ -2511,20 +2796,37 @@ void PillWidget::onProcessOutput() {
       m_modelOffloaded = true;
       qDebug() << "Model offload confirmed by backend";
     } else if (eventType == "WAKEWORD_DETECTED") {
-      // Ignore wakeword if the user recently closed the widget
-      if (m_temporarilySuppressAutoShow) {
+      // A backend detection still has to respect the frontend close-
+      // suppression window: a false wake inside ~12s of dismissing must
+      // NOT pop the widget back up (this was the phantom-popup loop).
+      // The backend's own 10s SLEEP gate + raised score/VAD thresholds
+      // already filter noise; this is the last line of defence.
+      QSettings s("QuickSTT", "Config");
+      QString mode = s.value("wakeWordMode", "Off").toString();
+      if (isAutoShowSuppressed()) {
         qDebug() << "WAKEWORD_DETECTED ignored — auto-show suppressed";
       } else {
-        QSettings s("QuickSTT", "Config");
-        QString mode = s.value("wakeWordMode", "Off").toString();
         if (mode != "Off") {
           if (mode == "Always On" || isVisible()) {
+#ifdef _WIN32
+            // Same focus capture as the mic click: the pill is about to
+            // steal focus, so remember where typing must land. Without
+            // this every wakeword transcript hit the [UI-ONLY] gate.
+            {
+              HWND fg = GetForegroundWindow();
+              HWND self = reinterpret_cast<HWND>(winId());
+              if (fg && fg != self)
+                m_preListenFgWnd = fg;
+            }
+#endif
+            // restoreFromExternalTrigger() shows (and re-checks
+            // suppression) — no second show() here: it used to surface
+            // the pill even when the restore above bailed out.
             restoreFromExternalTrigger();
             isListening = true;
             isRecording = true;
             if (m_modelLoadTimeoutTimer)
               m_modelLoadTimeoutTimer->start();
-            show();
             updateCachedIcons();
             update();
           }
@@ -2539,8 +2841,9 @@ void PillWidget::setupTray() {
     QMessageBox::critical(this, "QuickSTT", "No Tray System!");
   }
   trayIcon = new QSystemTrayIcon(this);
-  updateTrayIcon();
+  updateTrayIcon(true);
   trayMenu = new QMenu(this);
+  applyDarkTrayMenu();
   // Use singleShot to avoid re-entrancy with the tray's own event loop on Mint/Cinnamon.
   trayMenu->addAction("Dashboard", this, [this]() {
     QTimer::singleShot(0, this, &PillWidget::openDashboard);
@@ -2550,6 +2853,10 @@ void PillWidget::setupTray() {
   });
   trayMenu->addAction("Hide Widget", this, [this]() {
     suppressAutoShowBriefly(12000);
+    sendBackendCommand("SLEEP\n");
+    isListening = false;
+    isRecording = false;
+    syncWakeModeForVisibility(false);
     hide();
   });
   trayMenu->addAction("Quit App", this, &PillWidget::quitApp);
@@ -2562,6 +2869,10 @@ void PillWidget::setupTray() {
             if (r == QSystemTrayIcon::DoubleClick) {
               if (isVisible()) {
                 suppressAutoShowBriefly(12000);
+                sendBackendCommand("SLEEP\n");
+                isListening = false;
+                isRecording = false;
+                syncWakeModeForVisibility(false);
                 hide();
               } else {
                 showMainWidgetExplicitly();
@@ -2571,6 +2882,57 @@ void PillWidget::setupTray() {
                 QTimer::singleShot(0, this, &PillWidget::showMainWidgetExplicitly);
             }
           });
+}
+
+void PillWidget::applyDarkTrayMenu() {
+  if (!trayMenu)
+    return;
+  // Black background + white text overlay that keeps the native Windows
+  // menu chrome (borders, shadows, rounded corners, screen-edge placement).
+  // This is a stylesheet overlay on the native QMenu — no frameless custom
+  // window, no manual positioning — so it stays pixel-perfect with the OS.
+  trayMenu->setStyleSheet(
+      "QMenu { background-color: #111111; color: #FFFFFF; "
+      "border: 1px solid #2E2E2E; padding: 5px; }"
+      "QMenu::item { background-color: transparent; color: #FFFFFF; "
+      "padding: 7px 28px 7px 28px; border-radius: 5px; font-size: 13px; }"
+      "QMenu::item:selected { background-color: #2B2B2B; color: #FFFFFF; }"
+      "QMenu::item:pressed { background-color: #3A3A3A; }"
+      "QMenu::item:disabled { color: #7A7A7A; }"
+      "QMenu::separator { height: 1px; background: #2E2E2E; margin: 5px 10px; }"
+      "QMenu::indicator { width: 16px; height: 16px; }");
+#ifdef _WIN32
+  // Native dark titlebar/border for the menu popup itself (Win10 1809+).
+  // Best-effort via dynamic load — never links hard, never fails startup.
+  trayMenu->winId(); // force native handle creation
+  HWND hwnd = reinterpret_cast<HWND>(trayMenu->winId());
+  if (hwnd) {
+    HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+    if (dwm) {
+      using DwmSetFn = HRESULT(WINAPI *)(HWND, DWORD, LPCVOID, DWORD);
+      auto setAttr = reinterpret_cast<DwmSetFn>(
+          GetProcAddress(dwm, "DwmSetWindowAttribute"));
+      if (setAttr) {
+        const BOOL dark = TRUE;
+        constexpr DWORD kUseImmersiveDark = 20;
+        setAttr(hwnd, kUseImmersiveDark, &dark, sizeof(dark));
+        constexpr DWORD kCornerPref = 33; // DWMWCP_ROUND
+        const DWORD round = 2;
+        setAttr(hwnd, kCornerPref, &round, sizeof(round));
+      }
+      FreeLibrary(dwm);
+    }
+    HMODULE theme = LoadLibraryW(L"uxtheme.dll");
+    if (theme) {
+      using SetThemeFn = HRESULT(WINAPI *)(HWND, LPCWSTR, LPCWSTR);
+      auto setTheme = reinterpret_cast<SetThemeFn>(
+          GetProcAddress(theme, "SetWindowTheme"));
+      if (setTheme)
+        setTheme(hwnd, L"DarkMode_Explorer", nullptr);
+      FreeLibrary(theme);
+    }
+  }
+#endif
 }
 void PillWidget::openDashboard() {
   ensureDashboardCreated();
@@ -2715,8 +3077,46 @@ void PillWidget::onMicClicked() {
     }
     update();
   }
-  evaluateAutoOffload();
+  // Remember who had focus BEFORE this click stole it, so typing lands in
+  // the user's app instead of the [UI-ONLY] gate. Restored on STATE 1.
+#ifdef _WIN32
+  {
+    HWND fg = GetForegroundWindow();
+    HWND self = reinterpret_cast<HWND>(winId());
+    if (fg && fg != self)
+      m_preListenFgWnd = fg;
+  }
+#endif
+  // Optimistic mic swap: paint the new state INSTANTLY on click instead of
+  // waiting for the backend TOGGLE round-trip (model reload + stream_start
+  // ack). The STATE handler corrects it if the backend disagrees.
+  if (!isListening) {
+    isListening = true;
+    m_streamTypedPrefix.clear();
+    canShowWaveform = false;
+    statusLabel->hide();
+    if (waveformAnimationTimer && !waveformAnimationTimer->isActive())
+      waveformAnimationTimer->start();
+    waveformDelayTimer->start(45);
+  } else {
+    isListening = false;
+    isRecording = false;
+    canShowWaveform = false;
+    if (waveformAnimationTimer)
+      waveformAnimationTimer->stop();
+  }
+  updateCachedIcons(); // mic pixmaps only — cached, no tray rebuild
+  // Repaint the mic + waveform region immediately; the backend TOGGLE ack
+  // (STATE 1/0) corrects the optimistic state if it disagrees. Capture
+  // starts on the backend without waiting for model load (warmup buffer),
+  // so the icon flip is never gated on GGUF load.
+  update(micBtn->geometry().united(waveRect).adjusted(-4, -4, 4, 4));
+  repaint(micBtn->geometry());
   sendBackendCommand("TOGGLE\n");
+  // Evaluate AFTER the flip (and the TOGGLE send): on a start-press
+  // isListening is now true so any armed timer stops; on a stop-press the
+  // idle timer arms. Evaluating before the flip armed offload mid-turn.
+  evaluateAutoOffload();
 }
 
 void PillWidget::onRedDotClicked() {
@@ -2771,6 +3171,7 @@ void PillWidget::onCloseClicked() {
   hide();
   if (textBoardWindow)
     textBoardWindow->hide();
+  syncWakeModeForVisibility(false);
   if (trayIcon)
     trayIcon->showMessage("QuickSTT", "Active in Tray",
                           QSystemTrayIcon::Information, 1000);
@@ -3043,7 +3444,7 @@ void PillWidget::updateWaveformFrame() {
   }
 
   if (changed)
-    update();
+    update(waveRect);
 }
 
 void PillWidget::evaluateAutoOffload() {
@@ -3249,7 +3650,14 @@ bool PillWidget::containsConfiguredCloseWord(const QString &text) const {
           .toStringList();
   for (const QString &closeWord : closeWords) {
     const QString normalized = closeWord.trimmed().toLower();
-    if (!normalized.isEmpty() && lowered.contains(normalized))
+    if (normalized.isEmpty())
+      continue;
+    // Phrase-boundary match: "please stop listening" and "stop listening
+    // now" count, but "stop listening to music on the radio" mid-sentence
+    // use (or "go to sleeper") must not nuke the session. The old bare
+    // substring check fired inside ordinary dictation.
+    if (lowered == normalized || lowered.startsWith(normalized + " ") ||
+        lowered.endsWith(" " + normalized))
       return true;
   }
   return false;
@@ -3262,13 +3670,18 @@ void PillWidget::processRecognizedText(const QString &text, bool fromCloud) {
 
   if (isIgnorableRecognitionText(trimmed)) {
     qDebug() << "[IGNORED-TRANSCRIPT]" << trimmed;
+    // Never typed — but the Text Board shows everything that was recognized.
+    if (textBoardWindow)
+      textBoardWindow->appendText(trimmed);
     return;
   }
 
   const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-  if (trimmed == m_lastHandledTranscript &&
-      (nowMs - m_lastHandledTranscriptMs) < 800) {
+  if (trimmed.compare(m_lastHandledTranscript, Qt::CaseInsensitive) == 0 &&
+      (nowMs - m_lastHandledTranscriptMs) < 4000) {
     qDebug() << "[DEDUP] Skipping duplicate:" << trimmed;
+    if (textBoardWindow)
+      textBoardWindow->appendText(trimmed);
     return;
   }
   m_lastHandledTranscript = trimmed;
@@ -3297,6 +3710,7 @@ void PillWidget::processRecognizedText(const QString &text, bool fromCloud) {
     hide();
     if (textBoardWindow)
       textBoardWindow->hide();
+    syncWakeModeForVisibility(false);
 
     evaluateAutoOffload();
     return;
@@ -3343,6 +3757,9 @@ void PillWidget::processRecognizedText(const QString &text, bool fromCloud) {
   }
 
   const bool appHasFocus = (QApplication::activeWindow() != nullptr);
+  // NOTE: ctrlSpaceOutput stays popup-scoped (the dashboard shows it in the
+  // Ctrl+Space group): the main mic always types. Routing the main mic
+  // through it broke typing for everyone with Copy/None configured there.
   bool isCommand = false;
   QString commandName;
 #ifdef _WIN32
@@ -3389,13 +3806,35 @@ void PillWidget::processRecognizedText(const QString &text, bool fromCloud) {
     if (!appHasFocus) {
       nativeSendText(trimmed + " ");
       qDebug() << (fromCloud ? "[CLOUD-TYPED]" : "[TYPED]") << trimmed;
+#ifdef _WIN32
+    } else if (tryRestoreTypingFocus()) {
+      // Our own pill/dashboard held focus (wake path, dashboard open):
+      // focus is external again, so typing lands in the user's app.
+      nativeSendText(trimmed + " ");
+      qDebug() << (fromCloud ? "[CLOUD-TYPED-RESTORED]" : "[TYPED-RESTORED]")
+               << trimmed;
+    } else {
+      // Windows refused the restore (foreground lock) — copy instead of
+      // silently dropping the transcript like before.
+      if (QClipboard *cb = QApplication::clipboard()) {
+        cb->setText(trimmed + " ");
+        showTransientStatus("Copied — click the target app to paste", 3500);
+      }
+      qDebug() << (fromCloud ? "[CLOUD-UI-FALLBACK-COPY]" : "[UI-FALLBACK-COPY]")
+               << trimmed;
+    }
+#else
     } else {
       qDebug() << (fromCloud ? "[CLOUD-UI-ONLY]" : "[UI-ONLY]") << trimmed;
     }
+#endif
 
     if (textBoardWindow)
       textBoardWindow->appendText(trimmed);
   }
+#ifdef _WIN32
+  m_preListenFgWnd = nullptr; // turn delivered — drop the focus handle
+#endif
 }
 
 void PillWidget::setWidgetStatusText(const QString &text,
@@ -3433,17 +3872,28 @@ bool PillWidget::isIgnorableRecognitionText(const QString &text) const {
     return true;
   }
 
-  static const QStringList ignoredPhrases = {
+  // Natural-language hallucinations ("music", "thank you", ...) only match
+  // when they ARE the whole transcript — "play some music" must survive.
+  static const QStringList ignoredExact = {
       QStringLiteral("blank_audio"), QStringLiteral("blank audio"),
       QStringLiteral("keyboard clicking"), QStringLiteral("typing sounds"),
       QStringLiteral("mouse clicking"), QStringLiteral("background noise"),
-      QStringLiteral("music"), QStringLiteral("applause"),
-      QStringLiteral("parse-options.cc:read:"), QStringLiteral("sherpa-onnx-offline.exe"),
-      QStringLiteral("--moonshine-encoder"), QStringLiteral("--moonshine-merged-decoder"),
-      QStringLiteral("tokens.txt"), QStringLiteral("encoder_model.ort"),
+      QStringLiteral("music"), QStringLiteral("applause")};
+  for (const QString &phrase : ignoredExact) {
+    if (lowered == phrase)
+      return true;
+  }
+
+  // Technical/log tokens are never valid dictation — substring is fine.
+  static const QStringList ignoredSubstrings = {
+      QStringLiteral("parse-options.cc:read:"),
+      QStringLiteral("sherpa-onnx-offline.exe"),
+      QStringLiteral("--moonshine-encoder"),
+      QStringLiteral("--moonshine-merged-decoder"), QStringLiteral("tokens.txt"),
+      QStringLiteral("encoder_model.ort"),
       QStringLiteral("decoder_model_merged.ort"), QStringLiteral(".onnx")};
 
-  for (const QString &phrase : ignoredPhrases) {
+  for (const QString &phrase : ignoredSubstrings) {
     if (lowered.contains(phrase))
       return true;
   }
@@ -3465,6 +3915,35 @@ void PillWidget::suppressAutoShowBriefly(int durationMs) {
     autoShowSuppressTimer->start(qMax(250, durationMs));
   }
 }
+
+void PillWidget::syncWakeModeForVisibility(bool visible) {
+  // "On with Widget" means: background wake only matters while the widget
+  // is out of the way. Stand it down while open (mic turns drive
+  // transcription anyway), re-arm once hidden. Always On / Off are owned
+  // entirely by the backend — leave them alone. Safe to call right after
+  // SLEEP: the backend preserves the close cooldown on re-enable.
+  QSettings s("QuickSTT", "Config");
+  if (s.value("wakeWordMode", "Off").toString() != "On with Widget")
+    return;
+  sendBackendCommand(visible ? "WAKEWORDMODE:Off\n"
+                             : "WAKEWORDMODE:On with Widget\n");
+}
+
+#ifdef _WIN32
+bool PillWidget::tryRestoreTypingFocus() {
+  // Our own pill/dashboard/textboard constantly steal focus on show —
+  // typing then lands in the [UI-ONLY] gate and vanishes. Hand focus back
+  // to the window captured at mic/wake time (Windows may refuse once under
+  // foreground-lock; callers fall back to clipboard in that case).
+  if (m_preListenFgWnd && m_preListenFgWnd != reinterpret_cast<HWND>(winId()) &&
+      IsWindow(m_preListenFgWnd)) {
+    SetForegroundWindow(m_preListenFgWnd);
+  }
+  HWND fg = GetForegroundWindow();
+  HWND self = reinterpret_cast<HWND>(winId());
+  return fg && fg != self;
+}
+#endif
 
 void PillWidget::showTransientStatus(const QString &text, int durationMs) {
   const QString trimmed = text.trimmed();
@@ -3492,6 +3971,15 @@ void PillWidget::initPopupServer() {
   bool ctrlSpaceEnabled = os.value("ctrlSpaceEnabled", true).toBool();
   if (!ctrlSpaceEnabled) {
     qDebug() << "[POPUP] Ctrl+Space feature disabled in settings";
+    return;
+  }
+
+  // Pure-Rust popup overlay retired from the one-app product: the Slint mini
+  // pill owns Ctrl+Space (the popup held the global hotkey and showed its
+  // own surfaces). Code, exe and bridge stay on disk; re-enable explicitly
+  // with QUICKSTT_POPUP=1 without rebuilding.
+  if (!qEnvironmentVariableIsSet("QUICKSTT_POPUP")) {
+    qDebug() << "[POPUP] auto-launch disabled (Slint owns PTT)";
     return;
   }
 
@@ -3563,10 +4051,20 @@ void PillWidget::launchPopupProcess() {
 void PillWidget::toggleDictationExternal() {
   ensureBackendRunning();
   if (isHidden()) {
-    centerOnScreen();
+    ensureOnScreen();
     show();
   }
   raise();
+  syncWakeModeForVisibility(true);
+#ifdef _WIN32
+  // Hotkey/CLI path never steals focus, so fg here IS the user's app.
+  {
+    HWND fg = GetForegroundWindow();
+    HWND self = reinterpret_cast<HWND>(winId());
+    if (fg && fg != self)
+      m_preListenFgWnd = fg;
+  }
+#endif
   sendBackendCommand("TOGGLE\n");
 }
 

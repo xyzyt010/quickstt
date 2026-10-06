@@ -1,149 +1,104 @@
 #!/usr/bin/env bash
-# QuickSTT install.sh — one-liner for Ubuntu / Debian / Linux Mint amd64
-# Mint 21 (Ubuntu 22.04) and Mint 22 (Ubuntu 24.04) fully supported.
+# QuickSTT all-in-one installer for Debian/Ubuntu (incl. Linux Mint) amd64.
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/quickstt/quickstt/main/scripts/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/quickstt/quickstt/main/scripts/install.sh | bash -s -- --appimage
-#   curl -fsSL https://raw.githubusercontent.com/quickstt/quickstt/main/scripts/install.sh | bash -s -- --deb
-#   ./scripts/install.sh --check            # dry-run
-#   ./scripts/install.sh --uninstall        # remove .deb
+#   curl -fsSL https://raw.githubusercontent.com/xyzyt010/quickstt/main/scripts/install.sh | bash
+#   ... or pin a version:  ... | VERSION=v2.0.0-alpha.13 bash
+# Installs XFCE4/Wayland/X11 prerequisites, the .deb from GitHub Releases,
+# verifies the install, and prints first-run steps (model download happens
+# in-app on first launch — no models ship in the package).
 set -euo pipefail
 
-REPO="quickstt/quickstt"
-VERSION="latest"  # or v2.0.0-alpha.1
-CHANNEL="deb"     # deb|appimage
-CHECK_ONLY=0
-UNINSTALL=0
+REPO="${REPO:-xyzyt010/quickstt}"
+VERSION="${VERSION:-latest}"
 
-for a in "$@"; do
-  case "$a" in
-    --appimage) CHANNEL="appimage" ;;
-    --deb) CHANNEL="deb" ;;
-    --version=*) VERSION="${a#--version=}" ;;
-    --check) CHECK_ONLY=1 ;;
-    --uninstall) UNINSTALL=1 ;;
-    --help|-h) cat <<EOF
-QuickSTT installer for Linux Mint / Ubuntu / Debian amd64
-Usage: $0 [--deb|--appimage] [--version=vX.Y.Z] [--check] [--uninstall]
-Examples:
-  $0 --deb
-  $0 --appimage
-  $0 --version=v2.0.0-alpha.1 --deb
-  curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash
-  curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash -s -- --appimage
+log() { printf '\033[1;34m[quickstt]\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31m[quickstt:ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# 1. Preconditions -----------------------------------------------------------
+[ "$(uname -m)" = "x86_64" ] || die "only amd64 is supported (got $(uname -m))"
+command -v apt-get >/dev/null || die "apt-based distro required (Debian/Ubuntu/Mint)"
+command -v curl >/dev/null || command -v wget >/dev/null || die "need curl or wget"
+
+# 2. Resolve version + asset -----------------------------------------------
+if [ "$VERSION" = "latest" ]; then
+    if command -v curl >/dev/null; then
+        API_JSON="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")"
+    else
+        API_JSON="$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest")"
+    fi
+    VERSION="$(printf '%s' "$API_JSON" | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+    [ -n "$VERSION" ] || die "could not resolve latest release"
+fi
+log "installing QuickSTT ${VERSION}"
+
+# cargo-deb names it quickstt_<ver-with-dots>-1_amd64.deb, e.g.
+# v2.0.0-alpha.13 -> quickstt_2.0.0.alpha.13-1_amd64.deb
+DEB_NAME="quickstt_$(printf '%s' "${VERSION#v}" | sed 's/-/./')-1_amd64.deb"
+URL="https://github.com/${REPO}/releases/download/${VERSION}/${DEB_NAME}"
+TMP_DEB="$(mktemp /tmp/quickstt-XXXXXX.deb)"
+trap 'rm -f "$TMP_DEB"' EXIT
+
+log "downloading ${DEB_NAME}"
+if command -v curl >/dev/null; then
+    curl -fL --progress-bar -o "$TMP_DEB" "$URL" || die "download failed: $URL"
+else
+    wget -O "$TMP_DEB" "$URL" || die "download failed: $URL"
+fi
+
+# 3. Checksum (best effort — skipped if the release has no SHA256SUMS) ------
+SUM_URL="https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS"
+if command -v sha256sum >/dev/null; then
+    if command -v curl >/dev/null; then
+        curl -fsSL -o /tmp/quickstt.SHA256SUMS "$SUM_URL" 2>/dev/null || true
+    else
+        wget -qO /tmp/quickstt.SHA256SUMS "$SUM_URL" 2>/dev/null || true
+    fi
+    if [ -f /tmp/quickstt.SHA256SUMS ] && grep -q "$DEB_NAME" /tmp/quickstt.SHA256SUMS 2>/dev/null; then
+        (cd /tmp && sha256sum -c --status <(grep "$DEB_NAME" /tmp/quickstt.SHA256SUMS)) \
+            && log "checksum OK" || die "checksum FAILED for ${DEB_NAME}"
+    else
+        log "no checksum published for this release — continuing"
+    fi
+fi
+
+# 4. System prerequisites (tray, audio, hotkeys, typing) ---------------------
+log "installing system prerequisites (sudo required)"
+sudo apt-get update
+# libayatana-appindicator3 covers XFCE4/MATE/GNOME trays; xdotool = X11 typing,
+# wtype + wl-clipboard = Wayland typing; portaudio/pulse = mic capture.
+sudo apt-get install -y \
+    libgtk-3-0 'libayatana-appindicator3-1|libappindicator3-1' \
+    librsvg2-2 libasound2 libpulse0 libportaudio2 \
+    libx11-6 libxi6 libxtst6 libglib2.0-0 \
+    xdotool wtype wl-clipboard
+
+# 5. Install the package ------------------------------------------------------
+log "installing ${DEB_NAME} (sudo required)"
+sudo apt install -y "$TMP_DEB"
+
+# 6. Verify (no GUI launch — `quickstt` with no daemon args starts the pill,
+# so verification is file/package based only) -------------------------------
+dpkg -s quickstt >/dev/null 2>&1 && log "package registered with dpkg" \
+    || die "dpkg does not know package 'quickstt'"
+test -x /usr/bin/quickstt || die "/usr/bin/quickstt missing or not executable"
+log "binary present: /usr/bin/quickstt"
+test -f /usr/share/applications/quickstt.desktop && log "desktop entry present"
+test -f /usr/lib/quickstt/wakeword_models/hey_jarvis_v0.1.onnx \
+&& test -f /usr/lib/quickstt/wakeword_models/alexa_v0.1.onnx \
+    && log "wakeword models present" \
+    || die "wakeword heads missing under /usr/lib/quickstt — reinstall or report this"
+
+# 7. Next steps ----------------------------------------------------------------
+cat <<EOF
+
+QuickSTT is installed. First launch:
+  quickstt &
+
+On first launch the setup screen offers STT + wakeword models to download —
+nothing is bundled, you pick what you need (small Vosk for instant use,
+larger ones for accuracy). Then:
+  - Pill appears bottom-center (works on X11, Wayland, XFCE4, multi-monitor).
+  - Ctrl+Shift+Space toggles dictation, hold Ctrl+Space for push-to-talk.
+  - Wayland typing uses wtype; X11 uses xdotool (both installed above).
 EOF
-    exit 0 ;;
-  esac
-done
-
-if [[ "$UNINSTALL" == "1" ]]; then
-  echo "[quickstt] Uninstalling..."
-  if dpkg -l | grep -q quickstt; then sudo apt remove -y quickstt; echo "[quickstt] .deb removed"; fi
-  rm -f "$HOME/.local/bin/QuickSTT.AppImage" 2>/dev/null || true
-  rm -f "$HOME/.local/share/applications/quickstt.desktop" 2>/dev/null || true
-  echo "[quickstt] Done. Config/models kept at ~/.config/QuickSTT and ~/.local/share/QuickSTT"
-  exit 0
-fi
-
-# Detect distro
-detect_distro() {
-  if [[ -f /etc/os-release ]]; then . /etc/os-release; echo "$ID $VERSION_ID ($PRETTY_NAME) arch=$(uname -m)"; else echo "unknown $(uname -m)"; fi
-}
-ARCH="$(uname -m)"
-if [[ "$ARCH" != "x86_64" ]]; then
-  echo "[quickstt] ERROR: You are on $ARCH. This installer ships amd64 (x86_64) binaries only." >&2
-  echo "[quickstt] For ARM64, build from source:" >&2
-  echo "  git clone https://github.com/$REPO.git && cd $(basename "$REPO")" >&2
-  echo "  ./quickstt-rust/scripts/build-linux.sh && ./quickstt-rust/target/release/QuickSTT" >&2
-  exit 1
-fi
-echo "[quickstt] Detected: $(detect_distro)"
-if ! grep -qiE "mint|ubuntu|debian" /etc/os-release 2>/dev/null; then
-  echo "[quickstt] Warning: Not Mint/Ubuntu/Debian — trying anyway. Requires apt + gtk3 + appindicator."
-fi
-
-need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "[quickstt] Missing: $1 — installing"; sudo apt update && sudo apt install -y "$1"; }; }
-
-# Resolve latest version if requested
-if [[ "$VERSION" == "latest" ]]; then
-  if command -v curl >/dev/null 2>&1; then
-    RESOLVED=$(curl -fsSL -o /dev/null -w "%{url_effective}" "https://github.com/$REPO/releases/latest" 2>/dev/null | sed 's#.*/tag/##' || echo "latest")
-    if [[ -n "$RESOLVED" && "$RESOLVED" != "latest" ]]; then VERSION="$RESOLVED"; echo "[quickstt] Latest is $VERSION"; fi
-  fi
-fi
-
-if [[ "$CHECK_ONLY" == "1" ]]; then
-  echo "[quickstt] Check only — would install $CHANNEL $VERSION for $ARCH from $REPO"
-  exit 0
-fi
-
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
-
-install_deb() {
-  local ver="$1"
-  local url
-  if [[ "$ver" == "latest" ]]; then
-    url="https://github.com/$REPO/releases/latest/download/quickstt_2.0.0-alpha.1_amd64.deb"
-  else
-    # try versioned name, fallback to latest pattern
-    url="https://github.com/$REPO/releases/download/$ver/quickstt_${ver#v}_amd64.deb"
-  fi
-  echo "[quickstt] Downloading .deb..."
-  echo "  $url -> $TMPDIR/quickstt.deb"
-  if command -v wget >/dev/null 2>&1; then wget -O "$TMPDIR/quickstt.deb" "$url"
-  elif command -v curl >/dev/null 2>&1; then curl -fL -o "$TMPDIR/quickstt.deb" "$url"
-  else echo "[quickstt] Need wget or curl"; exit 1; fi
-  echo "[quickstt] Installing (may ask for sudo)..."
-  sudo apt update
-  # Mint/Ubuntu use libayatana-appindicator3-1 on newer releases; our deb Depends covers both
-  sudo apt install -y "$TMPDIR/quickstt.deb" || { echo "[quickstt] apt install failed — trying dpkg + fix"; sudo dpkg -i "$TMPDIR/quickstt.deb" || true; sudo apt --fix-broken install -y; }
-  echo "[quickstt] Installed. Binary: /usr/bin/quickstt  Desktop: /usr/share/applications/quickstt.desktop"
-  echo "[quickstt] Run: quickstt &"
-  # Quick verify
-  dpkg -l | grep quickstt || true
-  file /usr/bin/quickstt 2>/dev/null | head -1 || true
-}
-
-install_appimage() {
-  local ver="$1"
-  local url
-  if [[ "$ver" == "latest" ]]; then
-    url="https://github.com/$REPO/releases/latest/download/QuickSTT-2.0.0-alpha.1-x86_64.AppImage"
-  else
-    url="https://github.com/$REPO/releases/download/$ver/QuickSTT-${ver#v}-x86_64.AppImage"
-  fi
-  echo "[quickstt] Downloading AppImage..."
-  echo "  $url -> $TMPDIR/QuickSTT.AppImage"
-  if command -v wget >/dev/null 2>&1; then wget -O "$TMPDIR/QuickSTT.AppImage" "$url"
-  else curl -fL -o "$TMPDIR/QuickSTT.AppImage" "$url"; fi
-  chmod +x "$TMPDIR/QuickSTT.AppImage"
-  mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.local/share/icons"
-  cp -f "$TMPDIR/QuickSTT.AppImage" "$HOME/.local/bin/QuickSTT.AppImage"
-  # Desktop integration (minimal)
-  cat > "$HOME/.local/share/applications/quickstt.desktop" <<DESK
-[Desktop Entry]
-Type=Application
-Name=QuickSTT
-GenericName=Voice Typing
-Comment=Floating voice typing widget — X11 & Wayland
-Exec=$HOME/.local/bin/QuickSTT.AppImage
-Icon=audio-input-microphone
-Terminal=false
-Categories=Utility;AudioVideo;Accessibility;
-DESK
-  echo "[quickstt] AppImage at $HOME/.local/bin/QuickSTT.AppImage"
-  echo "[quickstt] Run: $HOME/.local/bin/QuickSTT.AppImage &"
-  echo "[quickstt] (Add to Mint menu: Menu → run AppImage once, or add to Startup Applications)"
-}
-
-case "$CHANNEL" in
-  deb) install_deb "$VERSION" ;;
-  appimage) install_appimage "$VERSION" ;;
-esac
-
-echo ""
-echo "[quickstt] Done. After launch, right-click tray → Models to install Vosk/Parakeet/Nemotron."
-echo "[quickstt] Config: ~/.config/QuickSTT/config.toml   Models: ~/.local/share/QuickSTT/models/"
-echo "[quickstt] Logs: RUST_LOG=info quickstt  (or RUST_LOG=info ~/.local/bin/QuickSTT.AppImage)"
-echo "[quickstt] Uninstall: $0 --uninstall  or  sudo apt remove quickstt"
+log "done"
