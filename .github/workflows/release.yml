@@ -64,6 +64,17 @@ jobs:
           mkdir -p quickstt-rust/target/release/tools/photon
           cp -f quickstt-rust/tools/photon/photon_worker.py quickstt-rust/target/release/tools/photon/
           ls -lh quickstt-rust/target/release/tools/photon/
+      - name: Build whisper.cpp (Whisper GGML engine)
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/wcpp
+          cmake -S /tmp/wcpp -B /tmp/wcpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF
+          cmake --build /tmp/wcpp/build -j"$(nproc)" --target whisper-cli || cmake --build /tmp/wcpp/build -j"$(nproc)"
+          mkdir -p quickstt-rust/target/release/tools/whisper_cpp
+          BIN_W="$(find /tmp/wcpp/build -maxdepth 3 -type f -name whisper-cli | head -1)"
+          if [ -z "$BIN_W" ]; then BIN_W="$(find /tmp/wcpp/build -maxdepth 3 -type f -name main | head -1)"; fi
+          [ -n "$BIN_W" ] || { echo "whisper-cli binary not found"; find /tmp/wcpp/build -maxdepth 3 -type f | head -20; exit 1; }
+          cp -f "$BIN_W" quickstt-rust/target/release/tools/whisper_cpp/whisper-cli
+          file quickstt-rust/target/release/tools/whisper_cpp/whisper-cli
       - name: Build transcribe.cpp (Nemotron GGUF engine)
         run: |
           git clone --depth 1 https://github.com/handy-computer/transcribe.cpp /tmp/tcpp
@@ -109,6 +120,9 @@ jobs:
           # AppImage/tarball need it next to the binary).
           mkdir -p dist/AppDir/usr/bin/tools/photon
           cp -f target/release/tools/photon/photon_worker.py dist/AppDir/usr/bin/tools/photon/ 2>/dev/null || true
+          # Bundle whisper-cli the same way (the Whisper engine binary).
+          mkdir -p dist/AppDir/usr/bin/tools/whisper_cpp
+          cp -f target/release/tools/whisper_cpp/whisper-cli dist/AppDir/usr/bin/tools/whisper_cpp/ 2>/dev/null || true
           if ! ls dist/*.AppImage 1>/dev/null 2>&1; then
             echo "AppImage failed — building plain tarball payload"
             rm -rf dist/payload && mkdir -p dist/payload

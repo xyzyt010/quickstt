@@ -62,6 +62,7 @@ assets = [
   ["../target/release/tools/parakeet/parakeet_engine", "usr/lib/quickstt/tools/parakeet/parakeet_engine", "755"],
   ["../target/release/tools/nemotron/transcribe-cli", "usr/lib/quickstt/tools/nemotron/transcribe-cli", "755"],
   ["../tools/photon/photon_worker.py", "usr/lib/quickstt/tools/photon/photon_worker.py", "644"],
+  ["../target/release/tools/whisper_cpp/whisper-cli", "usr/lib/quickstt/tools/whisper_cpp/whisper-cli", "755"],
   ["../../wakeword_models/hey_jarvis_v0.1.onnx", "usr/lib/quickstt/wakeword_models/hey_jarvis_v0.1.onnx", "644"],
   ["../../wakeword_models/alexa_v0.1.onnx", "usr/lib/quickstt/wakeword_models/alexa_v0.1.onnx", "644"],
 ]

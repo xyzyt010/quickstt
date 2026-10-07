@@ -67,6 +67,8 @@ pub struct WakeWordEngine {
     active_phrases: Vec<String>,
     user_sensitivity: u32,
     chunks_since_infer: u32,
+    /// Consecutive dead-silence ticks (adaptive cadence below).
+    quiet_ticks: u32,
     /// Throttled diagnostics: épocas since last top-score log line.
     infers_since_log: u32,
     /// Last marginal-score log (rate-limits the below-threshold line).
@@ -122,6 +124,7 @@ impl WakeWordEngine {
             active_phrases,
             user_sensitivity: 50,
             chunks_since_infer: 0,
+            quiet_ticks: 0,
             infers_since_log: 0,
             last_marginal_log: None,
             infers_run: 0,
@@ -191,6 +194,23 @@ impl WakeWordEngine {
         // Buffer EVERY chunk into the mel frontend (the old code only pushed
         // on inference ticks, dropping 3/4 of the audio and stretching the
         // detection window 4× — the main "wakewords are slow" cause).
+        // Adaptive cadence: deep silence (below 2× the energy gate, VAD
+        // closed) advances the caches only every 4th tick. Silence carries
+        // no phrase content, and the onset chunk itself is always loud, so
+        // detection latency is untouched — but the ~32ms-per-tick embedding
+        // cost drops 4× through the quiet hours (measured 56% of an older
+        // Mint core at full rate). Stale hits can never accumulate: the
+        // gate below clears them on every skipped tick too.
+        let rms_early = chunk_rms(pcm_chunk);
+        if rms_early < MIN_WAKE_RMS * 2.0 && !vad_speech {
+            self.quiet_ticks += 1;
+            if self.quiet_ticks % 4 != 0 {
+                self.hit_counts.clear();
+                return vec![WakeWordEvent::None];
+            }
+        } else {
+            self.quiet_ticks = 0;
+        }
         self.backend.push_audio(pcm_chunk);
 
         // ~160ms inference cadence once the window is hot.
@@ -403,11 +423,12 @@ mod tests {
         }
         assert_eq!(eng.infer_count(), 0, "silence must be energy-gated");
         assert!(eng.backend.buffered_samples() > 0, "chunks must still buffer");
-        // Warm caches: silence fills mel rows through the always-on update()
-        // path (no head runs), so a phrase arriving after quiet scores from
-        // its first tick instead of spending the phrase building context.
+        // Warm caches: silence fills mel rows through the adaptive update()
+        // path (every 4th tick in dead silence, no head runs), so a phrase
+        // arriving after quiet still finds warm context instead of spending
+        // the phrase building it. 40 chunks → 10 updates → ~48 rows.
         assert!(
-            eng.backend.mel_rows() > 100,
+            eng.backend.mel_rows() > 40,
             "silence must still warm the mel cache (got {})",
             eng.backend.mel_rows()
         );
@@ -441,12 +462,14 @@ mod tests {
     fn wakeword_vad_gate_blocks_quiet_nonspeech() {
         let heads = oww_heads();
         let mut eng = WakeWordEngine::from_oww_heads(&heads).expect("engine loads");
-        // Quiet tone (raw RMS ≈ 0.0032, ≈0.0065 after the 2x input gain)
+        // Quiet tone (raw RMS ≈ 0.0022, ≈0.0065 after the 3x input gain)
         // with VAD closed: still under the VAD gate floor, so gated before
-        // the heads.
+        // the heads. (Peak 100 keeps the boosted level under the 0.008
+        // floor; the 150-peak variant from the 2x era now legitimately
+        // reaches inference at 3x gain yet still scores ~0.000.)
         let tone: Vec<i16> = (0..1280)
             .map(|i| {
-                ((2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin() * 150.0)
+                ((2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin() * 100.0)
                     as i16
             })
             .collect();

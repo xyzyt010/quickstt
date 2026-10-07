@@ -267,6 +267,11 @@ pub fn show_widget(window: &slint::Window) {
     // Force the first frame now: a shown-but-unpainted window can linger as
     // a white flash on a loaded machine before the backend gets to it.
     window.request_redraw();
+    // X11 has no HWND styling: strip WM chrome via EWMH/Motif hints instead
+    // (no title bar, no taskbar entry, always-on-top). Post-show, like the
+    // Windows path above — the X window only exists once shown.
+    #[cfg(not(target_os = "windows"))]
+    strip_chrome(window);
 }
 
 /// Show the docking overlay (same show-then-style ordering requirement).
@@ -286,6 +291,8 @@ pub fn show_overlay(window: &slint::Window) {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     window.request_redraw();
+    #[cfg(not(target_os = "windows"))]
+    strip_chrome(window);
 }
 /// Click-through fullscreen docking overlay: never activates, never takes
 /// focus, never intercepts mouse — it is purely visual (dark shade + outlines).
@@ -1070,6 +1077,27 @@ pub fn can_open_x_display() -> bool {
     }
 }
 
+/// Strip window-manager chrome on X11 (XFCE/xfwm4, Cinnamon-X11, XWayland):
+/// no title bar, no taskbar/pager entry, always-on-top, sticky. Without
+/// this the pill carries an OS caption, its reported position includes the
+/// frame offset, and every anchor computation (menu, flyout, dock) drifts —
+/// the "nothing like Windows" gap. No-op when no X window exists yet.
+#[cfg(not(target_os = "windows"))]
+pub fn strip_chrome(window: &slint::Window) {
+    let xid: u32 = {
+        let binding = window.window_handle();
+        let Ok(wh) = binding.window_handle() else {
+            return;
+        };
+        match wh.as_raw() {
+            RawWindowHandle::Xlib(h) => h.window as u32,
+            RawWindowHandle::Xcb(h) => h.window,
+            _ => return,
+        }
+    };
+    x11q::strip_chrome(xid);
+}
+
 /// Pure-Rust X11 queries backing the Linux widget math (cursor, screens,
 /// work area, DPI). Every query connects fresh and degrades to None when no
 /// X server is reachable (pure-Wayland session, headless CI) — callers fall
@@ -1183,11 +1211,50 @@ mod x11q {
         Some((x, y, x + w, y + h))
     }
 
-    /// Desktop UI scale from EDID physical size (DPI/96, snapped to 0.25,
-    /// clamped 1–3). Cached process-wide.
+    /// Desktop UI scale: Xft.dpi first (what winit honors on X11/XFCE —
+    /// the Mint box declares 111dpi → 1.156, while the EDID math sees only
+    /// the downscaled X screen and wrongly returns 1.0), EDID fallback.
     pub fn ui_scale() -> f32 {
         static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-        *SCALE.get_or_init(|| edid_scale().unwrap_or(1.0))
+        *SCALE.get_or_init(|| xft_scale().or_else(edid_scale).unwrap_or(1.0))
+    }
+
+    /// Xft.dpi from the RESOURCE_MANAGER root property (set by
+    /// xfce4-settings / cinnamon-settings-daemons from the UI scale).
+    fn xft_scale() -> Option<f32> {
+        let (conn, root) = connect()?;
+        let rm = conn
+            .intern_atom(false, b"RESOURCE_MANAGER")
+            .ok()?
+            .reply()
+            .ok()?
+            .atom;
+        let prop = conn
+            .get_property(
+                false,
+                root,
+                rm,
+                x11rb::protocol::xproto::AtomEnum::STRING,
+                0,
+                8192,
+            )
+            .ok()?
+            .reply()
+            .ok()?;
+        if prop.format != 8 {
+            return None;
+        }
+        let s = std::str::from_utf8(&prop.value).ok()?;
+        for line in s.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix("Xft.dpi:") {
+                if let Ok(dpi) = rest.trim().parse::<f32>() {
+                    if (48.0..=576.0).contains(&dpi) {
+                        return Some((dpi / 96.0).clamp(1.0, 3.0));
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn edid_scale() -> Option<f32> {
@@ -1219,5 +1286,64 @@ mod x11q {
             }
         }
         None
+    }
+
+    /// Frameless widget chrome via EWMH/Motif hints. Best-effort one-shot:
+    /// any failure returns silently (the window still works, just decorated).
+    pub fn strip_chrome(xid: u32) {
+        let (conn, _root) = match connect() {
+            Some(c) => c,
+            None => return,
+        };
+        use x11rb::protocol::xproto::{AtomEnum, PropMode};
+        let intern = |name: &[u8]| -> Option<u32> {
+            conn.intern_atom(false, name)
+                .ok()?
+                .reply()
+                .ok()
+                .map(|r| r.atom)
+        };
+        let motif = intern(b"_MOTIF_WM_HINTS");
+        let wt = intern(b"_NET_WM_WINDOW_TYPE");
+        let wt_dialog = intern(b"_NET_WM_WINDOW_TYPE_DIALOG");
+        let ws = intern(b"_NET_WM_STATE");
+        // _MOTIF_WM_HINTS = [flags, functions, decorations, input_mode,
+        // status]; flags=2 (DECORATIONS valid), decorations=0 (none).
+        if let Some(m) = motif {
+            let hints: [u32; 5] = [2, 0, 0, 0, 0];
+            let _ = conn
+                .change_property32(PropMode::REPLACE, xid, m, m, &hints)
+                .ok()
+                .map(|c| c.check().ok());
+        }
+        // DIALOG type: floats above normal windows in most WMs without the
+        // strut-reserving behaviour of DOCK (which would shift maximized
+        // windows aside for our 38x10 pill).
+        if let (Some(t), Some(d)) = (wt, wt_dialog) {
+            let _ = conn
+                .change_property32(PropMode::REPLACE, xid, t, AtomEnum::ATOM, &[d])
+                .ok()
+                .map(|c| c.check().ok());
+        }
+        // ABOVE + SKIP_TASKBAR + SKIP_PAGER + STICKY (all desktops).
+        if let Some(s) = ws {
+            let mut states = Vec::new();
+            for name in [
+                b"_NET_WM_STATE_ABOVE".as_slice(),
+                b"_NET_WM_STATE_SKIP_TASKBAR",
+                b"_NET_WM_STATE_SKIP_PAGER",
+                b"_NET_WM_STATE_STICKY",
+            ] {
+                if let Some(a) = intern(name) {
+                    states.push(a);
+                }
+            }
+            if !states.is_empty() {
+                let _ = conn
+                    .change_property32(PropMode::REPLACE, xid, s, AtomEnum::ATOM, &states)
+                    .ok()
+                    .map(|c| c.check().ok());
+            }
+        }
     }
 }
