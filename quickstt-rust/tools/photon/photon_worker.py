@@ -85,6 +85,32 @@ def main() -> int:
                 pass
             speech = None
             active_repo = None
+            # Return the pages to the OS: closing the context frees the
+            # Python objects, but CPython/torch arenas keep the RSS high
+            # (the "offload ran but Task Manager still shows GBs" effect).
+            # Best-effort on every platform; never fails the unload.
+            try:
+                import gc
+
+                gc.collect()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                import ctypes
+                import sys as _sys
+
+                if _sys.platform == "win32":
+                    try:
+                        ctypes.cdll.msvcrt._heapmin()  # noqa: SLF001
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    try:
+                        ctypes.CDLL("libc.so.6").malloc_trim(0)
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception:  # noqa: BLE001
+                pass
             log("model unloaded (weights released, process stays for fast reload)")
 
     log("ready, waiting for JSON-lines on stdin")

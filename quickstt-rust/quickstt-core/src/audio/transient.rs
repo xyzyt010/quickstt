@@ -46,14 +46,16 @@ pub fn chunk_peak(samples: &[i16]) -> f64 {
 
 /// One-chunk confirmation arbiter: a detected onset is HELD, not acted on.
 /// It only becomes actionable if the NEXT chunk is quiet (an isolated
-/// impulse: a clap). If the follow-up is still loud (≥40% of the onset
-/// peak — speech syllables, laughter, coughing fits, sustained noise), the
-/// onset is vetoed as non-isolated. Costs one chunk (~80ms) of latency and
-/// kills the largest remaining phantom class that no per-chunk gate can
-/// separate from a real clap.
+/// impulse: a clap) — quiet in BOTH level and shape:
+///   1. follow-up peak < 40% of the onset peak (sustained speech veto), AND
+///   2. follow-up burst width <= onset width (loud-syllable + pause veto:
+///      a voice onset at 8000+ followed by a 1300-level pause passes the
+///      level test but the pause still carries a wide energy body, while a
+///      real clap's tail has decayed below its burst width).
+/// Costs one chunk (~80ms) of latency.
 #[derive(Default)]
 pub struct TransientArbiter {
-    pending: Option<(TransientKind, f64)>,
+    pending: Option<(TransientKind, f64, usize)>,
 }
 
 impl TransientArbiter {
@@ -65,29 +67,34 @@ impl TransientArbiter {
         self.pending = None;
     }
 
-    /// Feed this chunk's detector result + peak. Returns the kind to ACT on
-    /// (confirmed from the previous chunk), if any.
+    /// Feed this chunk's detector result + peak + burst width. Returns the
+    /// kind to ACT on (confirmed from the previous chunk), if any.
     pub fn update(
         &mut self,
         detected: Option<TransientKind>,
         chunk_peak: f64,
+        chunk_width: usize,
     ) -> Option<TransientKind> {
         let mut fire = None;
-        if let Some((kind, onset_peak)) = self.pending.take() {
-            if chunk_peak < onset_peak * 0.4 {
+        if let Some((kind, onset_peak, onset_width)) = self.pending.take() {
+            let quiet_level = chunk_peak < onset_peak * 0.4;
+            let decayed_shape = chunk_width <= onset_width;
+            if quiet_level && decayed_shape {
                 fire = Some(kind);
             } else {
-                // Vetoed: the follow-up chunk is still loud, so the onset
-                // was sustained sound (speech/laughter), not an isolated clap.
+                // Vetoed: sustained sound or a loud onset whose tail still
+                // carries energy (speech pause) — not an isolated clap.
                 tracing::info!(
-                    "Clap onset vetoed (follow-up peak={:.0} vs onset={:.0})",
+                    "Clap onset vetoed (follow-up peak={:.0} vs onset={:.0}, width={} vs onset={})",
                     chunk_peak,
-                    onset_peak
+                    onset_peak,
+                    chunk_width,
+                    onset_width
                 );
             }
         }
         if let Some(kind) = detected {
-            self.pending = Some((kind, chunk_peak.max(1.0)));
+            self.pending = Some((kind, chunk_peak.max(1.0), chunk_width));
         }
         fire
     }
@@ -463,21 +470,42 @@ mod tests {
     #[test]
     fn arbiter_confirms_isolated_but_vetoes_sustained() {
         let mut a = TransientArbiter::new();
-        // Isolated: onset then quiet → fires (one chunk delayed).
-        assert_eq!(a.update(Some(TransientKind::Clap), 5000.0), None);
+        // Isolated: loud wide onset then quiet narrow tail → fires.
+        assert_eq!(a.update(Some(TransientKind::Clap), 5000.0, 300), None);
         assert_eq!(
-            a.update(None, 800.0),
+            a.update(None, 800.0, 60),
             Some(TransientKind::Clap),
             "isolated impulse must confirm"
         );
         // Sustained: onset then still loud → vetoed.
-        assert_eq!(a.update(Some(TransientKind::Clap), 5000.0), None);
+        assert_eq!(a.update(Some(TransientKind::Clap), 5000.0, 300), None);
         assert_eq!(
-            a.update(None, 4000.0),
+            a.update(None, 4000.0, 250),
             None,
             "sustained sound must veto the onset"
         );
         // After a veto the arbiter is empty, not stuck.
-        assert_eq!(a.update(None, 100.0), None);
+        assert_eq!(a.update(None, 100.0, 10), None);
+    }
+
+    #[test]
+    fn arbiter_vetoes_loud_onset_with_energetic_pause() {
+        let mut a = TransientArbiter::new();
+        // Voice-high phantom (from the live log): onset 8344/w192, pause
+        // 1305/w523 — passes the 40% level test (1305 < 3337) but the pause
+        // still carries a wider energy body than the snap: veto.
+        assert_eq!(a.update(Some(TransientKind::Clap), 8344.0, 192), None);
+        assert_eq!(
+            a.update(None, 1305.0, 523),
+            None,
+            "loud onset + energetic pause must not fire"
+        );
+        // Real clap: wide burst, decayed narrow tail → fires.
+        assert_eq!(a.update(Some(TransientKind::Clap), 6000.0, 400), None);
+        assert_eq!(
+            a.update(None, 900.0, 80),
+            Some(TransientKind::Clap),
+            "decayed tail must confirm"
+        );
     }
 }

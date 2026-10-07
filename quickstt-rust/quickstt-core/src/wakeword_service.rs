@@ -310,7 +310,7 @@ fn process_audio_chunk(
                 width
             );
         }
-        if let Some(kind) = arbiter.update(detected, chunk_peak(chunk)) {
+        if let Some(kind) = arbiter.update(detected, chunk_peak(chunk), transient.last_stats().6) {
             arbiter.reset();
             if *transient_action == TRANSIENT_START {
                 // NOTE: `last_stats()` here is the QUIET confirmation chunk

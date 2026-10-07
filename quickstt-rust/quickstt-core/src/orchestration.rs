@@ -155,6 +155,27 @@ pub struct AppOrchestrator {
     audio_tx: mpsc::Sender<Vec<i16>>,
 }
 
+/// Release every persistent STT worker EXCEPT `active_family` (catalog
+/// runtime string: "photon" | "parakeet-rust" | "nemotron" | "canary" | …).
+/// Empty string releases all (model switch: nothing is active yet). Each
+/// unload is a fast JSON round-trip that no-ops when its worker was never
+/// started, so calling all four unconditionally is cheap and cannot strand
+/// a worker after a family change.
+fn unload_all_workers_except(active_family: &str) {
+    if active_family != "parakeet-rust" {
+        crate::models::engine::parakeet_unload();
+    }
+    if active_family != "nemotron" {
+        crate::models::engine::nemotron_unload();
+    }
+    if active_family != "canary" {
+        crate::models::engine::canary_unload();
+    }
+    if active_family != "photon" {
+        crate::models::engine::photon_unload();
+    }
+}
+
 fn model_name_matches(configured: &str, catalog_name: &str) -> bool {    let configured = configured.trim();
     let catalog_name = catalog_name.trim();
     if configured.eq_ignore_ascii_case(catalog_name) {
@@ -521,7 +542,8 @@ fn process_audio_chunk(
             // impulse stops the session, sustained speech never does.
             let detected = ctrl.transient.process(chunk);
             let peak = crate::audio::transient::chunk_peak(chunk);
-            if let Some(kind) = ctrl.transient_arbiter.update(detected, peak) {
+            let width = ctrl.transient.last_stats().6;
+            if let Some(kind) = ctrl.transient_arbiter.update(detected, peak, width) {
                 ctrl.transient_arbiter.reset();
                 let live = state
                     .lock()
@@ -999,6 +1021,20 @@ impl AppOrchestrator {
                         }
                         s.status_message = format!("Selected: {}", name);
                         info!("Model selected: {} ({})", name, s.selected_language.clone());
+                        // Model switch strands the previous worker: the idle
+                        // timer only fires after a turn ends, so without this
+                        // the old model's GBs (e.g. Ultra's python worker)
+                        // stay resident forever when the user just switches.
+                        // Release everything async (the new model loads on
+                        // demand at the next turn) + re-arm the idle timer.
+                        s.model_offloaded = false;
+                        std::thread::Builder::new()
+                            .name("stt-model-switch-offload".to_string())
+                            .spawn(|| {
+                                unload_all_workers_except("");
+                                crate::models::engine::compact_working_set();
+                            })
+                            .ok();
                     }
                 }
                 OrchestratorCommand::SelectLanguage(lang) => {
@@ -1090,25 +1126,41 @@ impl AppOrchestrator {
                     }
                 }
                 OrchestratorCommand::OffloadModel => {
-                    // Fast return: the persistent workers (Parakeet/Nemotron) free
-                    // their models on a background thread so the command loop never
-                    // blocks on the JSON round-trip. One-shot CLIs (whisper/sherpa/
-                    // vosk) hold no persistent state — compact only. Same semantics
-                    // as before (model dropped, next turn reloads), just async so
-                    // offload feels as instant as the one-shot engines.
+                    // Fast return: the persistent workers (Parakeet/Nemotron/
+                    // Canary/Photon) free their models on a background thread
+                    // so the command loop never blocks on the JSON round-trip.
+                    // One-shot CLIs (whisper/sherpa/vosk) hold no persistent
+                    // state — compact only. Same semantics as before (model
+                    // dropped, next turn reloads), just async so offload feels
+                    // as instant as the one-shot engines.
+                    // Skip the ACTIVE model's worker: freeing it would only
+                    // force a slow reload on the very next turn (Ultra's load
+                    // is minutes). Idle workers for the other models are what
+                    // actually leak GBs after a model switch.
+                    let active_family = {
+                        state
+                            .lock()
+                            .ok()
+                            .and_then(|s| {
+                                s.model_entries.get(s.selected_model).map(|e| {
+                                    e.engine_family.clone()
+                                })
+                            })
+                            .unwrap_or_default()
+                    };
                     {
                         let mut s = state.lock().unwrap();
                         s.model_offloaded = true;
                         s.status_message = "Model offloaded (RAM released)".into();
-                        info!("Model offloaded (async worker release, incl. Photon)");
+                        info!(
+                            "Model offloaded (async worker release, incl. Photon; active family kept: '{}')",
+                            active_family
+                        );
                     }
                     std::thread::Builder::new()
                         .name("stt-offload".to_string())
-                        .spawn(|| {
-                            crate::models::engine::parakeet_unload();
-                            crate::models::engine::nemotron_unload();
-                            crate::models::engine::canary_unload();
-                            crate::models::engine::photon_unload();
+                        .spawn(move || {
+                            unload_all_workers_except(&active_family);
                             crate::models::engine::compact_working_set();
                         })
                         .ok();
