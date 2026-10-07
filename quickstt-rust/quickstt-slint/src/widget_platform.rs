@@ -1091,7 +1091,7 @@ pub fn strip_chrome(window: &slint::Window) {
         };
         match wh.as_raw() {
             RawWindowHandle::Xlib(h) => h.window as u32,
-            RawWindowHandle::Xcb(h) => h.window,
+            RawWindowHandle::Xcb(h) => h.window.into(),
             _ => return,
         }
     };
@@ -1108,6 +1108,9 @@ mod x11q {
     use x11rb::protocol::randr::ConnectionExt as _;
     use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
     use x11rb::rust_connection::RustConnection;
+    // change_property32 et al live on the wrapper trait, not the protocol
+    // traits above.
+    use x11rb::wrapper::ConnectionExt as _;
 
     fn connect() -> Option<(RustConnection, u32)> {
         let (conn, screen) = RustConnection::connect(None).ok()?;
