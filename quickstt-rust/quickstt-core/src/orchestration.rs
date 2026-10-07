@@ -388,6 +388,10 @@ fn wav_is_silent(path: &std::path::Path) -> bool {
     // Silence gate: never send near-silence to the engine. Parakeet (like
     // most ASR) hallucinates "yeah"/"yes" on noise-only clips, which is
     // exactly the reported "say nothing -> prints yeah".
+    // Trigger-blind: the first ~500ms holds the trigger onset (a clap
+    // peaks 5000+ and would whitewash any whole-file measurement), so
+    // peak/RMS are measured on the TAIL only. A clap-then-silence turn
+    // scores silent; genuine speech continues past the onset and passes.
     let reader = match hound::WavReader::open(path) {
         Ok(r) => r,
         Err(_) => return false,
@@ -396,10 +400,14 @@ fn wav_is_silent(path: &std::path::Path) -> bool {
     if spec.sample_rate == 0 {
         return false;
     }
+    let skip = (spec.sample_rate as u64) / 2;
     let mut peak: i32 = 0;
     let mut sum_sq: f64 = 0.0;
     let mut n: u64 = 0;
-    for s in reader.into_samples::<i16>() {
+    for (i, s) in reader.into_samples::<i16>().enumerate() {
+        if (i as u64) < skip {
+            continue;
+        }
         let v = match s {
             Ok(v) => v as i32,
             Err(_) => continue,
@@ -428,6 +436,40 @@ fn wav_is_silent(path: &std::path::Path) -> bool {
         return true;
     }
     false
+}
+
+/// Single-word ASR hallucinations ("you", "yeah", ...) that every engine
+/// emits for silence/noise. The UI keeps its own copy for display gating;
+/// this one guards accumulation so a ghost never even enters the buffer.
+#[cfg(feature = "audio-capture")]
+fn is_ghost_singleton(text: &str) -> bool {
+    matches!(
+        text.trim().to_lowercase().as_str(),
+        "yeah" | "yeah." | "yes" | "yes." | "you" | "you." | "uh" | "uh." | "um"
+            | "um." | "hmm" | "hmm." | "oh" | "oh." | "hey" | "hey."
+            | "thank you" | "thank you." | "thanks" | "thanks." | "..." | "." | ""
+    )
+}
+
+/// Peak of the utterance TAIL (trigger onset skipped, same 500ms as
+/// wav_is_silent). MAX i16 on read error.
+#[cfg(feature = "audio-capture")]
+fn wav_tail_peak(path: &std::path::Path) -> i32 {
+    let reader = match hound::WavReader::open(path) {
+        Ok(r) => r,
+        Err(_) => return i32::MAX,
+    };
+    let skip = (reader.spec().sample_rate as u64) / 2;
+    let mut peak: i32 = 0;
+    for (i, s) in reader.into_samples::<i16>().enumerate() {
+        if (i as u64) < skip {
+            continue;
+        }
+        if let Ok(v) = s {
+            peak = peak.max(v.abs() as i32);
+        }
+    }
+    peak
 }
 
 #[cfg(feature = "audio-capture")]
@@ -658,6 +700,27 @@ fn process_audio_chunk(
                             t0.elapsed().as_millis(),
                             text.len()
                         );
+                        // Ghost post-filter: a clap-triggered turn records
+                        // the clap itself, so the pre-engine silence gate
+                        // passes and whisper returns "you" for the silence
+                        // after it. Drop ghost singletons whose TAIL (past
+                        // the trigger onset) is near-silent — deliberate
+                        // single words carry real tail energy and pass.
+                        #[cfg(feature = "audio-capture")]
+                        let text = if is_ghost_singleton(&text)
+                            && wav_tail_peak(&wav_clone) < 400
+                        {
+                            info!(
+                                "ghost singleton {:?} dropped (silent tail): {:?}",
+                                text.trim(),
+                                wav_clone
+                            );
+                            String::new()
+                        } else {
+                            text
+                        };
+                        #[cfg(not(feature = "audio-capture"))]
+                        let text = text;
                         let _ = tx_clone.try_send(OrchestratorCommand::TextRecognized(text));
                     }
                     Err(e) => {
@@ -1215,6 +1278,78 @@ impl AppOrchestrator {
                     // Handled by the audio control thread, not here.
                 }
             }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "audio-capture"))]
+mod ghost_tests {
+    use super::*;
+
+    fn write_wav(path: &std::path::Path, samples: &[i16]) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).expect("wav writable");
+        for &s in samples {
+            w.write_sample(s).expect("sample writable");
+        }
+        w.finalize().expect("wav finalizable");
+    }
+
+    fn wav_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "quickstt-ghosttest-{}-{}.wav",
+            tag,
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn clap_then_silence_is_silent() {
+        // Trigger-blindness: a loud 300ms onset (the clap) followed by 2s
+        // of room silence must score SILENT — the old whole-file peak
+        // measurement passed this straight to the engine ("you").
+        let mut pcm = vec![0i16; 16000 * 2 + 4800];
+        for (i, s) in pcm.iter_mut().enumerate().take(4800) {
+            *s = if i % 2 == 0 { 6000 } else { -6000 };
+        }
+        let p = wav_path("clap-silence");
+        write_wav(&p, &pcm);
+        assert!(wav_is_silent(&p), "clap-then-silence must be silent");
+        // ...and its tail peak is room-level.
+        assert!(wav_tail_peak(&p) < 400, "tail must be quiet");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn speech_after_onset_is_not_silent() {
+        // Same onset, then conversational-level speech: must NOT be gated.
+        let mut pcm = vec![0i16; 16000 * 2 + 4800];
+        for (i, s) in pcm.iter_mut().enumerate().take(4800) {
+            *s = if i % 2 == 0 { 6000 } else { -6000 };
+        }
+        for (i, s) in pcm.iter_mut().enumerate().skip(8000).take(16000) {
+            let ph = (i as f32 * 220.0 * 2.0 * std::f32::consts::PI / 16000.0).sin();
+            *s = (ph * 3000.0) as i16;
+        }
+        let p = wav_path("clap-speech");
+        write_wav(&p, &pcm);
+        assert!(!wav_is_silent(&p), "speech tail must pass the gate");
+        assert!(wav_tail_peak(&p) >= 400, "speech tail peak must be real");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn ghost_singletons_recognized() {
+        for g in ["you", "You.", "  yeah  ", "THANK YOU", "...", ""] {
+            assert!(is_ghost_singleton(g), "{g:?} must be a ghost");
+        }
+        for real in ["you are here", "hello world", "yes please go", "ok"] {
+            assert!(!is_ghost_singleton(real), "{real:?} must NOT be a ghost");
         }
     }
 }

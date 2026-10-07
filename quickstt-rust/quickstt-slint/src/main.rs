@@ -3328,6 +3328,12 @@ fn dock_hop(
     let mut logged_msg = String::new();
     let mut sess_start_len = 0usize;
     let mut sess_peak = 0u32;
+    // Peak EXCLUDING the first 800ms (trigger onset): the clap that starts
+    // a session peaks near 100 and whitewashes sess_peak, so the ghost gate
+    // below would pass every hallucination. A deliberately spoken word
+    // sustains level past 800ms; a trigger transient never does.
+    let mut speech_peak = 0u32;
+    let mut sess_start_t = std::time::Instant::now();
     let mut last_buf_len = 0usize;
     // Bulk end-delivery (C++-style): start offset of the current turn.
     let mut turn_base_len = 0usize;
@@ -4361,6 +4367,8 @@ fn dock_hop(
                 if live_session && !was_live {
                     sess_start_len = s.transcript_buffer.len();
                     sess_peak = 0;
+                    speech_peak = 0;
+                    sess_start_t = now;
                     // A new session re-arms the TextBoard auto-show (a user
                     // close keeps it down only for the finished session) and
                     // leaves history mode (fresh turns show current only).
@@ -4370,6 +4378,11 @@ fn dock_hop(
                 }
                 if live_session {
                     sess_peak = sess_peak.max(s.audio_level as u32);
+                    if now.duration_since(sess_start_t)
+                        > std::time::Duration::from_millis(800)
+                    {
+                        speech_peak = speech_peak.max(s.audio_level as u32);
+                    }
                 }
                 was_live = live_session;
                 // Done pulse: the engine just finished a turn (any landing
@@ -4457,7 +4470,7 @@ fn dock_hop(
                         let trimmed = delta.trim();
                         if !trimmed.is_empty() {
                             let low = trimmed.to_lowercase();
-                            if should_drop_hallucination(low.as_str(), sess_peak) {
+                            if should_drop_hallucination(low.as_str(), speech_peak) {
                                 log_line(&format!(
                                     "streaming hallucination dropped {delta:?} peak={sess_peak}"
                                 ));
@@ -4478,7 +4491,7 @@ fn dock_hop(
                         let full = s.transcript_buffer[turn_base_len..].trim().to_owned();
                         if !full.is_empty() {
                             let low = full.to_lowercase();
-                            if should_drop_hallucination(low.as_str(), sess_peak) {
+                            if should_drop_hallucination(low.as_str(), speech_peak) {
                                 log_line(&format!(
                                     "hallucination dropped {full:?} peak={sess_peak}"
                                 ));
