@@ -53,11 +53,16 @@ if command -v sha256sum >/dev/null; then
     else
         wget -qO /tmp/quickstt.SHA256SUMS "$SUM_URL" 2>/dev/null || true
     fi
-    if [ -f /tmp/quickstt.SHA256SUMS ] && grep -q "$DEB_NAME" /tmp/quickstt.SHA256SUMS 2>/dev/null; then
-        (cd /tmp && sha256sum -c --status <(grep "$DEB_NAME" /tmp/quickstt.SHA256SUMS)) \
-            && log "checksum OK" || die "checksum FAILED for ${DEB_NAME}"
+    EXPECTED="$(grep -F "  ${DEB_NAME}" /tmp/quickstt.SHA256SUMS 2>/dev/null | awk '{print $1}')"
+    if [ -n "$EXPECTED" ]; then
+        ACTUAL="$(sha256sum "$TMP_DEB" | awk '{print $1}')"
+        if [ "$ACTUAL" = "$EXPECTED" ]; then
+            log "checksum OK"
+        else
+            die "checksum FAILED for ${DEB_NAME}"
+        fi
     else
-        log "no checksum published for this release — continuing"
+        log "no checksum published for ${DEB_NAME} — continuing"
     fi
 fi
 
