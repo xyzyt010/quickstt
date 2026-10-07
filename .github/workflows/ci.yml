@@ -41,9 +41,9 @@ jobs:
         run: cargo build --release
       - name: Verify binary
         run: |
-          file quickstt-rust/target/release/QuickSTT
-          ldd quickstt-rust/target/release/QuickSTT | head -20
-          ls -lh quickstt-rust/target/release/QuickSTT
+          file quickstt-rust/target/release/quickstt-slint
+          ldd quickstt-rust/target/release/quickstt-slint | head -20
+          ls -lh quickstt-rust/target/release/quickstt-slint
 
   rust-check-windows:
     name: Rust check (Windows)

@@ -347,8 +347,11 @@ void MicroPillOverlay::deliverTextDelta(const QString &delta) {
     // Wayland wl-copy fallback (xclip not always present on wlroots)
     if (QProcess::execute(QStringLiteral("which"), QStringList{QStringLiteral("wl-copy")}) == 0) {
       QProcess *p = new QProcess();
+      // delta is const: copy before the non-const QString::replace.
+      QString escaped = delta;
+      escaped.replace(QStringLiteral("\""), QStringLiteral("\\\""));
       p->setProgram(QStringLiteral("sh"));
-      p->setArguments(QStringList{QStringLiteral("-c"), QStringLiteral("echo -n \"") + delta.replace(QStringLiteral("\""), QStringLiteral("\\\"")) + QStringLiteral("\" | wl-copy 2>/dev/null")});
+      p->setArguments(QStringList{QStringLiteral("-c"), QStringLiteral("echo -n \"") + escaped + QStringLiteral("\" | wl-copy 2>/dev/null")});
       QObject::connect(p, static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), p, [p](int, QProcess::ExitStatus){ p->deleteLater(); });
       p->start();
     }
