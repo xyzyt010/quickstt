@@ -26,7 +26,7 @@ if [ "$VERSION" = "latest" ]; then
     else
         API_JSON="$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest")"
     fi
-    VERSION="$(printf '%s' "$API_JSON" | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+    VERSION="$(printf '%s' "$API_JSON" | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)"
     [ -n "$VERSION" ] || die "could not resolve latest release"
 fi
 log "installing QuickSTT ${VERSION}"
@@ -53,7 +53,9 @@ if command -v sha256sum >/dev/null; then
     else
         wget -qO /tmp/quickstt.SHA256SUMS "$SUM_URL" 2>/dev/null || true
     fi
-    EXPECTED="$(grep -F "  ${DEB_NAME}" /tmp/quickstt.SHA256SUMS 2>/dev/null | awk '{print $1}')"
+    # NOTE: `|| true` is load-bearing: with `set -euo pipefail` a grep
+    # with no match exits 1 and would kill the script with no message.
+    EXPECTED="$(grep -F "  ${DEB_NAME}" /tmp/quickstt.SHA256SUMS 2>/dev/null | awk '{print $1}' || true)"
     if [ -n "$EXPECTED" ]; then
         ACTUAL="$(sha256sum "$TMP_DEB" | awk '{print $1}')"
         if [ "$ACTUAL" = "$EXPECTED" ]; then
