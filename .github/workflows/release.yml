@@ -67,7 +67,9 @@ jobs:
       - name: Build whisper.cpp (Whisper GGML engine)
         run: |
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/wcpp
-          cmake -S /tmp/wcpp -B /tmp/wcpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF
+          # Static link: the deb ships one self-contained binary, no .so to
+          # hunt (a shared build dies with "libwhisper.so.1 not found").
+          cmake -S /tmp/wcpp -B /tmp/wcpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF
           cmake --build /tmp/wcpp/build -j"$(nproc)" --target whisper-cli || cmake --build /tmp/wcpp/build -j"$(nproc)"
           mkdir -p quickstt-rust/target/release/tools/whisper_cpp
           BIN_W="$(find /tmp/wcpp/build -maxdepth 3 -type f -name whisper-cli | head -1)"
