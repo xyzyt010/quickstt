@@ -24,6 +24,11 @@ image = { version = "0.25.10", default-features = false, features = ["png", "ico
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_Registry", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_LibraryLoader", "Win32_System_IO", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Threading"] }
 
+# Linux/X11 queries (cursor, screens, work area, DPI): pure-Rust X11 client,
+# no extra system libraries beyond the X server itself.
+[target.'cfg(unix)'.dependencies]
+x11rb = "0.13"
+
 [build-dependencies]
 slint-build = "1.9"
 winresource = "0.1"

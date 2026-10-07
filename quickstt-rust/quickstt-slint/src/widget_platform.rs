@@ -788,9 +788,12 @@ pub fn cursor_position() -> (i32, i32) {
         }
         (0, 0)
     }
+    // Linux/X11 (and XWayland on Wayland sessions): the hover-expand math
+    // polls this every 50ms — a stuck (0,0) means the pill can never
+    // expand. Pure-Rust XQueryPointer, graceful (0,0) when no X is up.
     #[cfg(not(target_os = "windows"))]
     {
-        (0, 0)
+        x11q::cursor_pos().unwrap_or((0, 0))
     }
 }
 
@@ -801,7 +804,14 @@ pub fn window_scale(window: &slint::Window) -> f32 {
         return dpi_scale(raw);
     }
     #[cfg(not(target_os = "windows"))]
-    let _ = window;
+    {
+        // Slint 1.9 exposes no per-screen scale; the X server's EDID-based
+        // DPI (via XRandR) matches the desktop's scale on XFCE4/Cinnamon and
+        // under XWayland. Cached process-wide (monitors rarely change).
+        let _ = window;
+        x11q::ui_scale()
+    }
+    #[cfg(target_os = "windows")]
     1.0
 }
 /// Screen size in physical pixels (primary monitor).
@@ -814,9 +824,11 @@ pub fn screen_size() -> (i32, i32) {
             GetSystemMetrics(SM_CYSCREEN),
         )
     }
+    // Linux: XRandR union over all CRTCs (multi-display), root geometry
+    // fallback, hardcoded last resort (never reached when X is up).
     #[cfg(not(target_os = "windows"))]
     {
-        (1920, 1080)
+        x11q::screen_size().unwrap_or((1920, 1080))
     }
 }
 
@@ -853,7 +865,13 @@ pub fn work_area() -> (i32, i32, i32, i32) {
 
 #[cfg(not(target_os = "windows"))]
 pub fn work_area() -> (i32, i32, i32, i32) {
+    // Panel-aware via _NET_WORKAREA (set by XFCE4, Cinnamon, MATE panels and
+    // visible under XWayland too): the bottom dock sits above the panel
+    // instead of hiding behind it. Falls back to the full screen.
     let (sw, sh) = screen_size();
+    if let Some(wa) = x11q::work_area() {
+        return wa;
+    }
     (0, 0, sw, sh)
 }
 
@@ -1025,11 +1043,181 @@ pub fn measure_text(window: &slint::Window, text: &str, logical_px: f32, semibol
     {
         let _ = window;
         let _ = semibold;
-        estimate(text, logical_px)
+        // No GDI equivalent without a font stack: Slint falls back to
+        // fontconfig sans (DejaVu Sans on Mint — wider than Segoe UI), so
+        // the Windows 0.55 average would under-measure and the pill would
+        // jump widths on expand. 0.60 matches DejaVu Sans Latin average.
+        estimate(text, logical_px) * 1.09
     }
 }
 
 #[allow(dead_code)]
 fn estimate(text: &str, logical_px: f32) -> f32 {
     text.chars().count() as f32 * logical_px * 0.55
+}
+
+/// True when an X display can be opened (Linux hotkey-thread guard: the
+/// global-hotkey backend segfaults in XDefaultRootWindow on a null display,
+/// so the app skips hotkey registration entirely instead of crashing).
+pub fn can_open_x_display() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        true
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        x11q::can_connect()
+    }
+}
+
+/// Pure-Rust X11 queries backing the Linux widget math (cursor, screens,
+/// work area, DPI). Every query connects fresh and degrades to None when no
+/// X server is reachable (pure-Wayland session, headless CI) — callers fall
+/// back to safe constants, never panic.
+#[cfg(not(target_os = "windows"))]
+mod x11q {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::randr::ConnectionExt as _;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
+    use x11rb::rust_connection::RustConnection;
+
+    fn connect() -> Option<(RustConnection, u32)> {
+        let (conn, screen) = RustConnection::connect(None).ok()?;
+        let root = conn.setup().roots.get(screen)?.root;
+        Some((conn, root))
+    }
+
+    pub fn can_connect() -> bool {
+        connect().is_some()
+    }
+
+    pub fn cursor_pos() -> Option<(i32, i32)> {
+        let (conn, root) = connect()?;
+        let r = x11rb::protocol::xproto::query_pointer(&conn, root)
+            .ok()?
+            .reply()
+            .ok()?;
+        Some((r.root_x as i32, r.root_y as i32))
+    }
+
+    /// Union of all enabled CRTCs (multi-display); root geometry fallback.
+    pub fn screen_size() -> Option<(i32, i32)> {
+        let (conn, root) = connect()?;
+        if let Ok(res) = randr_get_resources(&conn, root) {
+            let (mut x1, mut y1) = (i32::MAX, i32::MAX);
+            let (mut x2, mut y2) = (i32::MIN, i32::MIN);
+            let mut any = false;
+            for info in res {
+                any = true;
+                x1 = x1.min(info.0);
+                y1 = y1.min(info.1);
+                x2 = x2.max(info.0 + info.2);
+                y2 = y2.max(info.1 + info.3);
+            }
+            if any {
+                return Some((x2 - x1, y2 - y1));
+            }
+        }
+        let g = x11rb::protocol::xproto::get_geometry(&conn, root)
+            .ok()?
+            .reply()
+            .ok()?;
+        Some((g.width as i32, g.height as i32))
+    }
+
+    /// Enabled CRTC rects as (x, y, w, h).
+    fn randr_get_resources(
+        conn: &RustConnection,
+        root: u32,
+    ) -> Result<Vec<(i32, i32, i32, i32)>, ()> {
+        let res = conn
+            .randr_get_screen_resources_current(root)
+            .map_err(|_| ())?
+            .reply()
+            .map_err(|_| ())?;
+        let mut out = Vec::new();
+        for crtc in &res.crtcs {
+            let info = conn
+                .randr_get_crtc_info(*crtc, res.config_timestamp)
+                .map_err(|_| ())?
+                .reply()
+                .map_err(|_| ())?;
+            if info.mode != 0 && info.width > 0 && info.height > 0 {
+                out.push((
+                    info.x as i32,
+                    info.y as i32,
+                    info.width as i32,
+                    info.height as i32,
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    /// First _NET_WORKAREA rect as (left, top, right, bottom).
+    /// Property format is [x, y, width, height] CARDINALs per desktop.
+    pub fn work_area() -> Option<(i32, i32, i32, i32)> {
+        let (conn, root) = connect()?;
+        let atom = conn
+            .intern_atom(false, b"_NET_WORKAREA")
+            .ok()?
+            .reply()
+            .ok()?
+            .atom;
+        let prop = conn
+            .get_property(false, root, atom, AtomEnum::CARDINAL, 0, 4)
+            .ok()?
+            .reply()
+            .ok()?;
+        if prop.format != 32 || prop.value.len() < 16 {
+            return None;
+        }
+        let mut v = [0u32; 4];
+        for (i, chunk) in prop.value.chunks_exact(4).take(4).enumerate() {
+            v[i] = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        let (x, y, w, h) = (v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32);
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        Some((x, y, x + w, y + h))
+    }
+
+    /// Desktop UI scale from EDID physical size (DPI/96, snapped to 0.25,
+    /// clamped 1–3). Cached process-wide.
+    pub fn ui_scale() -> f32 {
+        static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+        *SCALE.get_or_init(|| edid_scale().unwrap_or(1.0))
+    }
+
+    fn edid_scale() -> Option<f32> {
+        let (conn, root) = connect()?;
+        let res = conn
+            .randr_get_screen_resources_current(root)
+            .ok()?
+            .reply()
+            .ok()?;
+        for output in &res.outputs {
+            let info = conn
+                .randr_get_output_info(*output, res.config_timestamp)
+                .ok()?
+                .reply()
+                .ok()?;
+            // Lit CRTC + known physical size => trustworthy DPI.
+            if info.crtc != 0 && info.mm_width > 0 {
+                let crtc = conn
+                    .randr_get_crtc_info(info.crtc, res.config_timestamp)
+                    .ok()?
+                    .reply()
+                    .ok()?;
+                if crtc.width == 0 {
+                    continue;
+                }
+                let dpi = crtc.width as f32 * 25.4 / info.mm_width as f32;
+                let s = ((dpi / 96.0) * 4.0).round() / 4.0;
+                return Some(s.clamp(1.0, 3.0));
+            }
+        }
+        None
+    }
 }

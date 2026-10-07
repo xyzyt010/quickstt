@@ -2199,6 +2199,15 @@ fn dock_hop(
         std::thread::Builder::new()
             .name("ptt-hotkey".into())
             .spawn(move || {
+                // No-X guard (Linux): the global-hotkey backend segfaults in
+                // XDefaultRootWindow on a null display (proven by core dump
+                // on a DISPLAY-less Wayland launch). Skip registration
+                // instead of crashing; hotkeys simply stay unavailable.
+                #[cfg(not(target_os = "windows"))]
+                if !widget_platform::can_open_x_display() {
+                    log_line("hotkeys disabled: no X display reachable");
+                    return;
+                }
                 let manager = loop {
                     match GlobalHotKeyManager::new() {
                         Ok(m) => match m.register(ptt.clone()) {
@@ -3311,6 +3320,8 @@ fn dock_hop(
     let mut last_hover = std::time::Instant::now();
     // Overlay paint insurance throttle (see watchdog block below).
     let mut last_ov_insure: Option<std::time::Instant> = None;
+    // Last dock position WE requested (taskbar-watch dedup, see below).
+    let mut last_dock_req: Option<(i32, i32)> = None;
     let mut last_upper_w = 184i32;
     let mut last_phase = -1i32;
     let mut logged_phase = -1i32;
@@ -5192,13 +5203,20 @@ fn dock_hop(
                         let (dx, dy) =
                             widget_platform::dock_position(0, lw, lh, dock_gap(&expanded_timer), scale);
                         let pos = p.window().position();
-                        if (dx - pos.x).abs() > 2 || (dy - pos.y).abs() > 2 {
+                        // Request-dedup: Wayland compositors own final
+                        // placement, so the reported position never converges
+                        // with our math — comparing against it re-fires every
+                        // tick (position fight + log spam + CPU). Compare
+                        // against OUR last request instead: identical targets
+                        // are never re-sent.
+                        if last_dock_req != Some((dx, dy)) {
                             log_line(&format!(
                                 "taskbar shift ({},{})->({dx},{dy})",
                                 pos.x, pos.y
                             ));
                             p.window()
                                 .set_position(slint::PhysicalPosition { x: dx, y: dy });
+                            last_dock_req = Some((dx, dy));
                         }
                     }
                     // ── hover-expand into two pieces (cursor-driven in Rust).

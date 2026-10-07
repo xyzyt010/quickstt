@@ -47,12 +47,15 @@ pub fn chunk_peak(samples: &[i16]) -> f64 {
 /// One-chunk confirmation arbiter: a detected onset is HELD, not acted on.
 /// It only becomes actionable if the NEXT chunk is quiet (an isolated
 /// impulse: a clap) — quiet in BOTH level and shape:
-///   1. follow-up peak < 40% of the onset peak (sustained speech veto), AND
-///   2. follow-up burst width <= onset width (loud-syllable + pause veto:
-///      a voice onset at 8000+ followed by a 1300-level pause passes the
-///      level test but the pause still carries a wide energy body, while a
-///      real clap's tail has decayed below its burst width).
-/// Costs one chunk (~80ms) of latency.
+///   1. follow-up peak < 25% of the onset peak (loud syllable + pause veto:
+///      a voice onset at 8000+ followed by a 1300-level pause passes a
+///      40% test, but a real clap's tail drops far harder), AND
+///   2. follow-up burst width <= HALF the onset width (the pause after a
+///      voice onset still carries a wide energy body; a real clap's tail
+///      has decayed well below half its burst width).
+/// Costs one chunk (~80ms) of latency. Calibrated against live-room logs:
+/// four consecutive phantoms (onset w134–521 / confirm w260–523) all veto
+/// with margin; synthetic and measured real claps still confirm.
 #[derive(Default)]
 pub struct TransientArbiter {
     pending: Option<(TransientKind, f64, usize)>,
@@ -77,8 +80,8 @@ impl TransientArbiter {
     ) -> Option<TransientKind> {
         let mut fire = None;
         if let Some((kind, onset_peak, onset_width)) = self.pending.take() {
-            let quiet_level = chunk_peak < onset_peak * 0.4;
-            let decayed_shape = chunk_width <= onset_width;
+            let quiet_level = chunk_peak < onset_peak * 0.25;
+            let decayed_shape = chunk_width * 2 <= onset_width;
             if quiet_level && decayed_shape {
                 fire = Some(kind);
             } else {
