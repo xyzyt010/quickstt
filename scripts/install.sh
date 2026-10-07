@@ -71,9 +71,11 @@ log "installing system prerequisites (sudo required)"
 sudo apt-get update
 # libayatana-appindicator3 covers XFCE4/MATE/GNOME trays; xdotool = X11 typing,
 # wtype + wl-clipboard = Wayland typing; portaudio/pulse = mic capture.
+# libasound2 became libasound2t64 on Ubuntu 24.04+/Mint 22 (t64 transition):
+# the alternation installs on both old and new distros.
 sudo apt-get install -y \
     libgtk-3-0 'libayatana-appindicator3-1|libappindicator3-1' \
-    librsvg2-2 libasound2 libpulse0 libportaudio2 \
+    librsvg2-2 'libasound2t64|libasound2' libpulse0 libportaudio2 \
     libx11-6 libxi6 libxtst6 libglib2.0-0 \
     xdotool wtype wl-clipboard
 
