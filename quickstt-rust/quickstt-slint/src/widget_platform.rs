@@ -1066,6 +1066,8 @@ fn estimate(text: &str, logical_px: f32) -> f32 {
 /// True when an X display can be opened (Linux hotkey-thread guard: the
 /// global-hotkey backend segfaults in XDefaultRootWindow on a null display,
 /// so the app skips hotkey registration entirely instead of crashing).
+/// (Linux-only caller today; kept cross-platform for the next caller.)
+#[allow(dead_code)]
 pub fn can_open_x_display() -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -1293,6 +1295,8 @@ mod x11q {
 
     /// Frameless widget chrome via EWMH/Motif hints. Best-effort one-shot:
     /// any failure returns silently (the window still works, just decorated).
+    /// Logs what stuck (read back from the server) so a silent no-op shows
+    /// in the log instead of on the screen.
     pub fn strip_chrome(xid: u32) {
         let (conn, _root) = match connect() {
             Some(c) => c,
@@ -1310,23 +1314,32 @@ mod x11q {
         let wt = intern(b"_NET_WM_WINDOW_TYPE");
         let wt_dialog = intern(b"_NET_WM_WINDOW_TYPE_DIALOG");
         let ws = intern(b"_NET_WM_STATE");
+        let mut applied: Vec<&str> = Vec::new();
         // _MOTIF_WM_HINTS = [flags, functions, decorations, input_mode,
         // status]; flags=2 (DECORATIONS valid), decorations=0 (none).
         if let Some(m) = motif {
             let hints: [u32; 5] = [2, 0, 0, 0, 0];
-            let _ = conn
+            if conn
                 .change_property32(PropMode::REPLACE, xid, m, m, &hints)
                 .ok()
-                .map(|c| c.check().ok());
+                .and_then(|c| c.check().ok())
+                .is_some()
+            {
+                applied.push("motif-nodecor");
+            }
         }
         // DIALOG type: floats above normal windows in most WMs without the
         // strut-reserving behaviour of DOCK (which would shift maximized
         // windows aside for our 38x10 pill).
         if let (Some(t), Some(d)) = (wt, wt_dialog) {
-            let _ = conn
+            if conn
                 .change_property32(PropMode::REPLACE, xid, t, AtomEnum::ATOM, &[d])
                 .ok()
-                .map(|c| c.check().ok());
+                .and_then(|c| c.check().ok())
+                .is_some()
+            {
+                applied.push("type-dialog");
+            }
         }
         // ABOVE + SKIP_TASKBAR + SKIP_PAGER + STICKY (all desktops).
         if let Some(s) = ws {
@@ -1341,12 +1354,38 @@ mod x11q {
                     states.push(a);
                 }
             }
-            if !states.is_empty() {
-                let _ = conn
+            if !states.is_empty()
+                && conn
                     .change_property32(PropMode::REPLACE, xid, s, AtomEnum::ATOM, &states)
                     .ok()
-                    .map(|c| c.check().ok());
+                    .and_then(|c| c.check().ok())
+                    .is_some()
+            {
+                applied.push("state-above/taskbar/pager/sticky");
             }
         }
-    }
+        // Read back: a WM that strips or ignores our state shows up here
+        // (applied 4 atoms but 0 read back = the WM wiped them).
+        let mut readback = String::new();
+        if ws.is_some() {
+            // Re-intern (cheap) to keep the borrow simple.
+            if let Some(s2) = intern(b"_NET_WM_STATE") {
+                if let Ok(r) = conn
+                    .get_property(false, xid, s2, AtomEnum::ATOM, 0, 8)
+                    .and_then(|c| c.reply())
+                {
+                    let n = if r.format == 32 { r.value.len() / 4 } else { 0 };
+                    readback = format!(" (state atoms on window now: {n})");
+                }
+            }
+        }
+        // Log only failure signals (the re-strip runs every 2s while
+        // visible — success stays silent like the Windows path).
+        let zero_back = readback.contains("now: 0)");
+        if applied.is_empty() || zero_back {
+            crate::log_line(&format!(
+                "x11 strip xid={xid}: applied=[{}]{readback}",
+                applied.join(",")
+            ));
+        }    }
 }

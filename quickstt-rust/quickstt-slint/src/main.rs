@@ -1632,7 +1632,104 @@ fn capture_current_fg_window(target: &Arc<Mutex<Option<isize>>>) {
     }
 }
 #[cfg(not(target_os = "windows"))]
-fn capture_current_fg_window(_target: &Arc<Mutex<Option<isize>>>) {}
+fn capture_current_fg_window(target: &Arc<Mutex<Option<isize>>>) {
+    // X11: the focused XID at session/PTT start, so the paste restores it
+    // after our pill took focus. Wayland has no global focus query — the
+    // paste goes to whatever holds focus (hands-free flow keeps it there).
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return;
+    }
+    if let Ok(out) = std::process::Command::new("xdotool")
+        .arg("getwindowfocus")
+        .output()
+    {
+        if let Ok(s) = String::from_utf8(out.stdout) {
+            if let Ok(xid) = s.trim().parse::<i64>() {
+                if xid > 0 {
+                    if let Ok(mut lock) = target.lock() {
+                        *lock = Some(xid as isize);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Linux paste: clipboard + Ctrl+V into the focused window, mirroring the
+/// Windows timing (40ms settle, 50ms refocus). Wayland via wl-copy + wtype,
+/// X11 via xclip + xdotool (all installed by scripts/install.sh).
+#[cfg(not(target_os = "windows"))]
+fn deliver_linux(text: &str, target: Option<isize>) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    // 1. Clipboard.
+    if wayland {
+        if let Ok(mut c) = Command::new("wl-copy")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            let _ = c.stdin.as_mut().map(|s| s.write_all(text.as_bytes()));
+            let _ = c.wait();
+        }
+    } else {
+        // xclip preferred, xsel fallback.
+        let mut done = false;
+        if let Ok(mut c) = Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            let _ = c.stdin.as_mut().map(|s| s.write_all(text.as_bytes()));
+            done = c.wait().map(|s| s.success()).unwrap_or(false);
+        }
+        if !done {
+            if let Ok(mut c) = Command::new("xsel")
+                .args(["--clipboard", "--input"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                let _ = c.stdin.as_mut().map(|s| s.write_all(text.as_bytes()));
+                let _ = c.wait();
+            }
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    // 2. Focus + keystroke.
+    if wayland {
+        // wtype types into the focused Wayland window (virtual-keyboard
+        // protocol — no focus query possible, hands-free keeps the target).
+        let _ = Command::new("wtype")
+            .args(["-M", "ctrl", "-k", "v", "-m", "ctrl"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    } else {
+        if let Some(xid) = target {
+            if xid > 0 {
+                let _ = Command::new("xdotool")
+                    .arg("windowactivate")
+                    .arg(xid.to_string())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        let _ = Command::new("xdotool")
+            .args(["key", "ctrl+v"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    log_line(&format!("linux paste delivered {} chars", text.len()));
+}
 
 /// Deliver fresh transcript text per output mode:
 /// - 0 = Type (fast paste via clipboard + Ctrl+V, with Unicode typing)
@@ -1660,6 +1757,8 @@ fn deliver_transcription_output(delta: &str, output_mode: u32, target_hwnd: Opti
                     paste_via_ctrl_v(target_hwnd);
                 }
             }
+            #[cfg(not(target_os = "windows"))]
+            deliver_linux(&text, target_hwnd);
         }
     }
 }
@@ -1670,6 +1769,121 @@ fn toggle_cpp_widget(
     _cpp_visible: &Arc<Mutex<bool>>,
     _why: &str,
 ) {}
+
+/// SNI tray for Linux (StatusNotifierItem over D-Bus): visible in the XFCE4
+/// systray plugin, Cinnamon and Wayland SNI hosts with no panel plugin.
+/// tray-icon's Linux backend speaks libappindicator, which stays invisible
+/// on panels lacking the Indicator Plugin (this Mint XFCE box included).
+#[cfg(target_os = "linux")]
+mod sni_tray {
+    use std::sync::mpsc::{Receiver, Sender};
+
+    #[derive(Debug, Clone, Copy)]
+    pub enum SniClick {
+        Activate,
+        Dashboard,
+        ToggleWidget,
+        Quit,
+        Online,
+    }
+
+    #[derive(Debug)]
+    pub struct QuickTray {
+        tx: Sender<SniClick>,
+        icon: Vec<u8>,
+        w: i32,
+        h: i32,
+    }
+
+    fn row(tx: &Sender<SniClick>, label: &str, click: SniClick) -> ksni::MenuItem<QuickTray> {
+        let tx = tx.clone();
+        let mut item = ksni::menu::StandardItem::default();
+        item.label = label.to_string();
+        item.activate = Box::new(move |_tray: &mut QuickTray| {
+            let _ = tx.send(click);
+        });
+        ksni::MenuItem::from(item)
+    }
+
+    impl ksni::Tray for QuickTray {
+        fn id(&self) -> String {
+            "quickstt".to_string()
+        }
+        fn title(&self) -> String {
+            "QuickSTT".to_string()
+        }
+        fn category(&self) -> ksni::Category {
+            ksni::Category::ApplicationStatus
+        }
+        fn status(&self) -> ksni::Status {
+            ksni::Status::Active
+        }
+        fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+            vec![ksni::Icon {
+                width: self.w,
+                height: self.h,
+                data: self.icon.clone(),
+            }]
+        }
+        fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+            vec![
+                row(&self.tx, "Open Dashboard", SniClick::Dashboard),
+                row(&self.tx, "Show / Hide Widget", SniClick::ToggleWidget),
+                row(&self.tx, "Quit QuickSTT", SniClick::Quit),
+            ]
+        }
+        fn activate(&mut self, _x: i32, _y: i32) {
+            let _ = self.tx.send(SniClick::Activate);
+        }
+        fn watcher_online(&self) {
+            let _ = self.tx.send(SniClick::Online);
+        }
+    }
+
+    /// Spawn the SNI service on its own thread + runtime. Returns the click
+    /// channel — poll it in the 50ms loop next to the TrayIconEvent pump.
+    pub fn spawn(icon: Option<(Vec<u8>, u32, u32)>) -> Receiver<SniClick> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx_thread = tx.clone();
+        std::thread::Builder::new()
+            .name("sni-tray".to_string())
+            .spawn(move || {
+                let (mut argb, w, h) = icon.unwrap_or_default();
+                // RGBA -> ARGB32 (SNI wire order), per the ksni Icon docs.
+                for px in argb.chunks_exact_mut(4) {
+                    px.rotate_right(1);
+                }
+                let tray = QuickTray {
+                    tx: tx_thread,
+                    icon: argb,
+                    w: w as i32,
+                    h: h as i32,
+                };
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        crate::log_line(&format!("sni tray: no runtime ({e})"));
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    use ksni::TrayMethods;
+                    match tray.assume_sni_available(true).spawn().await {
+                        Ok(handle) => {
+                            // Park here for the process lifetime.
+                            let _ = handle.shutdown().await;
+                        }
+                        Err(e) => crate::log_line(&format!("sni tray unavailable ({e})")),
+                    }
+                });
+            })
+            .ok();
+        rx
+    }
+}
 
 /// Tray icon: pre-baked PNG (has alpha), ICO fallback. (An SVG render path
 /// via resvg/usvg used to live here — identical pixels, but the renderer
@@ -2807,6 +3021,9 @@ fn dock_hop(
     // Build tray icon with retries — Shell_NotifyIconW can return E_FAIL
     // transiently on Windows, especially right after startup or if the
     // notification area hasn't fully initialised.
+    // Linux uses the SNI tray below (libappindicator needs a panel
+    // Indicator Plugin most XFCE panels lack, so it stays invisible).
+    #[cfg(not(target_os = "linux"))]
     let _tray = {
         let icon_for_retry = load_tray_icon();
         let mut last_err = String::new();
@@ -2846,6 +3063,11 @@ fn dock_hop(
         }
         tray_result
     };
+    // SNI tray (Linux): polled below next to the TrayIconEvent pump.
+    #[cfg(target_os = "linux")]
+    let sni_rx = sni_tray::spawn(load_tray_icon());
+    #[cfg(target_os = "linux")]
+    let sni_rx = std::sync::Arc::new(std::sync::Mutex::new(sni_rx));
     #[cfg(target_os = "windows")]
     apply_dark_theme_to_process_windows();
 
@@ -3322,6 +3544,11 @@ fn dock_hop(
     let mut last_ov_insure: Option<std::time::Instant> = None;
     // Last dock position WE requested (taskbar-watch dedup, see below).
     let mut last_dock_req: Option<(i32, i32)> = None;
+    // Last X11 chrome re-strip (Linux keeps ABOVE/state pinned).
+    #[cfg(target_os = "linux")]
+    let mut last_xstrip = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(10))
+        .unwrap_or_else(std::time::Instant::now);
     let mut last_upper_w = 184i32;
     let mut last_phase = -1i32;
     let mut logged_phase = -1i32;
@@ -3483,11 +3710,12 @@ fn dock_hop(
             },
         );
     }
+    #[cfg(target_os = "linux")]
+    let sni_rx_poll = sni_rx.clone();
     timer.start(
         TimerMode::Repeated,
         std::time::Duration::from_millis(50),
-        move || {
-            // Backstop: one panicking tick (bad lock, platform error, OOB)
+        move || {            // Backstop: one panicking tick (bad lock, platform error, OOB)
             // must never take down the event loop — catch it, log it, keep
             // going. Poisoned mutexes additionally self-heal via mlock, so
             // the NEXT tick runs on healthy state instead of re-panicking.
@@ -3515,6 +3743,17 @@ fn dock_hop(
             if widget_platform::ensure_frameless(p.window(), false) {
                 let st = widget_platform::window_state_debug("pill", p.window());
                 note(&format!("pill frame stripped {st}"));
+            }
+            // X11 chrome re-assert (~2s while visible): WMs can wipe our
+            // ABOVE/state atoms on map or workspace switch — re-strip keeps
+            // the pill frameless and above the taskbar. Idempotent and
+            // cheap (a few local round-trips); the strip itself logs.
+            #[cfg(target_os = "linux")]
+            if p.window().is_visible()
+                && last_xstrip.elapsed() > std::time::Duration::from_secs(2)
+            {
+                last_xstrip = std::time::Instant::now();
+                widget_platform::strip_chrome(p.window());
             }
             if p.window().is_visible() && !widget_platform::has_hwnd(p.window()) {
                 note("pill visible without HWND (strip skipped)");
@@ -4066,6 +4305,29 @@ fn dock_hop(
                 if t.elapsed() > std::time::Duration::from_millis(350) {
                     tray_pending_single = None;
                     toggle_pill_widget(&pill_w, &state_timer, "left");
+                }
+            }
+            // SNI tray clicks (Linux): same actions as the native menu rows.
+            #[cfg(target_os = "linux")]
+            if let Ok(rx) = sni_rx_poll.lock() {
+                use sni_tray::SniClick::*;
+                while let Ok(click) = rx.try_recv() {
+                    match click {
+                        Activate => toggle_pill_widget(&pill_w, &state_timer, "sni"),
+                        Dashboard => menu_action(
+                            0,
+                            &dash_timer,
+                            &pill_w,
+                            &dash_visible_timer,
+                            &state_timer,
+                        ),
+                        ToggleWidget => toggle_pill_widget(&pill_w, &state_timer, "sni-menu"),
+                        Quit => {
+                            quit_app();
+                            std::process::exit(0);
+                        }
+                        Online => log_line("tray: SNI item registered on the bus"),
+                    }
                 }
             }
             // Menu upkeep: frameless re-assert + outside-dismiss (cursor off

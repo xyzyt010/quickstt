@@ -77,17 +77,26 @@ sudo apt-get update
 # wtype + wl-clipboard = Wayland typing; portaudio/pulse = mic capture.
 # libasound2 became libasound2t64 on Ubuntu 24.04+/Mint 22 (t64 transition):
 # the alternation installs on both old and new distros.
+# libopenblas0 = Nemotron transcribe-cli runtime; xclip = X11 clipboard for
+# paste; python3-pip = Photon (Parakeet Ultra/Redux) runtime below.
 sudo apt-get install -y \
     libgtk-3-0 libayatana-appindicator3-1 \
-    librsvg2-2 'libasound2t64|libasound2' libpulse0 libportaudio2 \
+    librsvg2-2 'libasound2t64|libasound2' libpulse0 libportaudio2 libopenblas0 \
     libx11-6 libxi6 libxtst6 libglib2.0-0 \
-    xdotool wtype wl-clipboard
+    xdotool xclip wtype wl-clipboard python3-pip
 
-# 5. Install the package ------------------------------------------------------
+# 5. Photon runtime (Moondream Parakeet Ultra/Redux): pip package with a CPU
+# torch + kernels (~700MB one-time). Best-effort: the app runs every other
+# engine without it; the dashboard shows setup steps when it is missing.
+log "installing Photon STT runtime (pip moondream, one-time ~700MB)"
+python3 -m pip install --user --break-system-packages "moondream>=2.4" 2>&1 | tail -2 || \
+    log "Photon runtime install failed — Parakeet Ultra/Redux will show setup steps instead"
+
+# 6. Install the package ------------------------------------------------------
 log "installing ${DEB_NAME} (sudo required)"
 sudo apt install -y "$TMP_DEB"
 
-# 6. Verify (no GUI launch — `quickstt` with no daemon args starts the pill,
+# 7. Verify (no GUI launch — `quickstt` with no daemon args starts the pill,
 # so verification is file/package based only) -------------------------------
 dpkg -s quickstt >/dev/null 2>&1 && log "package registered with dpkg" \
     || die "dpkg does not know package 'quickstt'"
@@ -99,7 +108,7 @@ test -f /usr/lib/quickstt/wakeword_models/hey_jarvis_v0.1.onnx \
     && log "wakeword models present" \
     || die "wakeword heads missing under /usr/lib/quickstt — reinstall or report this"
 
-# 7. Next steps ----------------------------------------------------------------
+# 8. Next steps ----------------------------------------------------------------
 cat <<EOF
 
 QuickSTT is installed. First launch:

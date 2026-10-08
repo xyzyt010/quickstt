@@ -26,8 +26,13 @@ windows = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsA
 
 # Linux/X11 queries (cursor, screens, work area, DPI): pure-Rust X11 client,
 # no extra system libraries beyond the X server itself.
+# SNI tray (StatusNotifierItem over D-Bus): visible in XFCE4 systray,
+# Cinnamon and Wayland SNI hosts — libappindicator (tray-icon's Linux
+# backend) needs a panel Indicator Plugin most Mint XFCE panels lack.
 [target.'cfg(unix)'.dependencies]
 x11rb = "0.13"
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = "0.3"
 
 [build-dependencies]
 slint-build = "1.9"
@@ -45,7 +50,7 @@ Floating voice typing widget for Linux — X11 & Wayland, transparent always-on-
  Includes integrated STT backends: Vosk small EN, Parakeet TDT 0.6B, Nemotron 3.5 streaming."""
 section = "utils"
 priority = "optional"
-depends = "libgtk-3-0, libayatana-appindicator3-1 | libappindicator3-1, librsvg2-2, libasound2t64 | libasound2, libpulse0, libportaudio2, libx11-6, libxi6, libxtst6, xdotool, libglib2.0-0"
+depends = "libgtk-3-0, libayatana-appindicator3-1 | libappindicator3-1, librsvg2-2, libasound2t64 | libasound2, libpulse0, libportaudio2, libopenblas0, libx11-6, libxi6, libxtst6, xdotool, xclip, libglib2.0-0"
 recommends = "wtype, wl-clipboard, ydotool, libqt6core6, libqt6gui6, libqt6widgets6, libqt6svg6, libqt6network6"
 assets = [
   ["../target/release/quickstt-slint", "usr/bin/quickstt", "755"],
