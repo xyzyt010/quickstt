@@ -1370,12 +1370,13 @@ mod x11q {
         if ws.is_some() {
             // Re-intern (cheap) to keep the borrow simple.
             if let Some(s2) = intern(b"_NET_WM_STATE") {
-                if let Ok(r) = conn
-                    .get_property(false, xid, s2, AtomEnum::ATOM, 0, 8)
-                    .and_then(|c| c.reply())
+                if let Ok(cookie) =
+                    conn.get_property(false, xid, s2, AtomEnum::ATOM, 0, 8)
                 {
-                    let n = if r.format == 32 { r.value.len() / 4 } else { 0 };
-                    readback = format!(" (state atoms on window now: {n})");
+                    if let Ok(r) = cookie.reply() {
+                        let n = if r.format == 32 { r.value.len() / 4 } else { 0 };
+                        readback = format!(" (state atoms on window now: {n})");
+                    }
                 }
             }
         }
