@@ -44,6 +44,9 @@ pub struct Settings {
     pub pill_width: u32,
     pub pill_height: u32,
     pub pill_radius: u32,
+    /// Dock station (0 = bottom-center, 1 = right-middle, 2 = left-middle).
+    #[serde(default)]
+    pub pill_dock: u32,
     pub active_opacity: u32,
     pub icon_size: u32,
     pub tray_icon_size: u32,
@@ -158,6 +161,7 @@ impl Default for Settings {
             pill_width: DEFAULT_PILL_WIDTH,
             pill_height: DEFAULT_PILL_HEIGHT,
             pill_radius: DEFAULT_PILL_RADIUS,
+            pill_dock: 0,
             active_opacity: DEFAULT_ACTIVE_OPACITY,
             icon_size: DEFAULT_ICON_SIZE,
             tray_icon_size: DEFAULT_TRAY_ICON_SIZE,
@@ -302,6 +306,9 @@ impl Settings {
         settings.pill_width = read_dword(key, "pillWidth").unwrap_or(DEFAULT_PILL_WIDTH);
         settings.pill_height = read_dword(key, "pillHeight").unwrap_or(DEFAULT_PILL_HEIGHT);
         settings.pill_radius = read_dword(key, "pillRadius").unwrap_or(DEFAULT_PILL_RADIUS);
+        // Dock + drag position: restored at startup so updates/restarts keep
+        // the pill where the user put it. Absent keys = never placed.
+        settings.pill_dock = read_dword(key, "pillDock").unwrap_or(0).min(2);
         settings.active_opacity = read_dword(key, "activeOpacity")
             .or_else(|| read_dword(key, "opacity"))
             .unwrap_or(DEFAULT_ACTIVE_OPACITY);
@@ -706,6 +713,7 @@ impl Settings {
             let _ = write_dword("pillWidth", self.pill_width);
             let _ = write_dword("pillHeight", self.pill_height);
             let _ = write_dword("pillRadius", self.pill_radius);
+            let _ = write_dword("pillDock", self.pill_dock);
             let _ = write_dword("activeOpacity", self.active_opacity);
             let _ = write_dword("iconSize", self.icon_size);
             let _ = write_dword("trayIconSize", self.tray_icon_size);

@@ -2029,15 +2029,44 @@ fn main() -> QuickSttResult<()> {
     widget_platform::restack_topmost(pill.window());
 
     // Start collapsed, bottom-center (matches C++/egui default)
+    // Restore the persisted dock station when present so updates and
+    // restarts keep the pill where the user put it (never silently reset).
     {
+        let dock = state
+            .lock()
+            .map(|s| s.settings.pill_dock.min(2) as usize)
+            .unwrap_or(0);
         let scale = widget_platform::window_scale(pill.window()).max(0.5);
-        let (x, y) = widget_platform::dock_position(0, MINI_W, MINI_H, EDGE_GAP, scale);
+        let vert = dock != 0;
+        let (cw, ch) = if vert {
+            (SIDE_MINI_W, SIDE_MINI_H)
+        } else {
+            (MINI_W, MINI_H)
+        };
+        let (x, y) = widget_platform::dock_position(dock, cw, ch, EDGE_GAP, scale);
         place_pill(&pill, x, y);
-        set_footprint(&pill, MINI_W, MINI_H);
-        pill.set_vertical(false);
-        pill.set_mirror(false);
+        set_footprint(&pill, cw, ch);
+        pill.set_vertical(vert);
+        pill.set_mirror(dock == 2);
+        if let Ok(s) = state.lock() {
+            log_line(&format!(
+                "settings restored: model='{}' wake='{}' sens={}/{} clap={} offload={}/{}s dock={dock} pos=({x},{y})",
+                s.settings.selected_model,
+                s.settings.wake_word_mode,
+                s.settings.wakeword_sensitivity,
+                s.settings.vad_sensitivity,
+                s.settings.transient_action,
+                s.settings.auto_offload,
+                s.settings.offload_seconds,
+            ));
+        }
     }
-    let corner_idx = Arc::new(Mutex::new(0usize));
+    let corner_idx = Arc::new(Mutex::new(
+        state
+            .lock()
+            .map(|s| s.settings.pill_dock.min(2) as usize)
+            .unwrap_or(0),
+    ));
     let dash_visible = Arc::new(Mutex::new(false));
     // Hover-expand state: cursor-driven in the 50ms poll (robust against
     // Slint hover-event quirks); session activity forces expanded. No pin:
@@ -3444,6 +3473,7 @@ fn dock_hop(
         let corner_idx = corner_idx.clone();
         let vertical_de = vertical.clone();
         let expanded_de = expanded.clone();
+        let state_de = state.clone();
         pill.on_drag_end(move || {
             let mut d = mlock(&drag);
             if !d.active || d.target != DragTarget::Pill {
@@ -3516,6 +3546,18 @@ fn dock_hop(
                 set_footprint(&p, cw, ch);
                 *mlock(&corner_idx) = snap;
                 mlock(&drag).docked_exact = true;
+                // Persist the station immediately: updates and restarts
+                // must keep the pill where the user docked it.
+                if let Ok(mut s) = state_de.lock() {
+                    if s.settings.pill_dock != snap as u32 {
+                        s.settings.pill_dock = snap as u32;
+                        if let Err(e) = s.settings.save_all() {
+                            log_line(&format!("dock persist failed: {e}"));
+                        } else {
+                            log_line(&format!("dock persisted: station={snap}"));
+                        }
+                    }
+                }
             }
         });
     }
