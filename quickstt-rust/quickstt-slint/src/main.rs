@@ -4641,6 +4641,27 @@ fn dock_hop(
                 if !live_session {
                     capture_current_fg_window(&last_external_fg_timer);
                 }
+                // Ghost-turn auto-cancel: a clap/wakeword that opens a turn
+                // but is followed by silence would otherwise transcribe the
+                // trigger noise into "you"/"yeah" and type it. If 2s in no
+                // transcript has arrived AND post-onset levels stayed quiet,
+                // close the turn silently — no engine call, no text, no
+                // ghost. Deliberate speech always raises speech_peak first
+                // (a spoken word sustains level past the 800ms onset blind),
+                // and held PTT/mic turns are never cancelled (explicit user
+                // intent). Mirrors the "Nothing detected" <10 semantics.
+                if recording
+                    && !transcribing
+                    && !ptt
+                    && !mic_on
+                    && std::time::Instant::now().duration_since(sess_start_t)
+                        > std::time::Duration::from_millis(2000)
+                    && s.transcript_buffer.len() == sess_start_len
+                    && speech_peak < 10
+                {
+                    log_line("session auto-cancelled (no speech after trigger)");
+                    let _ = tx_cmd_timer.try_send(OrchestratorCommand::StopListening);
+                }
 
                 // Sync wakeword detection engine with session state.
                 // The background mic stays up when wakewords OR the clap
