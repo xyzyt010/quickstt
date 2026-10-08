@@ -32,9 +32,11 @@ windows = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsA
 [target.'cfg(unix)'.dependencies]
 x11rb = "0.13"
 [target.'cfg(target_os = "linux")'.dependencies]
-# Default features pull async-io alongside tokio and ksni hard-errors on
-# that combo — tokio only (we already run a tokio runtime for it).
-ksni = { version = "0.3", default-features = false, features = ["tokio"] }
+# Blocking SNI API (self-driving, no executor for us to manage). Union with
+# Slint's own ksni edge (async-io + blocking) is conflict-free; tokio must
+# NOT be enabled (ksni hard-errors on tokio+async-io, and Slint pulls the
+# latter via its system-tray feature).
+ksni = { version = "0.3", default-features = false, features = ["blocking"] }
 
 [build-dependencies]
 slint-build = "1.9"

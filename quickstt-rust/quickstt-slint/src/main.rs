@@ -1840,11 +1840,11 @@ mod sni_tray {
         }
     }
 
-    /// Spawn the SNI service on its own thread + runtime. Returns the click
-    /// channel — poll it in the 50ms loop next to the TrayIconEvent pump.
+    /// Spawn the SNI service (blocking API: self-driving, no executor for
+    /// us to manage). Returns the click channel — poll it in the 50ms loop
+    /// next to the TrayIconEvent pump.
     pub fn spawn(icon: Option<(Vec<u8>, u32, u32)>) -> Receiver<SniClick> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let tx_thread = tx.clone();
         std::thread::Builder::new()
             .name("sni-tray".to_string())
             .spawn(move || {
@@ -1854,31 +1854,18 @@ mod sni_tray {
                     px.rotate_right(1);
                 }
                 let tray = QuickTray {
-                    tx: tx_thread,
+                    tx,
                     icon: argb,
                     w: w as i32,
                     h: h as i32,
                 };
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        crate::log_line(&format!("sni tray: no runtime ({e})"));
-                        return;
+                use ksni::blocking::TrayMethods;
+                match tray.assume_sni_available(true).spawn() {
+                    Ok(_handle) => {
+                        crate::log_line("sni tray: service started");
                     }
-                };
-                rt.block_on(async move {
-                    use ksni::TrayMethods;
-                    match tray.assume_sni_available(true).spawn().await {
-                        Ok(handle) => {
-                            // Park here for the process lifetime.
-                            let _ = handle.shutdown().await;
-                        }
-                        Err(e) => crate::log_line(&format!("sni tray unavailable ({e})")),
-                    }
-                });
+                    Err(e) => crate::log_line(&format!("sni tray unavailable ({e})")),
+                }
             })
             .ok();
         rx
