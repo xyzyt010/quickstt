@@ -66,10 +66,11 @@ component UpperPill inherits Rectangle {
 
     // 1 recording — white bars ONLY, centred in the 30px pill. No transcript
     // text here (TextBoard owns the transcript). Each bar lives in a fixed
-    // 12px-tall cell so HorizontalLayout cannot top-anchor it.
+    // 12px-tall cell so HorizontalLayout cannot top-anchor it. Cell y=11 =
+    // (34-12)/2: exactly centred (y=9 sat 2px high vs the mic icon).
     if phase == 1 && alert_text == "": HorizontalLayout {
         x: 0px;
-        y: 9px;
+        y: 11px;
         width: parent.width;
         height: 12px;
         spacing: 2px;
@@ -115,9 +116,9 @@ component UpperPill inherits Rectangle {
             font-weight: 600;
             vertical-alignment: center;
         }
-        Rectangle { width: 5px; height: 5px; y: 12.5px; border-radius: 2.5px; background: (mod(loading_tick, 3) == 0) ? #FFFFFF : #555555; }
-        Rectangle { width: 5px; height: 5px; y: 12.5px; border-radius: 2.5px; background: (mod(loading_tick, 3) == 1) ? #FFFFFF : #555555; }
-        Rectangle { width: 5px; height: 5px; y: 12.5px; border-radius: 2.5px; background: (mod(loading_tick, 3) == 2) ? #FFFFFF : #555555; }
+        Rectangle { width: 5px; height: 5px; y: 14.5px; border-radius: 2.5px; background: (mod(loading_tick, 3) == 0) ? #FFFFFF : #555555; }
+        Rectangle { width: 5px; height: 5px; y: 14.5px; border-radius: 2.5px; background: (mod(loading_tick, 3) == 1) ? #FFFFFF : #555555; }
+        Rectangle { width: 5px; height: 5px; y: 14.5px; border-radius: 2.5px; background: (mod(loading_tick, 3) == 2) ? #FFFFFF : #555555; }
     }
 
     // 3 done — green check + "Done" only (no transcript tail here).
@@ -131,7 +132,7 @@ component UpperPill inherits Rectangle {
         Path {
             width: 14px;
             height: 12px;
-            y: 9px;
+            y: 11px;
             stroke: #51E088;
             stroke-width: 2.5px;
             commands: "M 1 7 L 6 12 L 15 1";

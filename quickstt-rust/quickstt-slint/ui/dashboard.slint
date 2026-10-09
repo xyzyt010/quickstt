@@ -22,8 +22,10 @@ export struct ModelCard {
 
 export component DashboardWidget inherits Window {
     title: "QuickSTT Control Center";
-    width: 860px;
-    height: 620px;
+    preferred-width: 860px;
+    preferred-height: 620px;
+    min-width: 720px;
+    min-height: 480px;
     background: #0D1117;
 
     in-out property <int> active-tab: 0;
@@ -454,7 +456,7 @@ export component DashboardWidget inherits Window {
                                 Text { text: "Memory Management & Model Offloading"; font-size: 14px; font-weight: 600; color: #58A6FF; }
 
                                 CheckBox {
-                                    text: "Auto-offload speech model when widget is idle (Saves RAM, maintains < 5 MB idle footprint)";
+                                    text: "Auto-offload speech model when idle (saves RAM)";
                                     checked: root.auto-offload;
                                     toggled => { root.set-auto-offload(self.checked); }
                                 }
@@ -506,11 +508,15 @@ export component DashboardWidget inherits Window {
                                     toggled => { root.set-ctrl-space-enabled(self.checked); }
                                 }
 
-                                HorizontalLayout {
-                                    spacing: 16px;
+                                // Stacked (not side-by-side): at 860px the two
+                                // combos + labels overflow the ~620px content
+                                // and the right column clips. VerticalLayout
+                                // scales cleanly down to the 720px min-width.
+                                VerticalLayout {
+                                    spacing: 8px;
                                     HorizontalLayout {
                                         spacing: 8px;
-                                        Text { text: "Trigger Mode:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; }
+                                        Text { text: "Trigger Mode:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 110px; }
                                         ComboBox {
                                             model: ["Push-to-Talk (Hold)", "Toggle (Press on/off)"];
                                             current-index: root.ctrl-space-mode;
@@ -519,7 +525,7 @@ export component DashboardWidget inherits Window {
                                     }
                                     HorizontalLayout {
                                         spacing: 8px;
-                                        Text { text: "Output Target:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; }
+                                        Text { text: "Output Target:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 110px; }
                                         ComboBox {
                                             model: ["Type into active app", "Copy to clipboard", "Show only"];
                                             current-index: root.ctrl-space-output;
@@ -1306,27 +1312,27 @@ export component DashboardWidget inherits Window {
                                 HorizontalLayout {
                                     alignment: space-between;
                                     Text { text: "Core Architecture:"; font-size: 13px; color: #8B949E; }
-                                    Text { text: "Pure Rust 64-bit (Tokio + Slint Direct2D)"; font-size: 13px; font-weight: 600; color: #F0F6FC; }
+                                    Text { text: "Rust 64-bit (Tokio + Slint)"; font-size: 13px; font-weight: 600; color: #F0F6FC; }
                                 }
                                 HorizontalLayout {
                                     alignment: space-between;
                                     Text { text: "Audio Driver:"; font-size: 13px; color: #8B949E; }
-                                    Text { text: "Windows WASAPI Shared Low-Latency (cpal)"; font-size: 13px; font-weight: 600; color: #F0F6FC; }
+                                    Text { text: "WASAPI shared (cpal)"; font-size: 13px; font-weight: 600; color: #F0F6FC; }
                                 }
                                 HorizontalLayout {
                                     alignment: space-between;
                                     Text { text: "Wakeword Engine:"; font-size: 13px; color: #8B949E; }
-                                    Text { text: "ONNX Tract (5 Models Loaded)"; font-size: 13px; font-weight: 600; color: #2EA043; }
+                                    Text { text: "ONNX Tract (2 heads)"; font-size: 13px; font-weight: 600; color: #2EA043; }
                                 }
                                 HorizontalLayout {
                                     alignment: space-between;
                                     Text { text: "Speech Recognition:"; font-size: 13px; color: #8B949E; }
-                                    Text { text: "Vosk Native & ONNX Multilingual"; font-size: 13px; font-weight: 600; color: #2EA043; }
+                                    Text { text: "Vosk Native & ONNX"; font-size: 13px; font-weight: 600; color: #2EA043; }
                                 }
                                 HorizontalLayout {
                                     alignment: space-between;
                                     Text { text: "Idle Memory Usage:"; font-size: 13px; color: #8B949E; }
-                                    Text { text: "< 5.0 MB (Aggressive Lazy Offloading)"; font-size: 13px; font-weight: 600; color: #3898FF; }
+                                    Text { text: "< 5 MB idle (auto-offload)"; font-size: 13px; font-weight: 600; color: #3898FF; }
                                 }
                             }
                         }

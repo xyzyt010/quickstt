@@ -339,8 +339,29 @@ pub fn restack_topmost(window: &slint::Window) {
             .ok();
         }
     }
+    // Linux: XFCE/Mutter restack + redecorate behind our back (the same race
+    // Windows needed ensure_frameless for — one-shot strip_chrome does not
+    // survive it, which is how the pill ends up "like a window at the
+    // bottom"). Re-assert EWMH/Motif chrome here, throttled to ~2s:
+    // strip_chrome only logs on failure, so steady-state stays silent.
     #[cfg(not(target_os = "windows"))]
-    let _ = window;
+    {
+        static LAST_RESTRIP: std::sync::Mutex<Option<std::time::Instant>> =
+            std::sync::Mutex::new(None);
+        let due = LAST_RESTRIP
+            .lock()
+            .map(|mut t| {
+                let go = t.map(|p| p.elapsed().as_secs() >= 2).unwrap_or(true);
+                if go {
+                    *t = Some(std::time::Instant::now());
+                }
+                go
+            })
+            .unwrap_or(false);
+        if due {
+            strip_chrome(window);
+        }
+    }
 }
 
 /// Re-assert frameless widget chrome on an already-visible window.
@@ -1079,6 +1100,20 @@ pub fn can_open_x_display() -> bool {
     }
 }
 
+/// Native X window id of a Slint window (connectionless — read straight
+/// off the winit handle). Used for chrome work and for telling our own
+/// windows apart from the user's textbox in focus capture.
+#[cfg(not(target_os = "windows"))]
+pub fn xid_of(window: &slint::Window) -> Option<u32> {
+    let binding = window.window_handle();
+    let wh = binding.window_handle().ok()?;
+    match wh.as_raw() {
+        RawWindowHandle::Xlib(h) => Some(h.window as u32),
+        RawWindowHandle::Xcb(h) => Some(h.window.into()),
+        _ => None,
+    }
+}
+
 /// Strip window-manager chrome on X11 (XFCE/xfwm4, Cinnamon-X11, XWayland):
 /// no title bar, no taskbar/pager entry, always-on-top, sticky. Without
 /// this the pill carries an OS caption, its reported position includes the
@@ -1086,16 +1121,8 @@ pub fn can_open_x_display() -> bool {
 /// the "nothing like Windows" gap. No-op when no X window exists yet.
 #[cfg(not(target_os = "windows"))]
 pub fn strip_chrome(window: &slint::Window) {
-    let xid: u32 = {
-        let binding = window.window_handle();
-        let Ok(wh) = binding.window_handle() else {
-            return;
-        };
-        match wh.as_raw() {
-            RawWindowHandle::Xlib(h) => h.window as u32,
-            RawWindowHandle::Xcb(h) => h.window.into(),
-            _ => return,
-        }
+    let Some(xid) = xid_of(window) else {
+        return;
     };
     x11q::strip_chrome(xid);
 }
@@ -1312,8 +1339,9 @@ mod x11q {
         };
         let motif = intern(b"_MOTIF_WM_HINTS");
         let wt = intern(b"_NET_WM_WINDOW_TYPE");
-        let wt_dialog = intern(b"_NET_WM_WINDOW_TYPE_DIALOG");
+        let wt_util = intern(b"_NET_WM_WINDOW_TYPE_UTILITY");
         let ws = intern(b"_NET_WM_STATE");
+        let wm_hints = intern(b"WM_HINTS");
         let mut applied: Vec<&str> = Vec::new();
         // _MOTIF_WM_HINTS = [flags, functions, decorations, input_mode,
         // status]; flags=2 (DECORATIONS valid), decorations=0 (none).
@@ -1328,17 +1356,32 @@ mod x11q {
                 applied.push("motif-nodecor");
             }
         }
-        // DIALOG type: floats above normal windows in most WMs without the
-        // strut-reserving behaviour of DOCK (which would shift maximized
-        // windows aside for our 38x10 pill).
-        if let (Some(t), Some(d)) = (wt, wt_dialog) {
+        // WM_HINTS input=False: the widget never wants keyboard focus
+        // (Linux parity for Windows WS_EX_NOACTIVATE — showing the pill
+        // must not steal the textbox caret, or the next paste lands in us).
+        // Format [flags, input, initial_state, ...]; flags bit0 = InputHint.
+        if let Some(h) = wm_hints {
+            let hints: [u32; 9] = [1, 0, 0, 0, 0, 0, 0, 0, 0];
             if conn
-                .change_property32(PropMode::REPLACE, xid, t, AtomEnum::ATOM, &[d])
+                .change_property32(PropMode::REPLACE, xid, h, h, &hints)
                 .ok()
                 .and_then(|c| c.check().ok())
                 .is_some()
             {
-                applied.push("type-dialog");
+                applied.push("hints-noinput");
+            }
+        }
+        // UTILITY type: palette/toolbar semantics — floats above, no
+        // taskbar/pager entry, no focus grab. (DIALOG was activist: some
+        // WMs activate it on map, which read as "a window at the bottom".)
+        if let (Some(t), Some(u)) = (wt, wt_util) {
+            if conn
+                .change_property32(PropMode::REPLACE, xid, t, AtomEnum::ATOM, &[u])
+                .ok()
+                .and_then(|c| c.check().ok())
+                .is_some()
+            {
+                applied.push("type-utility");
             }
         }
         // ABOVE + SKIP_TASKBAR + SKIP_PAGER + STICKY (all desktops).

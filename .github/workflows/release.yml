@@ -69,7 +69,11 @@ jobs:
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/wcpp
           # Static link: the deb ships one self-contained binary, no .so to
           # hunt (a shared build dies with "libwhisper.so.1 not found").
-          cmake -S /tmp/wcpp -B /tmp/wcpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF
+          # Portable baseline: CI runners carry AVX2/AVX-512 and ggml bakes
+          # compile-time SIMD in — without this the binary dies SIGILL
+          # ("Illegal instruction") on older Mint CPUs. x86-64 baseline runs
+          # everywhere; Tiny is small enough that the speed cost is noise.
+          cmake -S /tmp/wcpp -B /tmp/wcpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_C_FLAGS="-march=x86-64 -mtune=generic" -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
           cmake --build /tmp/wcpp/build -j"$(nproc)" --target whisper-cli || cmake --build /tmp/wcpp/build -j"$(nproc)"
           mkdir -p quickstt-rust/target/release/tools/whisper_cpp
           BIN_W="$(find /tmp/wcpp/build -maxdepth 3 -type f -name whisper-cli | head -1)"

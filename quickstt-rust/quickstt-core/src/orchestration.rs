@@ -67,6 +67,15 @@ pub struct AppState {
     /// Dashboard catalog UI state (search + language filter, Slint-driven).
     pub catalog_search: String,
     pub catalog_lang_filter: String,
+    /// True once the segmenter VAD opened at least once in the current turn
+    /// (set on SpeechStarted/SpeechContinues, reset on Start/StopListening).
+    /// The UI ghost-turn auto-cancel reads this: same VAD that decides what
+    /// gets transcribed decides whether a trigger heard anything — a fixed
+    /// 0–100 level threshold can never do that in a loud room.
+    pub session_saw_speech: bool,
+    /// Consecutive identical ghost-singleton turn results (loop breaker).
+    pub last_ghost_text: String,
+    pub ghost_run: u32,
 }
 
 impl AppState {
@@ -102,6 +111,9 @@ impl AppState {
             hardware_summary: String::new(),
             catalog_search: String::new(),
             catalog_lang_filter: "All Languages".to_string(),
+            session_saw_speech: false,
+            last_ghost_text: String::new(),
+            ghost_run: 0,
         }
     }
 }
@@ -472,6 +484,58 @@ fn wav_tail_peak(path: &std::path::Path) -> i32 {
     peak
 }
 
+/// Fraction of the utterance TAIL that looks like speech (0.0..1.0).
+/// Loud rooms defeat every absolute peak gate (background alone sustains
+/// peaks of thousands), so this is self-normalizing: 20ms frames count as
+/// speech when their peak exceeds 3x the tail's own 10th-percentile frame
+/// peak (floor 300 against digital silence). Steady hiss/music/room tone
+/// sits near its own floor → fraction ~0; real speech bursts well above it.
+/// Trigger onset skipped (same 500ms). 1.0 on read error (fail open — a
+/// decode error must never eat a real utterance).
+#[cfg(feature = "audio-capture")]
+fn wav_speech_fraction(path: &std::path::Path) -> f32 {
+    let reader = match hound::WavReader::open(path) {
+        Ok(r) => r,
+        Err(_) => return 1.0,
+    };
+    let rate = reader.spec().sample_rate.max(1) as usize;
+    let skip = rate / 2;
+    let frame = rate / 50; // 20ms frames
+    let mut frame_peaks: Vec<i32> = Vec::new();
+    let mut cur: i32 = 0;
+    let mut n = 0usize;
+    for (i, s) in reader.into_samples::<i16>().enumerate() {
+        if i < skip {
+            continue;
+        }
+        if let Ok(v) = s {
+            cur = cur.max(v.abs() as i32);
+        }
+        n += 1;
+        if n % frame == 0 {
+            frame_peaks.push(cur);
+            cur = 0;
+        }
+    }
+    if !frame_peaks.is_empty() && n % frame != 0 {
+        frame_peaks.push(cur);
+    }
+    if frame_peaks.is_empty() {
+        return 0.0;
+    }
+    // Fast path: an absolutely quiet tail has no speech, whatever its
+    // shape (shares the peak helper's 400 floor).
+    if wav_tail_peak(path) < 400 {
+        return 0.0;
+    }
+    let mut sorted = frame_peaks.clone();
+    sorted.sort_unstable();
+    let p10 = sorted[sorted.len() / 10];
+    let floor = (p10 * 3).max(300);
+    let speech = frame_peaks.iter().filter(|&&p| p > floor).count();
+    speech as f32 / frame_peaks.len() as f32
+}
+
 #[cfg(feature = "audio-capture")]
 fn flush_pending_utterance(
     ctrl: &mut AudioControlState,
@@ -527,6 +591,22 @@ fn flush_pending_utterance(
                         t0.elapsed().as_millis(),
                         text.len()
                     );
+                    // Same ghost post-filter as the segment path: a bare
+                    // trigger tap can flush a noise-only turn that decodes
+                    // to "you"/"yeah".
+                    #[cfg(feature = "audio-capture")]
+                    let text = if is_ghost_singleton(&text)
+                        && wav_speech_fraction(&wav_path) < 0.15
+                    {
+                        info!(
+                            "ghost singleton {:?} dropped (flush, no speech structure): {:?}",
+                            text.trim(),
+                            wav_path
+                        );
+                        String::new()
+                    } else {
+                        text
+                    };
                     let _ = tx_clone.try_send(OrchestratorCommand::TextRecognized(text));
                 }
                 Err(e) => {
@@ -645,6 +725,10 @@ fn process_audio_chunk(
                 s.mode = AppMode::Recording;
                 s.status_message = "Listening...".into();
             }
+            // The segmenter's own VAD opened: this turn contains speech by
+            // the same definition that decides what gets transcribed. The
+            // UI ghost-turn auto-cancel reads this flag.
+            s.session_saw_speech = true;
         }
     }
     if let Some(SegmenterEvent::UtteranceComplete(wav_path)) = event {
@@ -704,14 +788,17 @@ fn process_audio_chunk(
                         // the clap itself, so the pre-engine silence gate
                         // passes and whisper returns "you" for the silence
                         // after it. Drop ghost singletons whose TAIL (past
-                        // the trigger onset) is near-silent — deliberate
-                        // single words carry real tail energy and pass.
+                        // the trigger onset) carries no speech STRUCTURE —
+                        // the self-normalizing speech fraction, not an
+                        // absolute peak (loud rooms sustain high peaks on
+                        // pure background). Deliberate single words burst
+                        // well above their own floor and pass.
                         #[cfg(feature = "audio-capture")]
                         let text = if is_ghost_singleton(&text)
-                            && wav_tail_peak(&wav_clone) < 400
+                            && wav_speech_fraction(&wav_clone) < 0.15
                         {
                             info!(
-                                "ghost singleton {:?} dropped (silent tail): {:?}",
+                                "ghost singleton {:?} dropped (no speech structure in tail): {:?}",
                                 text.trim(),
                                 wav_clone
                             );
@@ -945,6 +1032,7 @@ impl AppOrchestrator {
                         s.mode = AppMode::Recording;
                         s.status_message = "Listening...".into();
                         s.model_offloaded = false;
+                        s.session_saw_speech = false;
                         info!("Mode → Recording");
                     }
                     #[cfg(feature = "audio-capture")]
@@ -963,6 +1051,7 @@ impl AppOrchestrator {
                     let mut s = state.lock().unwrap();
                     s.mode = AppMode::Idle;
                     s.status_message = "Ready".into();
+                    s.session_saw_speech = false;
                     info!("Mode → Idle");
                 }
                 OrchestratorCommand::AudioLevel(level) => {
@@ -971,6 +1060,37 @@ impl AppOrchestrator {
                 }
                 OrchestratorCommand::TextRecognized(text) => {
                     let mut s = state.lock().unwrap();
+                    // Ghost-run loop breaker: the same singleton ("you",
+                    // "yeah", ...) coming back turn after turn is the engine
+                    // hallucinating on background, never dictation. First
+                    // occurrence still flows to the UI gates below; the 3rd
+                    // consecutive identical ghost is dropped here so the
+                    // "you you you ..." chain cannot accumulate. Any real
+                    // (non-ghost) text resets the run.
+                    #[cfg(feature = "audio-capture")]
+                    {
+                        let norm = text.trim().to_lowercase();
+                        if !norm.is_empty() && is_ghost_singleton(&norm) {
+                            if norm == s.last_ghost_text {
+                                s.ghost_run += 1;
+                            } else {
+                                s.last_ghost_text = norm.clone();
+                                s.ghost_run = 1;
+                            }
+                            if s.ghost_run >= 3 {
+                                info!(
+                                    "ghost run {:?} x{} dropped (loop breaker)",
+                                    norm, s.ghost_run
+                                );
+                                s.mode = AppMode::WakewordListening;
+                                s.status_message = "Listening...".into();
+                                continue;
+                            }
+                        } else if !norm.is_empty() {
+                            s.last_ghost_text.clear();
+                            s.ghost_run = 0;
+                        }
+                    }
                     if !text.trim().is_empty() {
                         if !s.transcript_buffer.is_empty() {
                             s.transcript_buffer.push('\n');
@@ -1333,13 +1453,39 @@ mod ghost_tests {
             *s = if i % 2 == 0 { 6000 } else { -6000 };
         }
         for (i, s) in pcm.iter_mut().enumerate().skip(8000).take(16000) {
+            // Syllable-like bursts: 100ms on / 100ms near-off (real speech
+            // modulates; a steady tone would read as background).
+            let gate = if (i / 1600) % 2 == 0 { 1.0 } else { 0.05 };
             let ph = (i as f32 * 220.0 * 2.0 * std::f32::consts::PI / 16000.0).sin();
-            *s = (ph * 3000.0) as i16;
+            *s = (ph * 3000.0 * gate) as i16;
         }
         let p = wav_path("clap-speech");
         write_wav(&p, &pcm);
         assert!(!wav_is_silent(&p), "speech tail must pass the gate");
         assert!(wav_tail_peak(&p) >= 400, "speech tail peak must be real");
+        assert!(
+            wav_speech_fraction(&p) >= 0.15,
+            "speech tail must carry speech structure"
+        );
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn steady_noise_has_no_speech_structure() {
+        // The loud-room case that defeats peak gates: sustained 2000-peak
+        // background (well above every absolute floor) with no bursts.
+        // Self-normalizing fraction must still read ~0.
+        let mut pcm = vec![0i16; 16000 * 2];
+        for (i, s) in pcm.iter_mut().enumerate() {
+            let ph = (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 16000.0).sin();
+            *s = (ph * 2000.0) as i16;
+        }
+        let p = wav_path("steady-noise");
+        write_wav(&p, &pcm);
+        assert!(
+            wav_speech_fraction(&p) < 0.15,
+            "steady background must not count as speech"
+        );
         std::fs::remove_file(&p).ok();
     }
 

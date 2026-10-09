@@ -69,16 +69,6 @@ pub struct WakeWordEngine {
     chunks_since_infer: u32,
     /// Consecutive dead-silence ticks (adaptive cadence below).
     quiet_ticks: u32,
-    /// Adaptive input gain (slow AGC): the community heads are level-hungry
-    /// — normal-volume speech scores <0.15 while shouts hit 0.9+. Fixed
-    /// software gain cannot cover both whisper-quiet and close-loud voices;
-    /// this tracks speech toward a reference RMS so quiet and loud phrases
-    /// land on the manifold the heads were trained on. Fast attack (half
-    /// the gap per chunk: onsets normalize within ~3 chunks) and slow
-    /// release (5%: brief pauses don't pump). Silence never reaches the
-    /// heads (energy/VAD gates run on pre-AGC levels), so boosted room
-    /// hiss cannot false-fire — the discrimination margin is structural.
-    agc_gain: f32,
     /// Throttled diagnostics: épocas since last top-score log line.
     infers_since_log: u32,
     /// Last marginal-score log (rate-limits the below-threshold line).
@@ -135,7 +125,6 @@ impl WakeWordEngine {
             user_sensitivity: 50,
             chunks_since_infer: 0,
             quiet_ticks: 0,
-            agc_gain: INPUT_GAIN,
             infers_since_log: 0,
             last_marginal_log: None,
             infers_run: 0,
@@ -191,7 +180,12 @@ impl WakeWordEngine {
         }
 
         // Software input gain (see INPUT_GAIN): every downstream stage —
-        // RMS gates, mel frontend, heads — sees boosted audio.
+        // RMS gates, mel frontend, heads — sees boosted audio. Fixed gain
+        // only (no adaptive stage): a slow-AGC experiment here multiplied on
+        // top of INPUT_GAIN (9x at start, pumping to 12x on silence),
+        // hard-clipped every chunk at ±32767, and poisoned the embedding
+        // caches with amplified hiss — all heads scored 0.000 on real
+        // phrases. Fixed 3x is the probed-safe operating point.
         let boosted: Vec<i16> = if (INPUT_GAIN - 1.0).abs() < f32::EPSILON {
             pcm_chunk.to_vec()
         } else {
@@ -200,22 +194,7 @@ impl WakeWordEngine {
                 .map(|&s| ((s as f32 * INPUT_GAIN).clamp(-32768.0, 32767.0)) as i16)
                 .collect()
         };
-        // Slow AGC toward the reference speech level (see agc_gain): the
-        // level-hunger fix. ALL gates below run on boosted (pre-AGC) levels,
-        // so silence/room hiss stays gated exactly as before — only the
-        // frontend + heads see normalized audio.
-        let rms_boosted = chunk_rms(&boosted);
-        const AGC_TARGET_RMS: f32 = 0.08;
-        let inst = (AGC_TARGET_RMS / rms_boosted.max(1e-4)).clamp(0.25, 4.0);
-        if inst > self.agc_gain {
-            self.agc_gain += (inst - self.agc_gain) * 0.5;
-        } else {
-            self.agc_gain += (inst - self.agc_gain) * 0.05;
-        }
-        let normed: Vec<i16> = boosted
-            .iter()
-            .map(|&s| ((s as f32 * self.agc_gain).clamp(-32768.0, 32767.0)) as i16)
-            .collect();
+        let pcm_chunk = &boosted;
 
         // Buffer EVERY chunk into the mel frontend (the old code only pushed
         // on inference ticks, dropping 3/4 of the audio and stretching the
@@ -227,7 +206,7 @@ impl WakeWordEngine {
         // cost drops 4× through the quiet hours (measured 56% of an older
         // Mint core at full rate). Stale hits can never accumulate: the
         // gate below clears them on every skipped tick too.
-        // NOTE: gated on boosted levels — never on AGC output.
+        let rms_boosted = chunk_rms(pcm_chunk);
         if rms_boosted < MIN_WAKE_RMS * 2.0 && !vad_speech {
             self.quiet_ticks += 1;
             if self.quiet_ticks % 4 != 0 {
@@ -237,7 +216,7 @@ impl WakeWordEngine {
         } else {
             self.quiet_ticks = 0;
         }
-        self.backend.push_audio(&normed);
+        self.backend.push_audio(pcm_chunk);
 
         // ~160ms inference cadence once the window is hot.
         self.chunks_since_infer += 1;
@@ -248,11 +227,10 @@ impl WakeWordEngine {
         // through silence and room noise, so a phrase arriving after quiet
         // scores from its first tick. Only the head runs are gated below.
         self.backend.update();
-        // Energy + VAD gates (boosted levels — never AGC output): quiet audio
-        // never reaches the ONNX heads. Saves the head runs per tick in
-        // silence and kills phantom triggers from scoring room hiss /
-        // non-speech. Loud audio always scores even when the VAD hasn't
-        // opened yet (soft onsets, VAD hangover gaps).
+        // Energy + VAD gates: quiet audio never reaches the ONNX heads. Saves
+        // the head runs per tick in silence and kills phantom triggers from
+        // scoring room hiss / non-speech. Loud audio always scores even when
+        // the VAD hasn't opened yet (soft onsets, VAD hangover gaps).
         if rms_boosted < MIN_WAKE_RMS || (!vad_speech && rms_boosted < VAD_GATE_RMS) {
             // Gate closed: drop stale hit counts so two far-apart blips can
             // never add up to a phantom wake (mirrors the C++ reference).

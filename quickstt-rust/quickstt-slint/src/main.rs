@@ -1472,34 +1472,66 @@ unsafe fn restore_typing_focus(target_hwnd: Option<isize>) {
             // arrive: 20ms loses pastes into slow (Electron/browser) text
             // boxes. 50ms is still imperceptible next to a 160ms tick.
             std::thread::sleep(std::time::Duration::from_millis(50));
+            // Verify: Windows foreground-lock can silently reject
+            // SetForegroundWindow from a background thread (the old code
+            // never checked, so Ctrl+V went to the wrong window and the
+            // dictation "vanished").
+            if GetForegroundWindow() != thwnd {
+                log_line("paste focus restore rejected by foreground-lock (Ctrl+V may miss)");
+            }
+        } else {
+            log_line("paste target window gone, pasting into current focus");
         }
     }
 }
 
 #[cfg(target_os = "windows")]
-fn copy_to_windows_clipboard(text: &str) {
+fn copy_to_windows_clipboard(text: &str) -> bool {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 
-    unsafe {
-        if OpenClipboard(None).is_ok() {
-            let _ = EmptyClipboard();
-            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-            let byte_len = wide.len() * 2;
-            if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, byte_len) {
-                let ptr = GlobalLock(h);
-                if !ptr.is_null() {
-                    std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, byte_len);
+    // The clipboard is a shared lock: another app can hold it open exactly
+    // when we paste (the old code tried once and silently kept going, so
+    // Ctrl+V pasted stale content and the dictation "vanished").
+    for attempt in 0..6 {
+        unsafe {
+            if OpenClipboard(None).is_ok() {
+                let ok = (|| {
+                    let _ = EmptyClipboard();
+                    let wide: Vec<u16> =
+                        text.encode_utf16().chain(std::iter::once(0)).collect();
+                    let byte_len = wide.len() * 2;
+                    let h = GlobalAlloc(GMEM_MOVEABLE, byte_len).ok()?;
+                    let ptr = GlobalLock(h);
+                    if ptr.is_null() {
+                        return None;
+                    }
+                    std::ptr::copy_nonoverlapping(
+                        wide.as_ptr() as *const u8,
+                        ptr as *mut u8,
+                        byte_len,
+                    );
                     let _ = GlobalUnlock(h);
-                    let _ = SetClipboardData(13, HANDLE(h.0 as isize));
+                    SetClipboardData(13, HANDLE(h.0 as isize)).ok()?;
+                    Some(())
+                })();
+                let _ = CloseClipboard();
+                if ok.is_some() {
+                    return true;
                 }
+                log_line("clipboard write failed after open (global alloc/set failed)");
+                return false;
             }
-            let _ = CloseClipboard();
+        }
+        if attempt < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
+    log_line("clipboard busy: OpenClipboard failed 6x, paste skipped (text kept in history)");
+    false
 }
 
 #[cfg(target_os = "windows")]
@@ -1571,8 +1603,12 @@ unsafe fn paste_via_ctrl_v(target_hwnd: Option<isize>) {
         },
     ];
 
-    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    log_line("SendInput injected fast paste (Ctrl+V)");
+    let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    if sent == 0 {
+        log_line("SendInput injected 0/4 paste events (input blocked?)");
+    } else {
+        log_line("SendInput injected fast paste (Ctrl+V)");
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1632,6 +1668,33 @@ fn capture_current_fg_window(target: &Arc<Mutex<Option<isize>>>) {
     }
 }
 #[cfg(not(target_os = "windows"))]
+static OWN_XIDS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+fn note_own_xid(xid: Option<u32>) {
+    if let Some(x) = xid {
+        if let Ok(mut v) = OWN_XIDS.lock() {
+            if !v.contains(&x) {
+                v.push(x);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+fn is_own_xid(xid: i64) -> bool {
+    if xid <= 0 {
+        return false;
+    }
+    OWN_XIDS
+        .lock()
+        .map(|v| v.contains(&(xid as u32)))
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "windows"))]
 fn capture_current_fg_window(target: &Arc<Mutex<Option<isize>>>) {
     // X11: the focused XID at session/PTT start, so the paste restores it
     // after our pill took focus. Wayland has no global focus query — the
@@ -1645,7 +1708,11 @@ fn capture_current_fg_window(target: &Arc<Mutex<Option<isize>>>) {
     {
         if let Ok(s) = String::from_utf8(out.stdout) {
             if let Ok(xid) = s.trim().parse::<i64>() {
-                if xid > 0 {
+                // Our own pill/menus can hold focus on Linux (no NOACTIVATE
+                // equivalent before the WM_HINTS input=False hint lands on
+                // every WM): never record ourselves as the paste target, or
+                // dictation gets typed back into our own window.
+                if xid > 0 && !is_own_xid(xid) {
                     if let Ok(mut lock) = target.lock() {
                         *lock = Some(xid as isize);
                     }
@@ -1752,9 +1819,13 @@ fn deliver_transcription_output(delta: &str, output_mode: u32, target_hwnd: Opti
             ));
             #[cfg(target_os = "windows")]
             {
-                copy_to_windows_clipboard(&text);
-                unsafe {
-                    paste_via_ctrl_v(target_hwnd);
+                // Skip the keystroke when the clipboard never took the text:
+                // injecting Ctrl+V then pastes stale content (the "paste
+                // lost my dictation" report). Text stays in history/paste-row.
+                if copy_to_windows_clipboard(&text) {
+                    unsafe {
+                        paste_via_ctrl_v(target_hwnd);
+                    }
                 }
             }
             #[cfg(not(target_os = "windows"))]
@@ -3578,6 +3649,11 @@ fn dock_hop(
     let mut last_xstrip = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
+    // Last own-XID census (Linux focus-capture filter, see below).
+    #[cfg(target_os = "linux")]
+    let mut last_ownxids = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(10))
+        .unwrap_or_else(std::time::Instant::now);
     let mut last_upper_w = 184i32;
     let mut last_phase = -1i32;
     let mut logged_phase = -1i32;
@@ -3783,6 +3859,27 @@ fn dock_hop(
             {
                 last_xstrip = std::time::Instant::now();
                 widget_platform::strip_chrome(p.window());
+            }
+            // Own-XID census (~5s): learn our pill/menu/dashboard XIDs so
+            // focus capture never mistakes us for the user's textbox (the
+            // paste would land back in our own window).
+            #[cfg(target_os = "linux")]
+            if last_ownxids.elapsed() > std::time::Duration::from_secs(5) {
+                last_ownxids = std::time::Instant::now();
+                note_own_xid(widget_platform::xid_of(p.window()));
+                note_own_xid(widget_platform::xid_of(d.window()));
+                if let Some(o) = overlay_w.upgrade() {
+                    note_own_xid(widget_platform::xid_of(o.window()));
+                }
+                if let Some(tb) = textboard_w.upgrade() {
+                    note_own_xid(widget_platform::xid_of(tb.window()));
+                }
+                if let Some(m) = pillmenu_w.upgrade() {
+                    note_own_xid(widget_platform::xid_of(m.window()));
+                }
+                if let Some(f) = flyout_w.upgrade() {
+                    note_own_xid(widget_platform::xid_of(f.window()));
+                }
             }
             if p.window().is_visible() && !widget_platform::has_hwnd(p.window()) {
                 note("pill visible without HWND (strip skipped)");
@@ -4631,12 +4728,13 @@ fn dock_hop(
                 // Ghost-turn auto-cancel: a clap/wakeword that opens a turn
                 // but is followed by silence would otherwise transcribe the
                 // trigger noise into "you"/"yeah" and type it. If 2s in no
-                // transcript has arrived AND post-onset levels stayed quiet,
+                // transcript has arrived AND the segmenter VAD never opened,
                 // close the turn silently — no engine call, no text, no
-                // ghost. Deliberate speech always raises speech_peak first
-                // (a spoken word sustains level past the 800ms onset blind),
-                // and held PTT/mic turns are never cancelled (explicit user
-                // intent). Mirrors the "Nothing detected" <10 semantics.
+                // ghost. Deliberate speech always opens the VAD first (it is
+                // the same VAD that decides what gets transcribed), and held
+                // PTT/mic turns are never cancelled (explicit user intent).
+                // (A fixed 0–100 level threshold was tried here and never
+                // fired in loud rooms — background alone reads >10.)
                 if recording
                     && !transcribing
                     && !ptt
@@ -4644,7 +4742,7 @@ fn dock_hop(
                     && std::time::Instant::now().duration_since(sess_start_t)
                         > std::time::Duration::from_millis(2000)
                     && s.transcript_buffer.len() == sess_start_len
-                    && speech_peak < 10
+                    && !s.session_saw_speech
                 {
                     log_line("session auto-cancelled (no speech after trigger)");
                     let _ = tx_cmd_timer.try_send(OrchestratorCommand::StopListening);
