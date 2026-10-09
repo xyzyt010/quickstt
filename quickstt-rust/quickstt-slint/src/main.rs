@@ -4172,6 +4172,7 @@ fn dock_hop(
                     widget_platform::restack_topmost(p.window());
                 } else if cmd == "HIDE" {
                     let _ = p.hide();
+                    log_line("diag: pill hidden via ipc (event loop must survive this)");
                 } else if cmd == "TOGGLE" {
                     toggle_pill_widget(&pill_w, &state_timer, "ipc");
                 } else if cmd == "DASH" {
@@ -6221,6 +6222,7 @@ fn dock_hop(
     if let Err(e) = slint::run_event_loop() {
         log_line(&format!("event loop ended with error: {e}"));
     }
+    log_line("EVENT LOOP RETURNED — main exiting");
     Ok(())
 }
 
