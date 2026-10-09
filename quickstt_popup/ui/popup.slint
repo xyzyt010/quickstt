@@ -1,0 +1,438 @@
+import { Button } from "std-widgets.slint";
+
+export component PopupOverlay inherits Window {
+    background: transparent;
+    no-frame: true;
+    always-on-top: true;
+
+    // State properties passed from Rust
+    in property <int> overlay-state: 1; // 0=Hidden, 1=Idle, 2=Recording, 3=Transcribing, 4=Done
+    in property <int> dock-side: 0;      // 0=Bottom, 1=Left, 2=Right
+    in property <float> morph-progress: 0.0; // 0.0=micro pill, 1.0=full dictate capsules
+    in property <string> live-text: "";
+    in property <bool> has-live-text: false;
+    in property <[float]> waveform-levels: [0.1, 0.2, 0.4, 0.8, 0.5, 0.3, 0.2, 0.1];
+    in property <bool> no-signal-shown: false;
+    in property <float> no-signal-progress: 1.0;
+    in property <bool> is-context-menu-open: false;
+
+    // Callbacks to Rust
+    callback mic-clicked();
+    callback cancel-clicked();
+    callback copy-clicked();
+    callback hover-changed(bool);
+    callback request-drag-dock(int);
+    callback select-mic-clicked();
+    callback troubleshoot-clicked();
+
+    // Base Dimensions
+    default-font-family: "Segoe UI";
+
+    // Main interaction touch/mouse area
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: default;
+        pointer-event(event) => {
+            // Forward mouse events if needed
+        }
+        moved => {
+            root.hover-changed(true);
+        }
+    }
+
+    // ─── 1. IDLE & MORPH STATE (overlay_state == 1) ────────────────────────
+    if root.overlay-state == 1 : Rectangle {
+        width: 100%;
+        height: 100%;
+
+        // A. Idle Micro Pill Handle (morph-progress <= 0.08)
+        if root.morph-progress <= 0.08 : Rectangle {
+            width: 100%;
+            height: 100%;
+
+            // Bottom Dock Handle (64px x 8px)
+            if root.dock-side == 0 : Rectangle {
+                x: (parent.width - 64px) / 2;
+                y: (parent.height - 8px) / 2;
+                width: 64px;
+                height: 8px;
+                border-radius: 4px;
+                background: #000000;
+                border-width: 1px;
+                border-color: rgba(255, 255, 255, 0.80);
+            }
+
+            // Left Dock Handle (8px x 40px)
+            if root.dock-side == 1 : Rectangle {
+                x: 4px;
+                y: (parent.height - 40px) / 2;
+                width: 8px;
+                height: 40px;
+                border-radius: 4px;
+                background: #000000;
+                border-width: 1px;
+                border-color: rgba(255, 255, 255, 0.80);
+            }
+
+            // Right Dock Handle (8px x 40px)
+            if root.dock-side == 2 : Rectangle {
+                x: parent.width - 12px;
+                y: (parent.height - 40px) / 2;
+                width: 8px;
+                height: 40px;
+                border-radius: 4px;
+                background: #000000;
+                border-width: 1px;
+                border-color: rgba(255, 255, 255, 0.80);
+            }
+        }
+
+        // B. Morphed Side-by-Side Capsules (morph-progress > 0.08)
+        if root.morph-progress > 0.08 : Rectangle {
+            width: 100%;
+            height: 100%;
+            opacity: root.morph-progress;
+
+            // Bottom Dock Layout (Centered [Text Capsule] [Mic Pill])
+            if root.dock-side == 0 : HorizontalLayout {
+                alignment: center;
+                spacing: 4px;
+
+                // Snug Text Capsule
+                text-capsule-bottom := Rectangle {
+                    height: 32px;
+                    border-radius: 16px;
+                    background: #000000;
+                    border-width: 1px;
+                    border-color: rgba(255, 255, 255, 0.40);
+                    clip: true;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        alignment: center;
+                        spacing: 0px;
+
+                        Text {
+                            text: "Dictate ";
+                            color: #FFFFFF;
+                            font-size: 13px;
+                            font-weight: 400;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: "Ctrl + Space";
+                            color: #FFFFFF;
+                            font-size: 13px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Vertical Mic Capsule with Authentic SVG Asset
+                mic-pill-bottom := Rectangle {
+                    width: 24px;
+                    height: 34px;
+                    border-radius: 12px;
+                    background: #000000;
+                    border-width: 1px;
+                    border-color: rgba(255, 255, 255, 0.45);
+
+                    Image {
+                        source: @image-url("Untitled-1.svg");
+                        width: 13px;
+                        height: 18px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.mic-clicked();
+                        }
+                    }
+                }
+            }
+
+            // Left Dock Layout ([Mic Pill] [Text Capsule])
+            if root.dock-side == 1 : HorizontalLayout {
+                alignment: start;
+                padding-left: 4px;
+                spacing: 4px;
+
+                // Vertical Mic Capsule
+                Rectangle {
+                    width: 24px;
+                    height: 34px;
+                    border-radius: 12px;
+                    background: #000000;
+                    border-width: 1px;
+                    border-color: rgba(255, 255, 255, 0.45);
+
+                    Image {
+                        source: @image-url("Untitled-1.svg");
+                        width: 13px;
+                        height: 18px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.mic-clicked();
+                        }
+                    }
+                }
+
+                // Snug Text Capsule
+                Rectangle {
+                    height: 32px;
+                    border-radius: 16px;
+                    background: #000000;
+                    border-width: 1px;
+                    border-color: rgba(255, 255, 255, 0.40);
+                    clip: true;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        alignment: center;
+                        spacing: 0px;
+
+                        Text {
+                            text: "Dictate ";
+                            color: #FFFFFF;
+                            font-size: 13px;
+                            font-weight: 400;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: "Ctrl + Space";
+                            color: #FFFFFF;
+                            font-size: 13px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // Right Dock Layout ([Text Capsule] [Mic Pill])
+            if root.dock-side == 2 : HorizontalLayout {
+                alignment: end;
+                padding-right: 4px;
+                spacing: 4px;
+
+                // Snug Text Capsule
+                Rectangle {
+                    height: 32px;
+                    border-radius: 16px;
+                    background: #000000;
+                    border-width: 1px;
+                    border-color: rgba(255, 255, 255, 0.40);
+                    clip: true;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        alignment: center;
+                        spacing: 0px;
+
+                        Text {
+                            text: "Dictate ";
+                            color: #FFFFFF;
+                            font-size: 13px;
+                            font-weight: 400;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: "Ctrl + Space";
+                            color: #FFFFFF;
+                            font-size: 13px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Vertical Mic Capsule
+                Rectangle {
+                    width: 24px;
+                    height: 34px;
+                    border-radius: 12px;
+                    background: #000000;
+                    border-width: 1px;
+                    border-color: rgba(255, 255, 255, 0.45);
+
+                    Image {
+                        source: @image-url("Untitled-1.svg");
+                        width: 13px;
+                        height: 18px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.mic-clicked();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ─── 2. RECORDING STATE (overlay_state == 2) ───────────────────────────
+    if root.overlay-state == 2 : VerticalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 6px;
+        alignment: end;
+
+        // Live Text Card (if text active)
+        if root.has-live-text : Rectangle {
+            border-radius: 10px;
+            background: #000000;
+            border-width: 1px;
+            border-color: rgba(255, 255, 255, 0.35);
+            min-height: 48px;
+
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                padding-top: 10px;
+                padding-bottom: 10px;
+
+                Text {
+                    text: root.live-text;
+                    color: #FFFFFF;
+                    font-size: 14px;
+                    font-weight: 400;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Control Pill Bar
+        Rectangle {
+            height: 44px;
+            border-radius: 22px;
+            background: #000000;
+            border-width: 1px;
+            border-color: rgba(255, 255, 255, 0.35);
+
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 14px;
+                alignment: space-between;
+
+                // Pulsing Mic indicator
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 8px;
+
+                    Rectangle {
+                        y: (parent.height - 10px) / 2;
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: #FF334B;
+                    }
+
+                    Text {
+                        text: "Listening…";
+                        color: #FFFFFF;
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Waveform Bars
+                HorizontalLayout {
+                    spacing: 3px;
+                    alignment: center;
+
+                    for level[index] in root.waveform-levels : Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: 4px;
+                        height: max(4px, min(20px, level * 22px));
+                        border-radius: 2px;
+                        background: #FFFFFF;
+                    }
+                }
+
+                // Cancel Button (×)
+                Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 11px;
+                    background: #000000;
+                    border-width: 1px;
+                    border-color: rgba(255, 255, 255, 0.40);
+
+                    Text {
+                        text: "×";
+                        color: #FFFFFF;
+                        font-size: 15px;
+                        font-weight: 700;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2 - 1px;
+                    }
+
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.cancel-clicked();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ─── 3. TRANSCRIBING STATE (overlay_state == 3) ────────────────────────
+    if root.overlay-state == 3 : Rectangle {
+        height: 44px;
+        border-radius: 22px;
+        background: #000000;
+        border-width: 1px;
+        border-color: rgba(255, 255, 255, 0.35);
+
+        HorizontalLayout {
+            padding-left: 20px;
+            padding-right: 20px;
+            alignment: center;
+            spacing: 12px;
+
+            Text {
+                text: "Transcribing…";
+                color: #FFFFFF;
+                font-size: 13px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                width: 60px;
+                height: 4px;
+                border-radius: 2px;
+                background: rgba(255, 255, 255, 0.80);
+            }
+        }
+    }
+}
