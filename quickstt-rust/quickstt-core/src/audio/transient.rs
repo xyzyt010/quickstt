@@ -44,6 +44,15 @@ pub fn chunk_peak(samples: &[i16]) -> f64 {
         .fold(0.0f64, f64::max)
 }
 
+/// Voiced-frame test shared by the onset veto and the arbiter legs: a
+/// harmonic vowel frame (low ZCR + low spectral ratio) with real energy.
+/// The energy gate matters: near-silence scores "voiced" on both axes
+/// (ZCR 0, ratio 0), so quiet tails skip the veto and only loud voiced
+/// frames (vowels, throat clears) block.
+pub fn is_voiced(peak: f64, zcr: f64, spectral: f64) -> bool {
+    peak > 800.0 && zcr < 0.10 && spectral < 5.0
+}
+
 /// Two-chunk confirmation arbiter: a detected onset is HELD, not acted on.
 /// It only becomes actionable if the next TWO chunks decay like an isolated
 /// impulse (a clap) — fast collapse, not sustained voice energy:
@@ -55,6 +64,9 @@ pub fn chunk_peak(samples: &[i16]) -> f64 {
 ///   2. chunk+2 peak < 25% of the onset peak (the voice-pause phantom killer:
 ///      a plosive+vowel passes leg 1 on a narrow pause, but the vowel still
 ///      roars at +160ms while clap reverb has collapsed).
+/// Either leg is vetoed outright when its chunk is VOICED (a vowel frame is
+/// never clap residue — this is what stops loud speech syllables from
+/// popping the widget on spoken plosives).
 /// Costs two chunks (~160ms) of latency — imperceptible for a clap trigger.
 #[derive(Default)]
 pub struct TransientArbiter {
@@ -76,18 +88,27 @@ impl TransientArbiter {
         self.confirm1 = None;
     }
 
-    /// Feed this chunk's detector result + peak + burst width. Returns the
-    /// kind to ACT on (confirmed two chunks back), if any.
+    /// Feed this chunk's detector result + peak + burst width + voicing.
+    /// Returns the kind to ACT on (confirmed two chunks back), if any.
+    /// `voiced` should come from [`is_voiced`] on the CURRENT chunk: a loud
+    /// vowel frame at either leg vetoes (spoken syllables never confirm),
+    /// while quiet tails skip the veto via the energy gate inside.
     pub fn update(
         &mut self,
         detected: Option<TransientKind>,
         chunk_peak: f64,
         chunk_width: usize,
+        voiced: bool,
     ) -> Option<TransientKind> {
         let mut fire = None;
-        // Leg 2: the chunk after a passed leg 1 must have collapsed.
+        // Leg 2: the chunk after a passed leg 1 must have collapsed — and
+        // must not be voiced (a vowel at +160ms is speech, not reverb).
         if let Some((kind, onset_peak)) = self.confirm1.take() {
-            if chunk_peak < onset_peak * 0.25 {
+            if voiced {
+                tracing::info!(
+                    "Clap onset vetoed at leg 2 (voiced tail — speech, not reverb)"
+                );
+            } else if chunk_peak < onset_peak * 0.25 {
                 fire = Some(kind);
             } else {
                 // Vetoed: energy sustained into +160ms (vowel after a voice
@@ -100,26 +121,33 @@ impl TransientArbiter {
             }
         }
         // Leg 1: the chunk after the onset must decay fast in level and
-        // stay compact in shape.
+        // stay compact in shape — and must not be voiced (plosive straight
+        // into a vowel is speech, however quiet the boundary chunk).
         if let Some((kind, onset_peak, onset_width)) = self.pending.take() {
-            let clipped = onset_peak >= 32000.0;
-            let quiet_level = if clipped {
-                chunk_peak < 20000.0
-            } else {
-                chunk_peak < onset_peak * 0.5
-            };
-            let decayed_shape = chunk_width <= onset_width.saturating_mul(3).max(1);
-            if quiet_level && decayed_shape {
-                self.confirm1 = Some((kind, onset_peak));
-            } else {
-                // Vetoed: sustained sound — not an isolated clap.
+            if voiced {
                 tracing::info!(
-                    "Clap onset vetoed at leg 1 (follow-up peak={:.0} vs onset={:.0}, width={} vs onset={})",
-                    chunk_peak,
-                    onset_peak,
-                    chunk_width,
-                    onset_width
+                    "Clap onset vetoed at leg 1 (voiced follow-up — speech)"
                 );
+            } else {
+                let clipped = onset_peak >= 32000.0;
+                let quiet_level = if clipped {
+                    chunk_peak < 20000.0
+                } else {
+                    chunk_peak < onset_peak * 0.5
+                };
+                let decayed_shape = chunk_width <= onset_width.saturating_mul(3).max(1);
+                if quiet_level && decayed_shape {
+                    self.confirm1 = Some((kind, onset_peak));
+                } else {
+                    // Vetoed: sustained sound — not an isolated clap.
+                    tracing::info!(
+                        "Clap onset vetoed at leg 1 (follow-up peak={:.0} vs onset={:.0}, width={} vs onset={})",
+                        chunk_peak,
+                        onset_peak,
+                        chunk_width,
+                        onset_width
+                    );
+                }
             }
         }
         if let Some(kind) = detected {
@@ -501,22 +529,32 @@ mod tests {
         let mut a = TransientArbiter::new();
         // Isolated: loud onset, decayed leg 1, collapsed leg 2 → fires on
         // the third chunk (two-chunk confirmation).
-        assert_eq!(a.update(Some(TransientKind::Clap), 5000.0, 300), None);
-        assert_eq!(a.update(None, 800.0, 60), None, "leg 1 only holds");
         assert_eq!(
-            a.update(None, 100.0, 10),
+            a.update(Some(TransientKind::Clap), 5000.0, 300, false),
+            None
+        );
+        assert_eq!(
+            a.update(None, 800.0, 60, false),
+            None,
+            "leg 1 only holds"
+        );
+        assert_eq!(
+            a.update(None, 100.0, 10, false),
             Some(TransientKind::Clap),
             "isolated impulse must confirm"
         );
         // Sustained: onset then still loud → vetoed at leg 1.
-        assert_eq!(a.update(Some(TransientKind::Clap), 5000.0, 300), None);
         assert_eq!(
-            a.update(None, 4000.0, 250),
+            a.update(Some(TransientKind::Clap), 5000.0, 300, false),
+            None
+        );
+        assert_eq!(
+            a.update(None, 4000.0, 250, false),
             None,
             "sustained sound must veto the onset"
         );
         // After a veto the arbiter is empty, not stuck.
-        assert_eq!(a.update(None, 100.0, 10), None);
+        assert_eq!(a.update(None, 100.0, 10, false), None);
     }
 
     #[test]
@@ -525,18 +563,28 @@ mod tests {
         // Voice-high phantom (from the live log): onset 8344/w192, pause
         // 1305/w523 — passes leg 1 (1305 < 4172, 523 <= 576) but the vowel
         // still roars at +160ms: vetoed at leg 2.
-        assert_eq!(a.update(Some(TransientKind::Clap), 8344.0, 192), None);
-        assert_eq!(a.update(None, 1305.0, 523), None, "leg 1 holds");
         assert_eq!(
-            a.update(None, 8000.0, 500),
+            a.update(Some(TransientKind::Clap), 8344.0, 192, false),
+            None
+        );
+        assert_eq!(
+            a.update(None, 1305.0, 523, false),
+            None,
+            "leg 1 holds"
+        );
+        assert_eq!(
+            a.update(None, 8000.0, 500, false),
             None,
             "sustained vowel at +160ms must veto"
         );
         // Real clap: wide burst, decayed narrow tail → fires.
-        assert_eq!(a.update(Some(TransientKind::Clap), 6000.0, 400), None);
-        assert_eq!(a.update(None, 900.0, 80), None, "leg 1 holds");
         assert_eq!(
-            a.update(None, 200.0, 20),
+            a.update(Some(TransientKind::Clap), 6000.0, 400, false),
+            None
+        );
+        assert_eq!(a.update(None, 900.0, 80, false), None, "leg 1 holds");
+        assert_eq!(
+            a.update(None, 200.0, 20, false),
             Some(TransientKind::Clap),
             "decayed tail must confirm"
         );
@@ -548,27 +596,73 @@ mod tests {
         // reverb keeps leg-1 tails hot and wide — the two-chunk rule
         // must fire on all of them.
         let mut a = TransientArbiter::new();
-        assert_eq!(a.update(Some(TransientKind::Clap), 3446.0, 186), None);
-        assert_eq!(a.update(None, 465.0, 413), None);
         assert_eq!(
-            a.update(None, 100.0, 50),
+            a.update(Some(TransientKind::Clap), 3446.0, 186, false),
+            None
+        );
+        assert_eq!(a.update(None, 465.0, 413, false), None);
+        assert_eq!(
+            a.update(None, 100.0, 50, false),
             Some(TransientKind::Clap),
             "reverb-wide tail must still confirm"
         );
-        assert_eq!(a.update(Some(TransientKind::Clap), 4208.0, 122), None);
-        assert_eq!(a.update(None, 1441.0, 69), None);
         assert_eq!(
-            a.update(None, 300.0, 40),
+            a.update(Some(TransientKind::Clap), 4208.0, 122, false),
+            None
+        );
+        assert_eq!(a.update(None, 1441.0, 69, false), None);
+        assert_eq!(
+            a.update(None, 300.0, 40, false),
             Some(TransientKind::Clap),
             "hot early reflection must still confirm"
         );
         // Clipped mic rail: ratios meaningless, absolute leg-1 bar applies.
-        assert_eq!(a.update(Some(TransientKind::Clap), 32767.0, 211), None);
-        assert_eq!(a.update(None, 17795.0, 155), None);
         assert_eq!(
-            a.update(None, 3000.0, 100),
+            a.update(Some(TransientKind::Clap), 32767.0, 211, false),
+            None
+        );
+        assert_eq!(a.update(None, 17795.0, 155, false), None);
+        assert_eq!(
+            a.update(None, 3000.0, 100, false),
             Some(TransientKind::Clap),
             "clipped onset must confirm on collapsed leg 2"
+        );
+    }
+
+    #[test]
+    fn arbiter_vetoes_voiced_legs() {
+        // Spoken "tuh": unvoiced plosive onset, then a loud VOICED vowel at
+        // leg 1 — vetoed there even though the level/width pass.
+        let mut a = TransientArbiter::new();
+        assert_eq!(
+            a.update(Some(TransientKind::Clap), 9000.0, 150, false),
+            None
+        );
+        assert_eq!(
+            a.update(None, 2500.0, 300, true),
+            None,
+            "voiced leg 1 (vowel) must veto"
+        );
+        assert_eq!(a.update(None, 100.0, 10, false), None);
+        // Same onset, unvoiced pause at leg 1, voiced vowel at leg 2 —
+        // vetoed at leg 2.
+        assert_eq!(
+            a.update(Some(TransientKind::Clap), 9000.0, 150, false),
+            None
+        );
+        assert_eq!(a.update(None, 2000.0, 200, false), None);
+        assert_eq!(
+            a.update(None, 6000.0, 500, true),
+            None,
+            "voiced leg 2 (vowel) must veto"
+        );
+        // Quiet tails skip the voiced veto via the energy gate inside
+        // is_voiced — tested directly too.
+        assert!(!is_voiced(100.0, 0.0, 0.0), "silence must not count voiced");
+        assert!(is_voiced(6000.0, 0.05, 2.0), "loud vowel must count voiced");
+        assert!(
+            !is_voiced(6000.0, 0.4, 12.0),
+            "broadband burst must not count voiced"
         );
     }
 }

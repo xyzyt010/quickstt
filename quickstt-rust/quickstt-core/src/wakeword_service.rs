@@ -13,7 +13,8 @@
 
 use crate::audio::normalize::InputNormalizer;
 use crate::audio::transient::{
-    chunk_peak, TransientArbiter, TransientDetector, TRANSIENT_DISABLED, TRANSIENT_START,
+    chunk_peak, is_voiced, TransientArbiter, TransientDetector,
+    TRANSIENT_DISABLED, TRANSIENT_START,
     TRANSIENT_STOP,
 };
 use crate::audio::vad::EnergyVad;
@@ -283,11 +284,11 @@ fn process_audio_chunk(
     orchestrator_tx: &tmpsc::Sender<OrchestratorCommand>,
     running: &Arc<AtomicBool>,
 ) -> bool {
-    // Clap first: detections go through the one-chunk arbiter: only
+    // Clap first: detections go through the two-chunk arbiter: only
     // ISOLATED impulses act, while sustained sounds (speech syllables,
-    // laughter, coughing fits) are vetoed on the follow-up chunk. A clap's
-    // tail must not score as a wakeword, so suppress the engine briefly on
-    // every detection.
+    // laughter, coughing fits) are vetoed on the follow-up chunks (level,
+    // shape, or voicing). A clap's tail must not score as a wakeword, so
+    // suppress the engine briefly on every detection.
     // Background handles START (idle → listen); STOP is handled in the
     // foreground thread, which owns the mic while a session is live.
     // The level meter below always runs regardless of the clap action.
@@ -310,7 +311,11 @@ fn process_audio_chunk(
                 width
             );
         }
-        if let Some(kind) = arbiter.update(detected, chunk_peak(chunk), transient.last_stats().6) {
+        if let Some(kind) = {
+            let st = transient.last_stats();
+            let peak = chunk_peak(chunk);
+            arbiter.update(detected, peak, st.6, is_voiced(peak, st.3, st.4))
+        } {
             arbiter.reset();
             if *transient_action == TRANSIENT_START {
                 // NOTE: `last_stats()` here is the QUIET confirmation chunk

@@ -84,6 +84,10 @@ fn menu_action(
                 widget_platform::restack_topmost(p.window());
                 if let Ok(mut s) = state.lock() {
                     s.widget_visible = true;
+                    s.settings.show_widget = true;
+                    if let Err(e) = s.settings.save_all() {
+                        log_line(&format!("show_widget persist failed: {e}"));
+                    }
                 }
             }
         }
@@ -93,6 +97,10 @@ fn menu_action(
                 let _ = p.hide();
                 if let Ok(mut s) = state.lock() {
                     s.widget_visible = false;
+                    s.settings.show_widget = false;
+                    if let Err(e) = s.settings.save_all() {
+                        log_line(&format!("show_widget persist failed: {e}"));
+                    }
                 }
             }
         }
@@ -117,6 +125,10 @@ fn toggle_pill_widget(
             let _ = p.hide();
             if let Ok(mut s) = state.lock() {
                 s.widget_visible = false;
+                s.settings.show_widget = false;
+                if let Err(e) = s.settings.save_all() {
+                    log_line(&format!("show_widget persist failed: {e}"));
+                }
             }
         } else {
             log_line(&format!("tray {why}: show Rust pill widget"));
@@ -124,6 +136,10 @@ fn toggle_pill_widget(
             widget_platform::restack_topmost(p.window());
             if let Ok(mut s) = state.lock() {
                 s.widget_visible = true;
+                s.settings.show_widget = true;
+                if let Err(e) = s.settings.save_all() {
+                    log_line(&format!("show_widget persist failed: {e}"));
+                }
             }
         }
     }
@@ -1176,6 +1192,7 @@ fn adopt_or_forwarded(child: &mut std::process::Child) -> bool {
 pub fn quit_app() {
     QUITTING.store(true, std::sync::atomic::Ordering::SeqCst);
     log_line("quit: stopping QuickSTT and killing child processes");
+    slint::quit_event_loop().ok();
     kill_image("QuickSTT_App.exe");
     kill_image("stt_service.exe");
     kill_image("quickstt_popup.exe");
@@ -2106,6 +2123,20 @@ fn main() -> QuickSttResult<()> {
         set_footprint(&pill, cw, ch);
         pill.set_vertical(vert);
         pill.set_mirror(dock == 2);
+        // Restored visibility (default shown): a hidden pill stays hidden —
+        // the app, tray, hotkeys and wakewords keep running either way, and
+        // any trigger re-shows within a tick.
+        let start_hidden = state
+            .lock()
+            .map(|mut s| {
+                s.widget_visible = s.settings.show_widget;
+                !s.settings.show_widget
+            })
+            .unwrap_or(false);
+        if start_hidden {
+            let _ = pill.hide();
+            log_line("widget starts hidden (restored preference)");
+        }
         if let Ok(s) = state.lock() {
             log_line(&format!(
                 "settings restored: model='{}' wake='{}' sens={}/{} clap={} offload={}/{}s dock={dock} pos=({x},{y})",
@@ -4797,6 +4828,16 @@ fn dock_hop(
                     *mlock(&tb_closed_timer) = false;
                     *mlock(&tb_full_timer) = false;
                     log_line("session start");
+                    // Trigger-opened turns (wakeword/clap — not held PTT or
+                    // mic tap) get a proactive coaching hint: there is no
+                    // beep, so users otherwise say the wakeword, wait, and
+                    // meet the auto-cancel. "Speak your command" teaches the
+                    // one-breath flow in-product.
+                    if !ptt && !mic_on {
+                        alert_msg = "Speak your command…".to_string();
+                        alert_until =
+                            now + std::time::Duration::from_millis(3000);
+                    }
                 }
                 if live_session {
                     sess_peak = sess_peak.max(s.audio_level as u32);
@@ -6173,7 +6214,13 @@ fn dock_hop(
         }
     }
 
-    pill.run().unwrap();
+    // Full event loop — NOT pill.run(): run() returns when its window
+    // hides, which made Show/Hide quit the whole app (tray and all).
+    // run_event_loop lives until quit_event_loop (see quit_app) no matter
+    // how many windows hide — hiding the pill only hides the pill.
+    if let Err(e) = slint::run_event_loop() {
+        log_line(&format!("event loop ended with error: {e}"));
+    }
     Ok(())
 }
 

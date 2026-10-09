@@ -113,6 +113,11 @@ pub struct Settings {
     /// Selected microphone (OS device name). Empty = system default input.
     #[serde(default)]
     pub selected_microphone: String,
+    /// Widget visibility (Show/Hide). Default shown; toggles persist across
+    /// restarts/updates. Hidden only hides the pill window — the app, tray,
+    /// hotkeys and wakewords keep running, and any trigger re-shows it.
+    #[serde(default = "default_show_widget")]
+    pub show_widget: bool,
     /// extra unknown keys preserved for forward compat
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, String>,
@@ -133,6 +138,7 @@ fn default_ww_phrase_enabled() -> bool { true }
 fn default_snap_action() -> u32 { 0 }
 fn default_transient_action() -> u32 { 0 }
 fn default_selected_language() -> String { "Auto".to_string() }
+fn default_show_widget() -> bool { true }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -203,6 +209,7 @@ impl Default for Settings {
             snap_action: 0,
             transient_action: 0,
             selected_microphone: String::new(),
+            show_widget: true,
             extra: HashMap::new(),
         }
     }

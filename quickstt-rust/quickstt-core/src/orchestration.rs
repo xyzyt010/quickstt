@@ -664,16 +664,21 @@ fn process_audio_chunk(
             // impulse stops the session, sustained speech never does.
             let detected = ctrl.transient.process(chunk);
             let peak = crate::audio::transient::chunk_peak(chunk);
-            let width = ctrl.transient.last_stats().6;
-            if let Some(kind) = ctrl.transient_arbiter.update(detected, peak, width) {
+            let st = ctrl.transient.last_stats();
+            let voiced =
+                crate::audio::transient::is_voiced(peak, st.3, st.4);
+            if let Some(kind) = ctrl
+                .transient_arbiter
+                .update(detected, peak, st.6, voiced)
+            {
                 ctrl.transient_arbiter.reset();
                 let live = state
                     .lock()
                     .map(|s| s.mode == AppMode::Recording || s.mode == AppMode::Transcribing)
                     .unwrap_or(false);
                 if live {
-                    // Same one-chunk lag as the background fire line: the
-                    // confirmation chunk is quiet, so onset numbers come
+                    // Same two-chunk lag as the background fire line: the
+                    // confirmation chunks are quiet, so onset numbers come
                     // from `last_onset_stats()`.
                     let (cpeak, cratio, cjump, _, _, cfloor, cwidth) =
                         ctrl.transient.last_stats();
