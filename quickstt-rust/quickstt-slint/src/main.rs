@@ -3851,14 +3851,18 @@ fn dock_hop(
             }
             // X11 chrome re-assert (~2s while visible): WMs can wipe our
             // ABOVE/state atoms on map or workspace switch — re-strip keeps
-            // the pill frameless and above the taskbar. Idempotent and
-            // cheap (a few local round-trips); the strip itself logs.
+            // the pill frameless and above the taskbar. ensure_widget_top
+            // adds the true-widget layer (override-redirect once + raise
+            // heartbeat, so fullscreen apps can't bury the pill either).
+            // Idempotent and cheap (a few local round-trips); the strip
+            // itself logs.
             #[cfg(target_os = "linux")]
             if p.window().is_visible()
                 && last_xstrip.elapsed() > std::time::Duration::from_secs(2)
             {
                 last_xstrip = std::time::Instant::now();
                 widget_platform::strip_chrome(p.window());
+                widget_platform::ensure_widget_top(p.window());
             }
             // Own-XID census (~5s): learn our pill/menu/dashboard XIDs so
             // focus capture never mistakes us for the user's textbox (the

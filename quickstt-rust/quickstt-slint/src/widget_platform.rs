@@ -370,11 +370,28 @@ pub fn restack_topmost(window: &slint::Window) {
 /// CAPTION|SYSMENU bits because of exactly this. Called from the 50ms poll
 /// for every visible widget window; only touches the OS when the frame bits
 /// are actually present. Returns true when it changed something.
+///
+/// Flicker-free by construction: the re-assert NEVER passes SWP_FRAMECHANGED
+/// (a frame recalc repaints the non-client area — that endless recalc was
+/// the pill's visible "glitch"), and OS touches are throttled to 1 per 2s
+/// per window. The first touch per window logs the exact before/after bits
+/// so a backend fight shows up once in the log instead of every 5s.
 #[cfg(target_os = "windows")]
 pub fn ensure_frameless(window: &slint::Window, click_through: bool) -> bool {
     let Some(raw) = hwnd_of(window) else {
         return false;
     };
+    // Per-window throttle + one-shot diagnosis (process-lifetime).
+    static LAST_TOUCH: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<isize, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    static DIAGNOSED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<isize>>,
+    > = std::sync::OnceLock::new();
+    let last_touch =
+        LAST_TOUCH.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let diagnosed =
+        DIAGNOSED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
     let hwnd = HWND(raw as _);
     unsafe {
         let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(hwnd, windows::core::w!(""));
@@ -384,8 +401,10 @@ pub fn ensure_frameless(window: &slint::Window, click_through: bool) -> bool {
         const FRAME_BITS: i32 =
             (WS_CAPTION.0 | WS_THICKFRAME.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0 | WS_SYSMENU.0)
                 as i32;
+        let style_before = style;
+        let mut style_after = style;
         if style & FRAME_BITS != 0 {
-            SetWindowLongW(hwnd, GWL_STYLE, (style & !FRAME_BITS) | WS_POPUP.0 as i32);
+            style_after = (style & !FRAME_BITS) | WS_POPUP.0 as i32;
             changed = true;
         }
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
@@ -394,28 +413,54 @@ pub fn ensure_frameless(window: &slint::Window, click_through: bool) -> bool {
         if click_through {
             want |= WS_EX_TRANSPARENT.0 as i32;
         }
+        let ex_before = ex;
+        let mut ex_after = ex;
         // APPWINDOW forces a taskbar button even on tool windows — strip it.
         if ex & want != want || ex & (WS_EX_APPWINDOW.0 as i32) != 0 {
-            SetWindowLongW(
-                hwnd,
-                GWL_EXSTYLE,
-                (ex | want) & !(WS_EX_APPWINDOW.0 as i32),
-            );
+            ex_after = (ex | want) & !(WS_EX_APPWINDOW.0 as i32);
             changed = true;
         }
-        if changed {
-            SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            )
-            .ok();
+        if !changed {
+            return false;
         }
-        changed
+        let first = diagnosed
+            .lock()
+            .map(|mut s| s.insert(raw))
+            .unwrap_or(false);
+        if first {
+            crate::log_line(&format!(
+                "frameless fight hwnd=0x{raw:X}: style 0x{style_before:08X}->0x{style_after:08X} ex 0x{ex_before:08X}->0x{ex_after:08X}"
+            ));
+        }
+        let due = last_touch
+            .lock()
+            .map(|mut m| {
+                let go = m
+                    .get(&raw)
+                    .map(|t| t.elapsed().as_secs() >= 2)
+                    .unwrap_or(true);
+                if go {
+                    m.insert(raw, std::time::Instant::now());
+                }
+                go
+            })
+            .unwrap_or(false);
+        if !due {
+            return false;
+        }
+        SetWindowLongW(hwnd, GWL_STYLE, style_after);
+        SetWindowLongW(hwnd, GWL_EXSTYLE, ex_after);
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+        .ok();
+        true
     }
 }
 
@@ -1114,6 +1159,15 @@ pub fn xid_of(window: &slint::Window) -> Option<u32> {
     }
 }
 
+/// Linux true-widget layering for one Slint window: EWMH atoms/hints plus
+/// override-redirect (once) and a stacking raise. No-op without an X id.
+#[cfg(not(target_os = "windows"))]
+pub fn ensure_widget_top(window: &slint::Window) {
+    if let Some(xid) = xid_of(window) {
+        x11q::ensure_widget_top(xid);
+    }
+}
+
 /// Strip window-manager chrome on X11 (XFCE/xfwm4, Cinnamon-X11, XWayland):
 /// no title bar, no taskbar/pager entry, always-on-top, sticky. Without
 /// this the pill carries an OS caption, its reported position includes the
@@ -1318,6 +1372,68 @@ mod x11q {
             }
         }
         None
+    }
+
+    /// True-widget layering via override-redirect + raise. EWMH ABOVE keeps
+    /// the pill above normal windows, but xfwm4 (correctly per EWMH) stacks
+    /// FULLSCREEN windows above ABOVE — a fullscreen video buries the pill.
+    /// Override-redirect bypasses the WM entirely (the conky/dock technique):
+    /// no decorations, no taskbar entry, never restacked below managed
+    /// windows. The remap dance runs ONCE per window (override-redirect only
+    /// takes effect on map — one flicker at startup); every later call just
+    /// re-raises, so even fullscreen apps can't cover the pill for more than
+    /// ~2s (the poll heartbeat). Best-effort: failures are silent, atoms
+    /// from strip_chrome remain as fallback.
+    pub fn ensure_widget_top(xid: u32) {
+        use x11rb::protocol::xproto::{
+            ChangeWindowAttributesAux, ConfigureWindowAux, StackMode,
+        };
+        use std::collections::HashSet;
+        use std::sync::{Mutex, OnceLock};
+        static OR_APPLIED: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+        let or_applied = OR_APPLIED.get_or_init(|| Mutex::new(HashSet::new()));
+        let (conn, _root) = match connect() {
+            Some(c) => c,
+            None => return,
+        };
+        let first = or_applied
+            .lock()
+            .map(|mut s| s.insert(xid))
+            .unwrap_or(false);
+        if first {
+            let aux = ChangeWindowAttributesAux::new().override_redirect(1);
+            let ok = conn
+                .change_window_attributes(xid, &aux)
+                .ok()
+                .and_then(|c| c.check().ok())
+                .is_some();
+            // Remap: the redirect only takes effect on map.
+            let remapped = ok
+                && conn
+                    .unmap_window(xid)
+                    .ok()
+                    .and_then(|c| c.check().ok())
+                    .is_some()
+                && conn
+                    .map_window(xid)
+                    .ok()
+                    .and_then(|c| c.check().ok())
+                    .is_some();
+            if remapped {
+                crate::log_line(&format!(
+                    "x11 override-redirect applied xid={xid} (true-widget layer)"
+                ));
+            } else if let Ok(mut s) = or_applied.lock() {
+                s.remove(&xid);
+            }
+        }
+        // Heartbeat raise: stacking above everything, including fullscreen
+        // managed windows (the WM never touches us, so nothing re-lowers).
+        let aux = ConfigureWindowAux::new().stack_mode(StackMode::Above);
+        let _ = conn
+            .configure_window(xid, &aux)
+            .ok()
+            .and_then(|c| c.check().ok());
     }
 
     /// Frameless widget chrome via EWMH/Motif hints. Best-effort one-shot:

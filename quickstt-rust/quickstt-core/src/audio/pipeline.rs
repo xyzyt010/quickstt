@@ -14,6 +14,10 @@ pub struct SpeechSegmenter {
     preroll_max_chunks: usize,
     utterance: Vec<i16>,
     in_utterance: bool,
+    // Retained for the Open-command plumbing. The START gate is deliberately
+    // unified (hands-free uses the PTT bar), so this is currently
+    // write-only.
+    #[allow(dead_code)]
     ptt_mode: bool,
     silence_frames: usize,
     hard_silence_frames: usize,
@@ -75,7 +79,16 @@ impl SpeechSegmenter {
                 self.preroll.pop_front();
             }
 
-            if vad_result.speech_likely && level >= 2 {
+            // Hands-free start (wakeword/clap turns): faint but real energy
+            // (level>=1) with any VAD probability opens the utterance — the
+            // same bar as PTT fast-start. A stricter gate here (level>=2 +
+            // speech_likely) starved soft follow-up speech: wakeword turns
+            // heard the trigger, then "Nothing detected" on real dictation.
+            // Ghost safety is untouched: preroll bounds the head, and the
+            // orchestration fraction gate + run breaker still drop noise.
+            if vad_result.speech_likely && level >= 2
+                || level >= 1 && vad_result.probability > 0.30
+            {
                 self.in_utterance = true;
                 for pr in self.preroll.drain(..) {
                     self.utterance.extend_from_slice(&pr);
@@ -83,18 +96,11 @@ impl SpeechSegmenter {
                 self.utterance.extend_from_slice(chunk);
                 self.silence_frames = 0;
                 self.hard_silence_frames = 0;
-                return Some(SegmenterEvent::SpeechStarted);
-            }
-            // PTT fast-start: faint but real energy (level>=1) with any VAD
-            // probability still opens the utterance — release flushes it.
-            if self.ptt_mode && level >= 1 && vad_result.probability > 0.30 {
-                self.in_utterance = true;
-                for pr in self.preroll.drain(..) {
-                    self.utterance.extend_from_slice(&pr);
-                }
-                self.utterance.extend_from_slice(chunk);
-                self.silence_frames = 0;
-                self.hard_silence_frames = 0;
+                tracing::info!(
+                    "Segmenter: speech started (level={}, vad_prob={:.2})",
+                    level,
+                    vad_result.probability
+                );
                 return Some(SegmenterEvent::SpeechStarted);
             }
             return None;
