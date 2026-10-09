@@ -3881,6 +3881,9 @@ fn dock_hop(
                     note_own_xid(widget_platform::xid_of(f.window()));
                 }
             }
+            // Windows-only signal: on X11 there is no HWND by design (the
+            // strip path uses the XID instead), so don't cry wolf there.
+            #[cfg(target_os = "windows")]
             if p.window().is_visible() && !widget_platform::has_hwnd(p.window()) {
                 note("pill visible without HWND (strip skipped)");
             }
