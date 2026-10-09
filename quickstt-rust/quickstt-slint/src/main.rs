@@ -6219,10 +6219,20 @@ fn dock_hop(
     // hides, which made Show/Hide quit the whole app (tray and all).
     // run_event_loop lives until quit_event_loop (see quit_app) no matter
     // how many windows hide — hiding the pill only hides the pill.
-    if let Err(e) = slint::run_event_loop() {
-        log_line(&format!("event loop ended with error: {e}"));
+    // run_event_loop RETURNS when the last Slint window hides (proven:
+    // HIDE → loop return → main exit). Re-enter until real quit — the
+    // backend keeps the EventLoop alive for reuse across invocations, and
+    // hidden windows resume on re-show. Hide ≠ quit, ever.
+    loop {
+        if let Err(e) = slint::run_event_loop() {
+            log_line(&format!("event loop ended with error: {e}"));
+        }
+        if QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        log_line("event loop returned with windows hidden — re-entering");
     }
-    log_line("EVENT LOOP RETURNED — main exiting");
+    log_line("event loop exited for real — main exiting");
     Ok(())
 }
 
