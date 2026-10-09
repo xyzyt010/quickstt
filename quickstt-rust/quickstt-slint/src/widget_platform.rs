@@ -1429,7 +1429,7 @@ mod x11q {
         }
         // Heartbeat raise: stacking above everything, including fullscreen
         // managed windows (the WM never touches us, so nothing re-lowers).
-        let aux = ConfigureWindowAux::new().stack_mode(StackMode::Above);
+        let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
         let _ = conn
             .configure_window(xid, &aux)
             .ok()
