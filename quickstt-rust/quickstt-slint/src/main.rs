@@ -4729,25 +4729,30 @@ fn dock_hop(
                     capture_current_fg_window(&last_external_fg_timer);
                 }
                 // Ghost-turn auto-cancel: a clap/wakeword that opens a turn
-                // but is followed by silence would otherwise transcribe the
-                // trigger noise into "you"/"yeah" and type it. If 2s in no
-                // transcript has arrived AND the segmenter VAD never opened,
-                // close the turn silently — no engine call, no text, no
-                // ghost. Deliberate speech always opens the VAD first (it is
-                // the same VAD that decides what gets transcribed), and held
-                // PTT/mic turns are never cancelled (explicit user intent).
-                // (A fixed 0–100 level threshold was tried here and never
-                // fired in loud rooms — background alone reads >10.)
+                // but is followed by silence would otherwise sit "Listening"
+                // forever (nothing else closes a trigger-opened silent turn)
+                // or transcribe the trigger noise into "you"/"yeah" and type
+                // it. If 6s in no transcript has arrived AND the segmenter
+                // VAD never opened, close the turn silently — no engine call,
+                // no text, no ghost. 6s (not 2s): a human needs a beat after
+                // the trigger ack before they start dictating; deliberate
+                // speech always opens the VAD first (it is the same VAD that
+                // decides what gets transcribed), and held PTT/mic turns are
+                // never cancelled (explicit user intent). A short pill hint
+                // explains the close so it never reads as a glitch.
                 if recording
                     && !transcribing
                     && !ptt
                     && !mic_on
                     && std::time::Instant::now().duration_since(sess_start_t)
-                        > std::time::Duration::from_millis(2000)
+                        > std::time::Duration::from_millis(6000)
                     && s.transcript_buffer.len() == sess_start_len
                     && !s.session_saw_speech
                 {
                     log_line("session auto-cancelled (no speech after trigger)");
+                    alert_msg = "Nothing detected — speak up".to_string();
+                    alert_until =
+                        std::time::Instant::now() + std::time::Duration::from_millis(2500);
                     let _ = tx_cmd_timer.try_send(OrchestratorCommand::StopListening);
                 }
 
