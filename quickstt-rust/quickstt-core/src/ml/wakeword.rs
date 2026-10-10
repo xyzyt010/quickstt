@@ -50,6 +50,36 @@ fn chunk_rms(pcm: &[i16]) -> f32 {
     ((sum / pcm.len() as f64).sqrt() / 32768.0) as f32
 }
 
+/// Fixed software gain + attenuate-only level normalization. The community
+/// heads are level-hungry below and clip-blind above: fixed 3x lifts quiet
+/// speech into their range, but a loud voice rails at ±32767 (square-wave
+/// mel → every head scores 0.000 — the louder you shout, the deader the
+/// trigger). So each chunk is scaled toward 0.08 RMS but NEVER amplified:
+/// quiet chunks come out byte-identical to plain 3x, loud chunks are turned
+/// down into the heads' window. Memoryless (no AGC state to poison, no
+/// silence pumping — the failure of the previous adaptive attempt).
+fn apply_input_gain(pcm_chunk: &[i16]) -> Vec<i16> {
+    let boosted: Vec<i16> = if (INPUT_GAIN - 1.0).abs() < f32::EPSILON {
+        pcm_chunk.to_vec()
+    } else {
+        pcm_chunk
+            .iter()
+            .map(|&s| ((s as f32 * INPUT_GAIN).clamp(-32768.0, 32767.0)) as i16)
+            .collect()
+    };
+    const LEVEL_TARGET_RMS: f32 = 0.08;
+    let rms = chunk_rms(&boosted);
+    let g = (LEVEL_TARGET_RMS / rms.max(1e-4)).min(1.0);
+    if g >= 1.0 {
+        boosted
+    } else {
+        boosted
+            .iter()
+            .map(|&s| ((s as f32 * g).clamp(-32768.0, 32767.0)) as i16)
+            .collect()
+    }
+}
+
 fn norm_key(s: &str) -> String {
     s.trim().to_lowercase().replace('_', " ")
 }
@@ -195,21 +225,11 @@ impl WakeWordEngine {
             self.suppress_until = None;
         }
 
-        // Software input gain (see INPUT_GAIN): every downstream stage —
-        // RMS gates, mel frontend, heads — sees boosted audio. Fixed gain
-        // only (no adaptive stage): a slow-AGC experiment here multiplied on
-        // top of INPUT_GAIN (9x at start, pumping to 12x on silence),
-        // hard-clipped every chunk at ±32767, and poisoned the embedding
-        // caches with amplified hiss — all heads scored 0.000 on real
-        // phrases. Fixed 3x is the probed-safe operating point.
-        let boosted: Vec<i16> = if (INPUT_GAIN - 1.0).abs() < f32::EPSILON {
-            pcm_chunk.to_vec()
-        } else {
-            pcm_chunk
-                .iter()
-                .map(|&s| ((s as f32 * INPUT_GAIN).clamp(-32768.0, 32767.0)) as i16)
-                .collect()
-        };
+        // Software input gain + attenuate-only normalization (see
+        // apply_input_gain): every downstream stage — RMS gates, mel
+        // frontend, heads — sees boosted audio with loud voices turned down
+        // into the heads' window instead of railing at ±32767.
+        let boosted = apply_input_gain(pcm_chunk);
         let pcm_chunk = &boosted;
 
         // Buffer EVERY chunk into the mel frontend (the old code only pushed
@@ -442,6 +462,34 @@ mod tests {
                 - WakeWordEngine::threshold_for(70))
             .abs()
                 < 1e-6
+        );
+    }
+
+    #[test]
+    fn input_gain_leaves_quiet_byte_identical_attenuates_loud() {
+        // Silence: untouched.
+        let silence = vec![0i16; 1280];
+        assert_eq!(apply_input_gain(&silence), silence);
+        // Quiet speech (peak 500, boosted RMS ~0.05 < 0.08 target): plain 3x,
+        // byte-identical.
+        let quiet: Vec<i16> = (0..1280).map(|i| if i % 2 == 0 { 500 } else { -500 }).collect();
+        let expected: Vec<i16> = quiet.iter().map(|&s| s * 3).collect();
+        assert_eq!(apply_input_gain(&quiet), expected);
+        // Loud voice (peak 20000 → 60000 clipped at 3x): attenuated toward
+        // 0.08 RMS, never railed.
+        let loud: Vec<i16> = (0..1280)
+            .map(|i| {
+                ((2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16000.0).sin() * 20000.0)
+                    as i16
+            })
+            .collect();
+        let out = apply_input_gain(&loud);
+        let peak = out.iter().map(|s| s.abs()).max().unwrap_or(0);
+        assert!(peak < 32767, "loud must not rail (peak {peak})");
+        let rms = chunk_rms(&out);
+        assert!(
+            (rms - 0.08).abs() < 0.02,
+            "loud must land near 0.08 RMS (got {rms:.3})"
         );
     }
 

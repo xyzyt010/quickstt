@@ -3717,6 +3717,12 @@ fn dock_hop(
     let mut logged_msg = String::new();
     let mut sess_start_len = 0usize;
     let mut sess_peak = 0u32;
+    // Last TOPMOST re-pin (the pill must win against competing topmost
+    // windows, display changes and DWM quirks — no frame change, no
+    // activate, so the heartbeat is flicker-free).
+    let mut last_toppin = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(10))
+        .unwrap_or_else(std::time::Instant::now);
     // Trigger-opened turn (wakeword/clap, not held PTT/mic): the silence
     // setting only auto-closes these — PTT/mic turns end by release/tap.
     let mut sess_triggered = false;
@@ -3911,6 +3917,17 @@ fn dock_hop(
             if widget_platform::ensure_frameless(p.window(), false) {
                 let st = widget_platform::window_state_debug("pill", p.window());
                 note(&format!("pill frame stripped {st}"));
+            }
+            // TOPMOST re-pin heartbeat (~2s while visible): competing
+            // always-on-top windows, display changes and DWM quirks can
+            // otherwise sit above the pill indefinitely. Flicker-free
+            // (no move/resize/activate/frame change) — same pin the
+            // trigger-pop uses, just on a timer.
+            if p.window().is_visible()
+                && last_toppin.elapsed() > std::time::Duration::from_secs(2)
+            {
+                last_toppin = std::time::Instant::now();
+                widget_platform::restack_topmost(p.window());
             }
             // X11 chrome re-assert (~2s while visible): WMs can wipe our
             // ABOVE/state atoms on map or workspace switch — re-strip keeps
@@ -4884,6 +4901,9 @@ fn dock_hop(
                         log_line("snooze cancelled by live session");
                     }
                     log_line("session start");
+                    // Pop to front on trigger: the turn must open above
+                    // whatever the user is doing.
+                    widget_platform::restack_topmost(p.window());
                     // Trigger-opened turns (wakeword/clap — not held PTT or
                     // mic tap) get a proactive coaching hint: there is no
                     // beep, so users otherwise say the wakeword, wait, and
