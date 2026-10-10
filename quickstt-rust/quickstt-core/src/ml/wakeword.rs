@@ -154,10 +154,13 @@ impl WakeWordEngine {
         // 0.47 bar applies: a touch under the documented 0.50 default so
         // normal-volume phrases confirm without shouting — non-phrase audio
         // scores ~0.00, so the false-trigger margin stays huge. 0 is strict
-        // (0.77), 100 is loose (0.30).
+        // (0.77), 100 is loose (0.30). "hey jarvis" gets its own eased bar
+        // (see threshold_for_phrase): the two-word phrase peaks ~0.1 lower
+        // than "alexa" at the same volume and misses a shared bar.
         let keys: Vec<String> = self.thresholds.keys().cloned().collect();
         for k in keys {
-            self.thresholds.insert(k, Self::threshold_for(self.user_sensitivity));
+            self.thresholds
+                .insert(k.clone(), Self::threshold_for_phrase(self.user_sensitivity, &k));
         }
     }
 
@@ -166,6 +169,19 @@ impl WakeWordEngine {
     /// the engine enforces.
     pub fn threshold_for(sensitivity: u32) -> f32 {
         (0.72 - sensitivity.clamp(0, 100) as f32 * 0.005).clamp(0.30, 0.77)
+    }
+
+    /// Per-phrase threshold: "hey jarvis" (normalized key "hey jarvis") is
+    /// eased by 0.10 — measured marginals 0.17–0.35 at conversational volume
+    /// against a 0.37 shared bar, while "alexa" hits 0.9+ on the same voice.
+    /// Non-phrase audio still scores ~0.00, so the margin holds.
+    pub fn threshold_for_phrase(sensitivity: u32, phrase_key: &str) -> f32 {
+        let base = Self::threshold_for(sensitivity);
+        if phrase_key == "hey jarvis" {
+            (base - 0.10).clamp(0.22, 0.77)
+        } else {
+            base
+        }
     }
 
     /// Feed one 80ms mic chunk. `vad_speech` is the caller's voice-activity
@@ -286,7 +302,16 @@ impl WakeWordEngine {
                 let count = self.hit_counts.entry(key.clone()).or_insert(0);
                 *count += 1;
                 let hit_count = *count;
-                let required = if *score >= strong { 2 } else { 3 };
+                // "hey jarvis" confirms on 2 hits at its (eased) bar: the
+                // two-word phrase's peak spans fewer inference ticks, so a
+                // 3-in-a-row rule structurally misses conversational volume.
+                let required = if key == "hey jarvis" {
+                    2
+                } else if *score >= strong {
+                    2
+                } else {
+                    3
+                };
                 if hit_count >= required {
                     if self.can_activate() {
                         info!(
@@ -408,6 +433,16 @@ mod tests {
         assert!((WakeWordEngine::threshold_for(50) - 0.47).abs() < 1e-6);
         assert!(WakeWordEngine::threshold_for(0) > WakeWordEngine::threshold_for(50));
         assert!(WakeWordEngine::threshold_for(100) < WakeWordEngine::threshold_for(50));
+        // "hey jarvis" rides 0.10 under the shared bar (measured gap).
+        assert!(
+            (WakeWordEngine::threshold_for_phrase(70, "hey jarvis") - 0.27).abs() < 1e-6
+        );
+        assert!(
+            (WakeWordEngine::threshold_for_phrase(70, "alexa")
+                - WakeWordEngine::threshold_for(70))
+            .abs()
+                < 1e-6
+        );
     }
 
     #[test]

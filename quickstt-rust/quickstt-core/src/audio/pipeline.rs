@@ -14,6 +14,15 @@ pub struct SpeechSegmenter {
     preroll_max_chunks: usize,
     utterance: Vec<i16>,
     in_utterance: bool,
+    // Trigger-word deaf window (samples still to discard): a wakeword/clap
+    // opens the mic ~100-300ms after the trigger sound, so the trigger
+    // itself ("alexa", the clap) is the first thing the fresh stream hears.
+    // Without this the trigger OPENS the VAD (loud room, hot mic), segments
+    // itself ("Recognized: Alexa."), and arms session_saw_speech — the turn
+    // then transcribes its own trigger and dies ~2-3s later. Discard (not
+    // buffer: the trigger must never enter the transcript). Set only on
+    // fresh non-PTT opens; never re-armed mid-session (see reset()).
+    deaf_samples: usize,
     // Retained for the Open-command plumbing. The START gate is deliberately
     // unified (hands-free uses the PTT bar), so this is currently
     // write-only.
@@ -40,6 +49,7 @@ impl SpeechSegmenter {
             preroll_max_chunks: preroll_chunks.max(1),
             utterance: Vec::new(),
             in_utterance: false,
+            deaf_samples: 0,
             ptt_mode: false,
             silence_frames: 0,
             hard_silence_frames: 0,
@@ -52,6 +62,16 @@ impl SpeechSegmenter {
     /// via `flush()`, not on silence timeout.
     pub fn set_ptt_mode(&mut self, ptt: bool) {
         self.ptt_mode = ptt;
+    }
+
+    /// Deaf window after a trigger-opened capture (milliseconds of leading
+    /// audio to discard). Covers the trigger word/clap tail still in the air
+    /// when the foreground stream opens. Command speech starting later is
+    /// untouched; rapid-fire speech inside the window loses its first
+    /// syllable at most (bounded, rare — versus always transcribing the
+    /// trigger itself).
+    pub fn set_deaf_ms(&mut self, ms: u32) {
+        self.deaf_samples = ms as usize * SAMPLE_RATE / 1000;
     }
 
     /// Dashboard "VAD Speech Gate" slider (0..100): higher hears fainter
@@ -67,9 +87,19 @@ impl SpeechSegmenter {
         self.in_utterance = false;
         self.silence_frames = 0;
         self.hard_silence_frames = 0;
+        // Deaf windows are per-open, never per-utterance: mid-session resets
+        // (UtteranceComplete) must not re-arm, and a re-open reset starts
+        // clean (open_audio sets deaf explicitly for trigger opens).
+        self.deaf_samples = 0;
     }
 
     pub fn process_chunk(&mut self, chunk: &[i16]) -> Option<SegmenterEvent> {
+        // Trigger deaf window (see set_deaf_ms): discard, don't buffer —
+        // the trigger must leave no trace in the transcript or the VAD.
+        if self.deaf_samples > 0 {
+            self.deaf_samples = self.deaf_samples.saturating_sub(chunk.len());
+            return None;
+        }
         let vad_result = self.vad.process(chunk);
         let level = vad::audio_level_0_100(chunk);
 

@@ -112,6 +112,24 @@ fn menu_action(
     }
 }
 
+/// "Hide for 1 hour" from any menu (pill, tray, SNI): the pill window hides
+/// NOW and the poll keeps it hidden until expiry, then re-shows it. The app,
+/// tray, hotkeys and wakewords keep running throughout, and any trigger
+/// pops the pill straight back (the session re-show path ignores snooze —
+/// an explicit user summons always wins). Safe only because the event loop
+/// survives hidden windows (re-entered until quit).
+fn snooze_pill_1h(
+    pill: &slint::Weak<PillWidget>,
+    hide_until: &Arc<Mutex<Option<std::time::Instant>>>,
+) {
+    *mlock(hide_until) =
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+    if let Some(p) = pill.upgrade() {
+        let _ = p.hide();
+    }
+    log_line("menu: pill hidden for 1 hour");
+}
+
 /// Tray left/double-click: flip the Slint pill widget visibility.
 fn toggle_pill_widget(
     pill: &slint::Weak<PillWidget>,
@@ -546,6 +564,7 @@ fn show_native_tray_menu(hwnd: windows::Win32::Foundation::HWND, x: i32, y: i32)
     const ITEMS: &[(u32, &str)] = &[
         (1, "Dashboard"),
         (2, "Show/Hide Widget"),
+        (4, "Hide for 1 hour"),
         (0, ""),
         (3, "Quit QuickSTT"),
     ];
@@ -1871,6 +1890,7 @@ mod sni_tray {
         Activate,
         Dashboard,
         ToggleWidget,
+        Snooze,
         Quit,
         Online,
     }
@@ -1917,6 +1937,7 @@ mod sni_tray {
             vec![
                 row(&self.tx, "Open Dashboard", SniClick::Dashboard),
                 row(&self.tx, "Show / Hide Widget", SniClick::ToggleWidget),
+                row(&self.tx, "Hide for 1 hour", SniClick::Snooze),
                 row(&self.tx, "Quit QuickSTT", SniClick::Quit),
             ]
         }
@@ -3318,8 +3339,6 @@ fn dock_hop(
         let anim = foot_anim.clone();
         let hide_until = hide_until.clone();
         pillmenu.on_hide_row(move || {
-            *mlock(&hide_until) =
-                Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
             hide_pill_menus(&pm, &fly);
             if let Some(p) = pw.upgrade() {
                 let (mg0, uo0) = (p.get_mic_grow(), p.get_upper_op());
@@ -3331,7 +3350,7 @@ fn dock_hop(
                     uo0,
                 });
             }
-            log_line("menu: pill hidden for 1 hour");
+            snooze_pill_1h(&pw, &hide_until);
         });
     }
     {
@@ -3656,11 +3675,18 @@ fn dock_hop(
         let pill_menu_w = pill.as_weak();
         let dash_visible_menu = dash_visible.clone();
         let state_menu = state.clone();
+        let hide_until_menu = hide_until.clone();
         traymenu.on_row_clicked(move |i| {
             if let Some(t) = tm.upgrade() {
                 let _ = t.hide();
             }
-            menu_action(i, &dash_menu, &pill_menu_w, &dash_visible_menu, &state_menu);
+            // Row 3 is snooze (handled here — menu_action rows are
+            // 0 dashboard / 1 show / 2 hide / 4 quit).
+            if i == 3 {
+                snooze_pill_1h(&pill_menu_w, &hide_until_menu);
+            } else {
+                menu_action(i, &dash_menu, &pill_menu_w, &dash_visible_menu, &state_menu);
+            }
         });
     }
 
@@ -3691,6 +3717,12 @@ fn dock_hop(
     let mut logged_msg = String::new();
     let mut sess_start_len = 0usize;
     let mut sess_peak = 0u32;
+    // Trigger-opened turn (wakeword/clap, not held PTT/mic): the silence
+    // setting only auto-closes these — PTT/mic turns end by release/tap.
+    let mut sess_triggered = false;
+    // Last transcript growth (for the silence auto-close below).
+    let mut sess_growth_seen = 0usize;
+    let mut sess_last_growth = std::time::Instant::now();
     // Peak EXCLUDING the first 800ms (trigger onset): the clap that starts
     // a session peaks near 100 and whitewashes sess_peak, so the ghost gate
     // below would pass every hallucination. A deliberately spoken word
@@ -4363,6 +4395,10 @@ fn dock_hop(
                                                 log_line("tray native menu: Show/Hide Widget");
                                                 toggle_pill_widget(&pill_w, &state_timer, "tray-native-menu");
                                             }
+                                            4 => {
+                                                log_line("tray native menu: Hide for 1 hour");
+                                                snooze_pill_1h(&pill_w, &hide_until_timer);
+                                            }
                                             3 => {
                                                 log_line("tray native menu: Quit QuickSTT");
                                                 quit_app();
@@ -4487,6 +4523,7 @@ fn dock_hop(
                             &state_timer,
                         ),
                         ToggleWidget => toggle_pill_widget(&pill_w, &state_timer, "sni-menu"),
+                        Snooze => snooze_pill_1h(&pill_w, &hide_until_timer),
                         Quit => {
                             quit_app();
                             std::process::exit(0);
@@ -4750,16 +4787,24 @@ fn dock_hop(
             }
 
             if let Ok(s) = state_timer.lock() {
-                // Live session: mic capsule ON, PTT held, or core mid-turn.
-                // Wakeword-ARMED idle is NOT a session (renders as idle,
-                // hover-to-expand) — counting it kept the pill expanded
-                // forever with a fake "Listening…" and dead bars.
+                // Live session: mic capsule ON, PTT held, core mid-turn, or
+                // capture open. Wakeword-ARMED idle is NOT a session
+                // (renders as idle, hover-to-expand) — counting it kept the
+                // pill expanded forever with a fake "Listening…" and dead
+                // bars. mic_open matters: after a turn's transcript lands the
+                // mode parks in WakewordListening with the mic STILL HOT and
+                // further speech still transcribing — dropping mic_open here
+                // collapsed the pill mid-lecture while the background kept
+                // typing. The pill mirrors the capture: expanded from open
+                // until a real close (mic tap, clap-stop, PTT release,
+                // auto-cancel, silence setting) — never mid-turn.
                 let recording = s.mode == AppMode::Recording;
                 let transcribing = s.mode == AppMode::Transcribing;
                 // PTT held + mic capsule ON both count as live for display.
                 let ptt = *mlock(&ptt_held_timer);
                 let mic_on = *mlock(&mic_live_timer);
-                let live_session = recording || transcribing || ptt || mic_on;
+                let live_session =
+                    recording || transcribing || ptt || mic_on || s.mic_open;
 
                 if !live_session {
                     capture_current_fg_window(&last_external_fg_timer);
@@ -4820,14 +4865,24 @@ fn dock_hop(
                 // silence from the very start does.
                 if live_session && !was_live {
                     sess_start_len = s.transcript_buffer.len();
+                    sess_growth_seen = sess_start_len;
+                    sess_triggered = !ptt && !mic_on;
                     sess_peak = 0;
                     speech_peak = 0;
                     sess_start_t = now;
+                    sess_last_growth = now;
                     // A new session re-arms the TextBoard auto-show (a user
                     // close keeps it down only for the finished session) and
                     // leaves history mode (fresh turns show current only).
                     *mlock(&tb_closed_timer) = false;
                     *mlock(&tb_full_timer) = false;
+                    // An explicit summons always wins over snooze: a trigger,
+                    // PTT press or mic tap cancels "hide for 1 hour" and the
+                    // pill pops back with the session.
+                    if hide_until_timer.lock().map(|h| h.is_some()).unwrap_or(false) {
+                        *mlock(&hide_until_timer) = None;
+                        log_line("snooze cancelled by live session");
+                    }
                     log_line("session start");
                     // Trigger-opened turns (wakeword/clap — not held PTT or
                     // mic tap) get a proactive coaching hint: there is no
@@ -4839,6 +4894,32 @@ fn dock_hop(
                         alert_until =
                             now + std::time::Duration::from_millis(3000);
                     }
+                }
+                // Optional auto-close on silence (dashboard setting, default
+                // OFF): a trigger-opened turn with no transcript growth for N
+                // seconds ends. Growth resets the clock, so lectures with
+                // pauses shorter than N are untouched; transcribing turns are
+                // exempt (the engine is working). OFF (default) means a turn
+                // stays open until an explicit stop — the pill mirrors the
+                // capture and never self-collapses. Never-spoke turns are
+                // owned by the 6s ghost-cancel above.
+                if s.transcript_buffer.len() != sess_growth_seen {
+                    sess_growth_seen = s.transcript_buffer.len();
+                    sess_last_growth = now;
+                }
+                if s.settings.auto_stop_silence
+                    && sess_triggered
+                    && recording
+                    && !transcribing
+                    && !ptt
+                    && !mic_on
+                    && now.duration_since(sess_last_growth)
+                        > std::time::Duration::from_secs(
+                            s.settings.silence_duration.max(1) as u64,
+                        )
+                {
+                    log_line("session auto-closed on silence (setting)");
+                    let _ = tx_cmd_timer.try_send(OrchestratorCommand::StopListening);
                 }
                 if live_session {
                     sess_peak = sess_peak.max(s.audio_level as u32);
@@ -5287,15 +5368,21 @@ fn dock_hop(
                     if d.get_wakeword_sensitivity() != sens {
                         d.set_wakeword_sensitivity(sens);
                     }
-                    // Exact enforced rule, computed by the same function the
+                    // Exact enforced rule, computed by the same functions the
                     // engine uses — the slider value always means this.
+                    // Per-phrase bars: "hey jarvis" rides lower (see
+                    // threshold_for_phrase).
+                    let sens_u = sens.max(0) as u32;
                     let thr =
-                        quickstt_core::ml::wakeword::WakeWordEngine::threshold_for(
-                            sens.max(0) as u32,
+                        quickstt_core::ml::wakeword::WakeWordEngine::threshold_for(sens_u);
+                    let thr_hj =
+                        quickstt_core::ml::wakeword::WakeWordEngine::threshold_for_phrase(
+                            sens_u,
+                            "hey jarvis",
                         );
                     let thr_text = format!(
-                        "Trigger rule: score ≥ {:.2} — 2 hits if strong, else 3 in a row, voice-gated. Lower is hotter.",
-                        thr
+                        "Trigger rule: alexa ≥ {:.2} (2 strong / 3 marginal hits), hey jarvis ≥ {:.2} (2 hits) — voice-gated. Lower is hotter.",
+                        thr, thr_hj
                     );
                     if d.get_wakeword_threshold_text().as_str() != thr_text.as_str() {
                         d.set_wakeword_threshold_text(thr_text.into());

@@ -469,12 +469,12 @@ export component PillWidget inherits Window {
 }
 
 // ── Menus: black native-style popups. Rows: Dashboard / Show Widget /
-// Hide Widget / Quit App. One shared window serves tray right-click AND pill
+// Hide Widget / Hide for 1 hour / Quit App. One shared window serves tray right-click AND pill
 // clicks (left-tap and right-click all open this same menu).
 export component TrayMenu inherits Window {
     title: "";
     width: 220px;
-    height: 144px;
+    height: 180px;
     background: transparent;
     no-frame: true;
 
@@ -495,7 +495,7 @@ export component TrayMenu inherits Window {
         x: 6px;
         y: 6px;
         width: 208px;
-        height: 132px;
+        height: 168px;
         spacing: 0px;
 
         // Row 0: Dashboard
@@ -558,6 +558,26 @@ export component TrayMenu inherits Window {
             }
         }
 
+        // Row 3: Hide for 1 hour (snooze — app, tray, triggers keep running)
+        Rectangle {
+            height: 30px;
+            border-radius: 6px;
+            background: t4.has-hover ? #21262D : transparent;
+            t4 := TouchArea {
+                clicked => { row_clicked(3); }
+                mouse-cursor: pointer;
+            }
+            Text {
+                x: 10px;
+                height: 30px;
+                text: "Hide for 1 hour";
+                color: #F0F6FC;
+                font-size: 13px;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+        }
+
         // Separator
         Rectangle {
             height: 6px;
@@ -576,7 +596,7 @@ export component TrayMenu inherits Window {
             border-radius: 6px;
             background: t3.has-hover ? #21262D : transparent;
             t3 := TouchArea {
-                clicked => { row_clicked(3); }
+                clicked => { row_clicked(4); }
                 mouse-cursor: pointer;
             }
             Text {
