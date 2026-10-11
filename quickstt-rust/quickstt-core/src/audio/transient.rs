@@ -56,9 +56,11 @@ pub fn is_voiced(peak: f64, zcr: f64, spectral: f64) -> bool {
 /// Two-chunk confirmation arbiter: a detected onset is HELD, not acted on.
 /// It only becomes actionable if the next TWO chunks decay like an isolated
 /// impulse (a clap) — fast collapse, not sustained voice energy:
-///   1. chunk+1 peak < 50% of the onset peak AND burst width <= 3x the onset
+///   1. chunk+1 peak < 70% of the onset peak AND burst width <= 3x the onset
 ///      width (lively-room reverb keeps tails wide and hot: 25%/1x vetoed
-///      real claps all day — 34% ratios and 2x widths on genuine claps).
+///      real claps all day — 34% ratios and 2x widths on genuine claps;
+///      50% still vetoed soft real claps in lively rooms whose +80ms
+///      reverb sits at 60-85% of the onset peak, so the bar is 70%).
 ///      Clipped onsets (>= 32000 — the mic rail, ratios meaningless) use an
 ///      absolute < 20000 bar instead.
 ///   2. chunk+2 peak < 25% of the onset peak (the voice-pause phantom killer:
@@ -133,7 +135,7 @@ impl TransientArbiter {
                 let quiet_level = if clipped {
                     chunk_peak < 20000.0
                 } else {
-                    chunk_peak < onset_peak * 0.5
+                    chunk_peak < onset_peak * 0.7
                 };
                 let decayed_shape = chunk_width <= onset_width.saturating_mul(3).max(1);
                 if quiet_level && decayed_shape {
@@ -308,15 +310,18 @@ impl TransientDetector {
         // deliberate hand clap near the mic hits 5000+; everyday knocks stay
         // below 3000 and are blocked outright.
         // Escape hatch: an extremely loud onset (≥10× floor, abs ≥ 4000,
-        // jump ≥ 2.5×, wide burst) fires on peak strength so close-range
+        // jump ≥ 3.5×, wide burst) fires on peak strength so close-range
         // claps over a loud background are never missed. The hatch
         // deliberately also requires a jump AND width — pure peak tests stay
         // true forever on loud sustained audio and chatter every chunk.
+        // (Jump bar tightened 2.5→3.5: sustained vowels sit at ~2.8 and
+        // were firing speech onsets that the arbiter then had to veto —
+        // fewer false onsets, cleaner clap path.)
         let peak_triggered = peak_over_floor >= 3.0 && max_abs >= 3000.0;
         let jump_triggered = rms_jump >= 4.0 && max_abs >= 3000.0;
         let wide_triggered = width >= MIN_BURST_WIDTH;
         let bang_triggered =
-            peak_over_floor >= 10.0 && max_abs >= 4000.0 && rms_jump >= 2.5;
+            peak_over_floor >= 10.0 && max_abs >= 4000.0 && rms_jump >= 3.5;
         // Voiced veto (throat-clear / high-voice fix): a hand clap is a
         // broadband noise burst (high zero-crossing rate + high
         // sample-to-sample variation vs RMS). Voiced sounds — throat clears,

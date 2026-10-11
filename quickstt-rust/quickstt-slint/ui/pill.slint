@@ -270,6 +270,9 @@ export component PillWidget inherits Window {
     }
 
     // ── collapsed bottom: thin 30x8 bar, bottom-centred in the fixed window ──
+    // Super-smooth 1px outline (#5F6675): border-width renders anti-aliased
+    // in the software rasterizer; radius stays exactly half the height (4px)
+    // so the capsule curve is a true semicircle with no flat spots or jaggies.
     if !expanded && !vertical: Rectangle {
         x: (win_w - 30px) / 2;
         y: win_h - 8px;
@@ -278,21 +281,23 @@ export component PillWidget inherits Window {
         border-radius: 4px;
         background: #000000;
         opacity: pill_opacity;
-        border-width: 0px;
-        border-color: transparent;
+        border-width: 1px;
+        border-color: #5F6675;
     }
 
     // ── collapsed side: thin 9x34 bar, edge-pinned + centred in window ──
+    // Same outline treatment; radius is exactly half the width (4.5px) for a
+    // true-capsule curve (4px left a sub-pixel flat that aliased).
     if !expanded && vertical: Rectangle {
         x: mirror ? 2px : win_w - 11px;
         y: (win_h - 34px) / 2;
         width: 9px;
         height: 34px;
-        border-radius: 4px;
+        border-radius: 4.5px;
         background: #000000;
         opacity: pill_opacity;
-        border-width: 0px;
-        border-color: transparent;
+        border-width: 1px;
+        border-color: #5F6675;
     }
 
     // ── expanded bottom pair (240x86): status pill moved closer to the bottom
@@ -325,8 +330,10 @@ export component PillWidget inherits Window {
         border-radius: Math.round((8 + 28 * mic_grow) / 2) * 1px;
         background: phase == 1 ? #FF334B : phase == 4 ? #3A1414 : #000000;
         opacity: pill_opacity;
-        border-width: 0px;
-        border-color: transparent;
+        // Same #5F6675 outline as the mini so the pill keeps its identity
+        // through the morph (border interpolates cleanly — no pop).
+        border-width: 1px;
+        border-color: #5F6675;
         animate background { duration: 120ms; }
 
         Image {
@@ -380,8 +387,8 @@ export component PillWidget inherits Window {
         border-radius: Math.round((9 + 26 * mic_grow) / 2) * 1px;
         background: phase == 1 ? #FF334B : phase == 4 ? #3A1414 : #000000;
         opacity: pill_opacity;
-        border-width: 0px;
-        border-color: transparent;
+        border-width: 1px;
+        border-color: #5F6675;
         animate background { duration: 120ms; }
 
         Image {
@@ -422,8 +429,8 @@ export component PillWidget inherits Window {
         border-radius: Math.round((9 + 26 * mic_grow) / 2) * 1px;
         background: phase == 1 ? #FF334B : phase == 4 ? #3A1414 : #000000;
         opacity: pill_opacity;
-        border-width: 0px;
-        border-color: transparent;
+        border-width: 1px;
+        border-color: #5F6675;
         animate background { duration: 120ms; }
 
         Image {

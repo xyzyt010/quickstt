@@ -22,24 +22,26 @@ const WAKE_INFER_EVERY_CHUNKS: u32 = 2;
 // Digital silence / room hiss scores noise, wastes LSTM runs per tick,
 // and single-frame spikes on quiet audio were the phantom-trigger source.
 // Operates on gain-boosted audio (see INPUT_GAIN).
-const MIN_WAKE_RMS: f32 = 0.003;
+const MIN_WAKE_RMS: f32 = 0.002;
 // VAD gate floor: when the voice-activity detector reports no speech AND the
 // chunk is below this RMS, the heads are skipped and stale hits cleared.
 // Loud audio always scores (it might be speech the VAD hasn't opened on
 // yet); quiet non-speech never does. Together with the 3-hit rule this is
-// the phantom-trigger fix. (Lowered a touch so normal-volume speech opens
+// the phantom-trigger fix. (Lowered so normal-volume speech opens
 // the gate without shouting; loud non-phrase still scores ~0.00.)
-const VAD_GATE_RMS: f32 = 0.008;
+const VAD_GATE_RMS: f32 = 0.005;
 // Software input gain applied to every mic chunk before RMS/gates/heads.
 // The community heads score this laptop mic's normal-volume speech <0.15
 // at 1x (shouts reach 0.9+) — same heads, same mic, proven by the
 // `oww_gain_calibration_probe` on the user's own recorded speech, which
 // also proved 3x gain still scores 0.000 on non-phrase audio (no false
-// fires from the boost itself). 3x lifts conversational peaks (~1500-3000)
-// into the range that demonstrably triggers, with i16 clamping. Re-proven
+// fires from the boost itself). 4x lifts conversational peaks (~500-1500,
+// the user's real attempting volume per the bg-stats trace) into the range
+// that demonstrably triggers, with i16 clamping + attenuate-only
+// normalization below keeping loud voices from railing. Re-proven
 // safe 2026-10-07: all 13 saved utterances + both reference clips peak
 // 0.000 at BOTH 2x and 3x (probe_utterances) — margin fully intact.
-const INPUT_GAIN: f32 = 3.0;
+const INPUT_GAIN: f32 = 4.0;
 
 /// RMS of an i16 chunk in [-1, 1] units.
 fn chunk_rms(pcm: &[i16]) -> f32 {
@@ -51,11 +53,11 @@ fn chunk_rms(pcm: &[i16]) -> f32 {
 }
 
 /// Fixed software gain + attenuate-only level normalization. The community
-/// heads are level-hungry below and clip-blind above: fixed 3x lifts quiet
+/// heads are level-hungry below and clip-blind above: fixed 4x lifts quiet
 /// speech into their range, but a loud voice rails at ±32767 (square-wave
 /// mel → every head scores 0.000 — the louder you shout, the deader the
 /// trigger). So each chunk is scaled toward 0.08 RMS but NEVER amplified:
-/// quiet chunks come out byte-identical to plain 3x, loud chunks are turned
+/// quiet chunks come out byte-identical to plain 4x, loud chunks are turned
 /// down into the heads' window. Memoryless (no AGC state to poison, no
 /// silence pumping — the failure of the previous adaptive attempt).
 fn apply_input_gain(pcm_chunk: &[i16]) -> Vec<i16> {
@@ -470,10 +472,10 @@ mod tests {
         // Silence: untouched.
         let silence = vec![0i16; 1280];
         assert_eq!(apply_input_gain(&silence), silence);
-        // Quiet speech (peak 500, boosted RMS ~0.05 < 0.08 target): plain 3x,
+        // Quiet speech (peak 500, boosted RMS ~0.06 < 0.08 target): plain 4x,
         // byte-identical.
         let quiet: Vec<i16> = (0..1280).map(|i| if i % 2 == 0 { 500 } else { -500 }).collect();
-        let expected: Vec<i16> = quiet.iter().map(|&s| s * 3).collect();
+        let expected: Vec<i16> = quiet.iter().map(|&s| s * 4).collect();
         assert_eq!(apply_input_gain(&quiet), expected);
         // Loud voice (peak 20000 → 60000 clipped at 3x): attenuated toward
         // 0.08 RMS, never railed.

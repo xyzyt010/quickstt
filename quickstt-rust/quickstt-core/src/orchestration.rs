@@ -384,13 +384,16 @@ fn open_audio(
     if let Ok(s) = state.lock() {
         seg.set_vad_sensitivity(s.settings.vad_sensitivity);
     }
-    // Trigger opens (wakeword/clap, ptt_mode=false) go deaf for 800ms: the
+    // Trigger opens (wakeword/clap, ptt_mode=false) go deaf for 350ms: the
     // trigger sound itself is still in the air when the foreground stream
     // opens, and must never segment, transcribe, or arm the VAD (the
-    // "Recognized: Alexa." self-transcription + ~2s turn death). PTT/mic
-    // opens stay live (the user is already speaking).
+    // "Recognized: Alexa." self-transcription + ~2s turn death). 350ms
+    // covers the trigger tail (was 800ms, which ate the first word of
+    // one-breath "alexa testing one two three" commands — the command
+    // arrived during mic-reopen + deaf and the turn auto-cancelled looking
+    // dead). PTT/mic opens stay live (the user is already speaking).
     if !ptt_mode {
-        seg.set_deaf_ms(800);
+        seg.set_deaf_ms(350);
     }
     ctrl.capture = Some(manager);
     ctrl.segmenter = Some(seg);
