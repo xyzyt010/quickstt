@@ -24,7 +24,7 @@ const IPC_PORT: u16 = 47631;
 const MINI_W: i32 = 36;
 const MINI_H: i32 = 8;
 const EXP_W: i32 = 240;
-const EXP_H: i32 = 80;
+const EXP_H: i32 = 82;
 const SIDE_MINI_W: i32 = 13;
 const SIDE_MINI_H: i32 = 45;
 const SIDE_EXP_W: i32 = 240;
@@ -2641,7 +2641,7 @@ fn dock_hop(
     pill.set_alert_text("".into());
     pill.set_expanded(false);
     pill.set_phase(0);
-    pill.set_upper_w(166);
+    pill.set_upper_w(184);
     pill.set_upper_op(1.0);
     pill.set_slide_px(0);
     pill.set_mic_grow(1.0);
@@ -3711,7 +3711,7 @@ fn dock_hop(
     let mut last_ownxids = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
-    let mut last_upper_w = 166i32;
+    let mut last_upper_w = 184i32;
     let mut last_phase = -1i32;
     let mut logged_phase = -1i32;
     let mut logged_msg = String::new();
@@ -4823,49 +4823,23 @@ fn dock_hop(
                 let mic_on = *mlock(&mic_live_timer);
                 let live_session =
                     recording || transcribing || ptt || mic_on || s.mic_open;
-                // Birth tick: the session just opened. The auto-cancel below
-                // MUST skip this tick: sess_start_t still holds the PREVIOUS
-                // session's timestamp until the reset runs further down, so
-                // a fresh trigger with a stale sess_start_t instantly
-                // "expires" (proven: trigger → Mode::Recording → Mode::Idle
-                // 43ms later, cancel logged BEFORE "session start" on the
-                // same tick — the pill flashed and died every time).
+                // Birth tick: the session just opened. sess_start_t still
+                // holds the PREVIOUS session's timestamp until the reset
+                // runs further down, so every age check below must treat
+                // this tick as age zero (a stale sess_start_t once
+                // instantly expired fresh triggers — the flash-die glitch).
                 let is_birth = live_session && !was_live;
 
                 if !live_session {
                     capture_current_fg_window(&last_external_fg_timer);
                 }
-                // Ghost-turn auto-cancel: a clap/wakeword that opens a turn
-                // but is followed by silence would otherwise sit "Listening"
-                // forever (nothing else closes a trigger-opened silent turn)
-                // or transcribe the trigger noise into "you"/"yeah" and type
-                // it. If 8s in no transcript has arrived AND the segmenter
-                // VAD never opened, close the turn silently — no engine call,
-                // no text, no ghost. 8s (not 2s): a human needs a beat after
-                // the trigger ack before they start dictating (say the
-                // wakeword, hear the pill, then speak the command);
-                // deliberate speech always opens the VAD first (it is the
-                // same VAD that decides what gets transcribed), and held
-                // PTT/mic turns are never cancelled (explicit user intent).
-                // Never on the birth tick (see is_birth above).
-                // A short pill hint explains the close so it never reads as
-                // a glitch.
-                if recording
-                    && !transcribing
-                    && !ptt
-                    && !mic_on
-                    && !is_birth
-                    && std::time::Instant::now().duration_since(sess_start_t)
-                        > std::time::Duration::from_millis(8000)
-                    && s.transcript_buffer.len() == sess_start_len
-                    && !s.session_saw_speech
-                {
-                    log_line("session auto-cancelled (no speech after trigger)");
-                    alert_msg = "Nothing detected — speak up".to_string();
-                    alert_until =
-                        std::time::Instant::now() + std::time::Duration::from_millis(2500);
-                    let _ = tx_cmd_timer.try_send(OrchestratorCommand::StopListening);
-                }
+                // No auto-cancel, by design: once a turn opens (trigger,
+                // PTT, mic tap) the pill stays expanded — red mic capsule +
+                // live waveform — through silence until an EXPLICIT stop
+                // (red-mic tap, clap-stop, PTT release, or the dashboard
+                // silence auto-close when the user enables it). A silent
+                // room never collapses a live turn; empty pauses simply
+                // finalize silent segments and keep listening.
 
                 // Sync wakeword detection engine with session state.
                 // The background mic stays up when wakewords OR the clap
@@ -4919,9 +4893,9 @@ fn dock_hop(
                     widget_platform::restack_topmost(p.window());
                     // Trigger-opened turns (wakeword/clap — not held PTT or
                     // mic tap) get a proactive coaching hint: there is no
-                    // beep, so users otherwise say the wakeword, wait, and
-                    // meet the auto-cancel. "Speak your command" teaches the
-                    // one-breath flow in-product.
+                    // beep, so users otherwise say the wakeword and wait.
+                    // "Speak your command" teaches the one-breath flow
+                    // in-product.
                     if !ptt && !mic_on {
                         alert_msg = "Speak your command…".to_string();
                         alert_until =
@@ -4934,8 +4908,7 @@ fn dock_hop(
                 // pauses shorter than N are untouched; transcribing turns are
                 // exempt (the engine is working). OFF (default) means a turn
                 // stays open until an explicit stop — the pill mirrors the
-                // capture and never self-collapses. Never-spoke turns are
-                // owned by the 6s ghost-cancel above.
+                // capture and never self-collapses.
                 if s.transcript_buffer.len() != sess_growth_seen {
                     sess_growth_seen = s.transcript_buffer.len();
                     sess_last_growth = now;
@@ -5167,7 +5140,7 @@ fn dock_hop(
                 // Idle hint is two runs (grey "Dictate" + white
                 // "Ctrl + Space" at 15px, 8px gap, generous side margins):
                 // measure both so the roomy (+40%) pill shrink-wraps exactly
-                // (~166px after the -10% slim: ~150 text + slimmed padding).
+                // (~184px: ~150 text + 34 padding).
                 let meas = if phase == 0 {
                     widget_platform::measure_text(p.window(), "Dictate", 15.0, false)
                         + widget_platform::measure_text(p.window(), "Ctrl + Space", 15.0, true)
@@ -5184,14 +5157,8 @@ fn dock_hop(
                     (90.0, 200.0)
                 };
                 let mut uw = ((meas.clamp(lo, hi) / 2.0).round() * 2.0) as i32;
-                // Slimmer status pill (-10% width): the strings are fixed with
-                // generous padding (+32/+24), so trimming keeps every label
-                // fitted while the pill reads lighter. Centering is
-                // structural (Slint centers the pill in the window and the
-                // rows center in the pill), so text stays pixel-centered.
-                uw = ((uw as f32 * 0.9 / 2.0).round() * 2.0) as i32;
                 if phase == 2 {
-                    uw = uw.max(126);
+                    uw = uw.max(140);
                 }
                 if (uw - last_upper_w).abs() > 8 || phase != last_phase {
                     p.set_upper_w(uw);

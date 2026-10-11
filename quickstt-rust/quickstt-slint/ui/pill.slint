@@ -20,7 +20,7 @@
 // Upper pill carries NO transcript text — waveform/bars only. The transcript
 // lives in the TextBoard popup only.
 
-// Shared status pill content: black rounded pill, 31px tall (roomy — 16px
+// Shared status pill content: black rounded pill, 34px tall (roomy — 16px
 // idle text), width comes from `upper_w` (Rust shrink-wraps it around the
 // status line, +40% air).
 component UpperPill inherits Rectangle {
@@ -29,19 +29,19 @@ component UpperPill inherits Rectangle {
     in property <string> alert_text: "";
     in property <[float]> levels: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     in property <int> loading_tick: 0;
-    in property <int> upper_w: 166;
+    in property <int> upper_w: 160;
     in property <float> pill_opacity: 1.0;
 
     width: upper_w * 1px;
-    height: 31px;
-    border-radius: 15.5px;
+    height: 34px;
+    border-radius: 17px;
     background: #000000;
     opacity: pill_opacity;
     border-width: 0px;
     border-color: transparent;
 
     // 0 idle — compact two-run hint, centered horizontally and vertically:
-    // "Dictate" weight 500, "Ctrl + Space" weight 600, 15px font.
+    // "Dictate" + "Ctrl + Space", both 15px, heavier weights for presence.
     if phase == 0 && alert_text == "": HorizontalLayout {
         x: 0px;
         y: 0px;
@@ -53,25 +53,25 @@ component UpperPill inherits Rectangle {
             text: "Dictate";
             color: #CFCFCF;
             font-size: 15px;
-            font-weight: 500;
+            font-weight: 600;
             vertical-alignment: center;
         }
         Text {
             text: "Ctrl + Space";
             color: #FFFFFF;
             font-size: 15px;
-            font-weight: 600;
+            font-weight: 700;
             vertical-alignment: center;
         }
     }
 
-    // 1 recording — white bars ONLY, centred in the 31px pill. No transcript
+    // 1 recording — white bars ONLY, centred in the 34px pill. No transcript
     // text here (TextBoard owns the transcript). Each bar lives in a fixed
-    // 12px-tall cell so HorizontalLayout cannot top-anchor it. Cell y=9.5 =
-    // (31-12)/2: exactly centred.
+    // 12px-tall cell so HorizontalLayout cannot top-anchor it. Cell y=11 =
+    // (34-12)/2: exactly centred.
     if phase == 1 && alert_text == "": HorizontalLayout {
         x: 0px;
-        y: 9.5px;
+        y: 11px;
         width: parent.width;
         height: 12px;
         spacing: 2px;
@@ -117,9 +117,9 @@ component UpperPill inherits Rectangle {
             font-weight: 600;
             vertical-alignment: center;
         }
-        Rectangle { width: 5px; height: 5px; y: 13px; border-radius: 2.5px; background: (mod(loading_tick, 3) == 0) ? #FFFFFF : #555555; }
-        Rectangle { width: 5px; height: 5px; y: 13px; border-radius: 2.5px; background: (mod(loading_tick, 3) == 1) ? #FFFFFF : #555555; }
-        Rectangle { width: 5px; height: 5px; y: 13px; border-radius: 2.5px; background: (mod(loading_tick, 3) == 2) ? #FFFFFF : #555555; }
+        Rectangle { width: 5px; height: 5px; y: 14.5px; border-radius: 2.5px; background: (mod(loading_tick, 3) == 0) ? #FFFFFF : #555555; }
+        Rectangle { width: 5px; height: 5px; y: 14.5px; border-radius: 2.5px; background: (mod(loading_tick, 3) == 1) ? #FFFFFF : #555555; }
+        Rectangle { width: 5px; height: 5px; y: 14.5px; border-radius: 2.5px; background: (mod(loading_tick, 3) == 2) ? #FFFFFF : #555555; }
     }
 
     // 3 done — green check + "Done" only (no transcript tail here).
@@ -133,7 +133,7 @@ component UpperPill inherits Rectangle {
         Path {
             width: 14px;
             height: 12px;
-            y: 9.5px;
+            y: 11px;
             stroke: #51E088;
             stroke-width: 2.5px;
             commands: "M 1 7 L 6 12 L 15 1";
@@ -204,7 +204,7 @@ export component PillWidget inherits Window {
     in property <int> loading_tick: 0;
     in property <length> pill_radius: 16px;
     in property <float> pill_opacity: 1.0;
-    in property <int> upper_w: 166;
+    in property <int> upper_w: 160;
     // Expand choreography (driven per-tick from Rust, in lockstep with the
     // window morph — no Slint animate here, exact eased values every tick):
     // mic_grow morphs the mini bar into the mic capsule (0 = mini size at
@@ -303,13 +303,13 @@ export component PillWidget inherits Window {
         border-color: #5F6675;
     }
 
-    // ── expanded bottom pair (240x80): status pill moved closer to the bottom
-    // mic capsule (gap = 4px, y: 13px, height: 31px, mic top at 48px).
+    // ── expanded bottom pair (240x82): status pill moved closer to the bottom
+    // mic capsule (gap = 3px, y: 13px, height: 34px, mic top at 50px).
     if expanded && !vertical: Rectangle {
         x: (win_w - 240px) / 2 + slide_px * 1px;
         y: (13 + rise_px) * 1px;
         width: 240px;
-        height: 31px;
+        height: 34px;
         opacity: upper_op;
 
         UpperPill {
