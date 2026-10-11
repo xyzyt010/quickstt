@@ -21,12 +21,12 @@ const IPC_PORT: u16 = 47631;
 // 6px outer edge, same centre — the morph grows in place, never jumps.
 // Edge gaps are tight: 6px collapsed AND expanded on the sides, 8px above
 // the taskbar at the bottom (see dock_position).
-const MINI_W: i32 = 45;
+const MINI_W: i32 = 36;
 const MINI_H: i32 = 8;
 const EXP_W: i32 = 240;
-const EXP_H: i32 = 86;
+const EXP_H: i32 = 80;
 const SIDE_MINI_W: i32 = 13;
-const SIDE_MINI_H: i32 = 55;
+const SIDE_MINI_H: i32 = 45;
 const SIDE_EXP_W: i32 = 240;
 const SIDE_EXP_H: i32 = 58;
 // Compact TextBoard popup footprint (logical px): comfortable readable dimensions.
@@ -2641,7 +2641,7 @@ fn dock_hop(
     pill.set_alert_text("".into());
     pill.set_expanded(false);
     pill.set_phase(0);
-    pill.set_upper_w(184);
+    pill.set_upper_w(166);
     pill.set_upper_op(1.0);
     pill.set_slide_px(0);
     pill.set_mic_grow(1.0);
@@ -3711,7 +3711,7 @@ fn dock_hop(
     let mut last_ownxids = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
-    let mut last_upper_w = 184i32;
+    let mut last_upper_w = 166i32;
     let mut last_phase = -1i32;
     let mut logged_phase = -1i32;
     let mut logged_msg = String::new();
@@ -3800,8 +3800,9 @@ fn dock_hop(
     // 60fps morph ticker: drives FootAnim content props only (the window
     // never resizes mid-morph — native resizes flash white frames). The 50ms
     // poll only STARTS glides; this consumes them. Slower + smoother by
-    // request: 460ms expand / 300ms collapse, capsule first (ease-out to
-    // 50%), dictate floats up late (smootherstep 58-100% + 14px drift + 6px
+    // request: 460ms expand / 300ms collapse, smootherstep master (no
+    // corner seams) with overlapping stages — capsule first (ease-out to
+    // 45%), dictate floats up from 45% (smootherstep + 14px drift + 6px
     // rise). Collapse is the exact mirror. Idles on one lock check.
     let anim_ticker = Timer::default();
     {
@@ -3823,24 +3824,24 @@ fn dock_hop(
                     .as_millis()
                     .min(an.dur_ms as u128) as f32
                     / an.dur_ms as f32;
-                // ease-in-out cubic (window-glide feel, content-only)
-                let e = if t < 0.5 {
-                    4.0 * t * t * t
-                } else {
-                    1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
-                };
+                // Smootherstep master (zero 1st + 2nd derivatives at both
+                // ends): no mechanical ease-in-out corners, the glide
+                // breathes out of and into rest. Stages overlap (capsule
+                // 0-45%, dictate from 45%) so there is never a dead seam
+                // mid-morph — one continuous fluid motion.
+                let e = smootherstep(t.clamp(0.0, 1.0));
                 if an.expanding {
                     let mg = an.mg0
-                        + (1.0 - an.mg0) * ease_out_cubic((e / 0.50).clamp(0.0, 1.0));
+                        + (1.0 - an.mg0) * ease_out_cubic((e / 0.45).clamp(0.0, 1.0));
                     let uo = an.uo0
-                        + (1.0 - an.uo0) * smootherstep(((e - 0.58) / 0.42).clamp(0.0, 1.0));
+                        + (1.0 - an.uo0) * smootherstep(((e - 0.45) / 0.55).clamp(0.0, 1.0));
                     p.set_mic_grow(mg);
                     p.set_upper_op(uo);
                     p.set_slide_px(((1.0 - uo) * -14.0).round() as i32);
                     p.set_rise_px(((1.0 - uo) * 6.0).round() as i32);
                 } else {
-                    let uo = an.uo0 * (1.0 - smootherstep((e / 0.42).clamp(0.0, 1.0)));
-                    let mg = an.mg0 * (1.0 - ease_out_cubic(((e - 0.50) / 0.50).clamp(0.0, 1.0)));
+                    let uo = an.uo0 * (1.0 - smootherstep((e / 0.45).clamp(0.0, 1.0)));
+                    let mg = an.mg0 * (1.0 - ease_out_cubic(((e - 0.45) / 0.55).clamp(0.0, 1.0)));
                     p.set_mic_grow(mg);
                     p.set_upper_op(uo);
                     p.set_slide_px(((1.0 - uo) * -14.0).round() as i32);
@@ -5166,7 +5167,7 @@ fn dock_hop(
                 // Idle hint is two runs (grey "Dictate" + white
                 // "Ctrl + Space" at 15px, 8px gap, generous side margins):
                 // measure both so the roomy (+40%) pill shrink-wraps exactly
-                // (~184px: ~150 text + 34 padding).
+                // (~166px after the -10% slim: ~150 text + slimmed padding).
                 let meas = if phase == 0 {
                     widget_platform::measure_text(p.window(), "Dictate", 15.0, false)
                         + widget_platform::measure_text(p.window(), "Ctrl + Space", 15.0, true)
@@ -5183,8 +5184,14 @@ fn dock_hop(
                     (90.0, 200.0)
                 };
                 let mut uw = ((meas.clamp(lo, hi) / 2.0).round() * 2.0) as i32;
+                // Slimmer status pill (-10% width): the strings are fixed with
+                // generous padding (+32/+24), so trimming keeps every label
+                // fitted while the pill reads lighter. Centering is
+                // structural (Slint centers the pill in the window and the
+                // rows center in the pill), so text stays pixel-centered.
+                uw = ((uw as f32 * 0.9 / 2.0).round() * 2.0) as i32;
                 if phase == 2 {
-                    uw = uw.max(140);
+                    uw = uw.max(126);
                 }
                 if (uw - last_upper_w).abs() > 8 || phase != last_phase {
                     p.set_upper_w(uw);

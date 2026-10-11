@@ -56,11 +56,11 @@ pub fn is_voiced(peak: f64, zcr: f64, spectral: f64) -> bool {
 /// Two-chunk confirmation arbiter: a detected onset is HELD, not acted on.
 /// It only becomes actionable if the next TWO chunks decay like an isolated
 /// impulse (a clap) — fast collapse, not sustained voice energy:
-///   1. chunk+1 peak < 70% of the onset peak AND burst width <= 3x the onset
+///   1. chunk+1 peak < 60% of the onset peak AND burst width <= 3x the onset
 ///      width (lively-room reverb keeps tails wide and hot: 25%/1x vetoed
-///      real claps all day — 34% ratios and 2x widths on genuine claps;
-///      50% still vetoed soft real claps in lively rooms whose +80ms
-///      reverb sits at 60-85% of the onset peak, so the bar is 70%).
+///      real claps all day — 34% ratios and 2x widths on genuine claps.
+///      60% admits lively-room tails (13-34% on real logged claps) while
+///      still vetoing sustained speech (80%+ of onset on vowel tails).
 ///      Clipped onsets (>= 32000 — the mic rail, ratios meaningless) use an
 ///      absolute < 20000 bar instead.
 ///   2. chunk+2 peak < 25% of the onset peak (the voice-pause phantom killer:
@@ -135,7 +135,7 @@ impl TransientArbiter {
                 let quiet_level = if clipped {
                     chunk_peak < 20000.0
                 } else {
-                    chunk_peak < onset_peak * 0.7
+                    chunk_peak < onset_peak * 0.6
                 };
                 let decayed_shape = chunk_width <= onset_width.saturating_mul(3).max(1);
                 if quiet_level && decayed_shape {
@@ -301,14 +301,16 @@ impl TransientDetector {
         self.last_width = width;
 
         // Fixed sensitivity 1.0 (legacy default), hardened for real rooms:
-        // a trigger clap is a LOUD onset — it needs a peak spike (≥3×
+        // a trigger clap is a LOUD onset — it needs a peak spike (≥5×
         // floor), a sharp frame-to-frame jump (≥4×), AND a high absolute
         // peak (≥ 3000 ≈ −21dBFS). The absolute floor is the key
         // discriminator: household impulses (door thumps, coughs, desk
         // knocks land 2000–3000 near a laptop mic) pass every ratio test, so
         // ratios alone start transcription "on even a little sound". A
-        // deliberate hand clap near the mic hits 5000+; everyday knocks stay
-        // below 3000 and are blocked outright.
+        // deliberate hand clap near the mic hits 5000+ at 25×+ floor; room
+        // noise in a loud room (floor ~900 from TV/chatter) sits at ~3-4×
+        // and is blocked outright. (Ratio bar tightened 3→5: a 3.6×-floor
+        // room-noise onset fired the widget on the live log.)
         // Escape hatch: an extremely loud onset (≥10× floor, abs ≥ 4000,
         // jump ≥ 3.5×, wide burst) fires on peak strength so close-range
         // claps over a loud background are never missed. The hatch
@@ -317,7 +319,7 @@ impl TransientDetector {
         // (Jump bar tightened 2.5→3.5: sustained vowels sit at ~2.8 and
         // were firing speech onsets that the arbiter then had to veto —
         // fewer false onsets, cleaner clap path.)
-        let peak_triggered = peak_over_floor >= 3.0 && max_abs >= 3000.0;
+        let peak_triggered = peak_over_floor >= 5.0 && max_abs >= 3000.0;
         let jump_triggered = rms_jump >= 4.0 && max_abs >= 3000.0;
         let wide_triggered = width >= MIN_BURST_WIDTH;
         let bang_triggered =
