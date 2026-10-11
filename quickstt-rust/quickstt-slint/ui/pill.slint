@@ -1,9 +1,11 @@
 // MiniPill — orientation-aware widget (Rust sets `vertical` per dock).
-// Bottom dock: thin 33x8 collapsed bar; hover expands with a staged morph:
+// Bottom dock: thin 45x8 collapsed bar (+50% length, same 8px thickness);
+// hover expands with a staged morph:
 // stage 1 grows the bar into the mic capsule IN PLACE (bottom-pinned, so
 // the bar's screen rect at grow=0 is pixel-identical to the mini), stage 2
 // fades + drifts the dictate pill in above it with 10px air between them.
-// Side docks: thin 9x34 collapsed bar 6px off the edge; hover expands into
+// Side docks: thin 9x51 collapsed bar (+50% length, same 9px thickness)
+// 6px off the edge; hover expands into
 // a 252x46 pair that starts EXACTLY where the mini sits — same 6px outer
 // edge, same vertical centre — capsule flush to the outer side, status pill
 // right-aligned beside it. Right dock: text left, mic right; left dock
@@ -245,10 +247,10 @@ export component PillWidget inherits Window {
         // window stays at the fixed expanded footprint (no per-tick resizes
         // — resizes flash white frames), so the invisible margins must not
         // capture clicks (transparent pixels pass through natively).
-        x: !expanded ? (vertical ? (mirror ? 2px : win_w - 11px) : (win_w - 26px) / 2) : 0px;
-        y: !expanded ? (vertical ? (win_h - 34px) / 2 : win_h - 8px) : 0px;
-        width: !expanded ? (vertical ? 9px : 26px) : win_w;
-        height: !expanded ? (vertical ? 34px : 8px) : win_h;
+        x: !expanded ? (vertical ? (mirror ? 2px : win_w - 11px) : (win_w - 41px) / 2) : 0px;
+        y: !expanded ? (vertical ? (win_h - 51px) / 2 : win_h - 8px) : 0px;
+        width: !expanded ? (vertical ? 9px : 41px) : win_w;
+        height: !expanded ? (vertical ? 51px : 8px) : win_h;
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                 drag_start();
@@ -269,14 +271,14 @@ export component PillWidget inherits Window {
         mouse-cursor: default;
     }
 
-    // ── collapsed bottom: thin 30x8 bar, bottom-centred in the fixed window ──
+    // ── collapsed bottom: thin 45x8 bar, bottom-centred in the fixed window ──
     // Super-smooth 1px outline (#5F6675): border-width renders anti-aliased
     // in the software rasterizer; radius stays exactly half the height (4px)
     // so the capsule curve is a true semicircle with no flat spots or jaggies.
     if !expanded && !vertical: Rectangle {
-        x: (win_w - 30px) / 2;
+        x: (win_w - 45px) / 2;
         y: win_h - 8px;
-        width: 30px;
+        width: 45px;
         height: 8px;
         border-radius: 4px;
         background: #000000;
@@ -285,14 +287,14 @@ export component PillWidget inherits Window {
         border-color: #5F6675;
     }
 
-    // ── collapsed side: thin 9x34 bar, edge-pinned + centred in window ──
+    // ── collapsed side: thin 9x51 bar, edge-pinned + centred in window ──
     // Same outline treatment; radius is exactly half the width (4.5px) for a
     // true-capsule curve (4px left a sub-pixel flat that aliased).
     if !expanded && vertical: Rectangle {
         x: mirror ? 2px : win_w - 11px;
-        y: (win_h - 34px) / 2;
+        y: (win_h - 51px) / 2;
         width: 9px;
-        height: 34px;
+        height: 51px;
         border-radius: 4.5px;
         background: #000000;
         opacity: pill_opacity;
@@ -322,10 +324,10 @@ export component PillWidget inherits Window {
         }
     }
     if expanded && !vertical: Rectangle {
-        // Morphs from 30x8 mini bar into 48x36 oval (enlarged mic pill, radius 18px).
-        x: Math.round((win_w / 1px - (30 + 18 * mic_grow)) / 2) * 1px;
+        // Morphs from 45x8 mini bar into 48x36 oval (enlarged mic pill, radius 18px).
+        x: Math.round((win_w / 1px - (45 + 3 * mic_grow)) / 2) * 1px;
         y: win_h - Math.round(8 + 28 * mic_grow) * 1px;
-        width: Math.round(30 + 18 * mic_grow) * 1px;
+        width: Math.round(45 + 3 * mic_grow) * 1px;
         height: Math.round(8 + 28 * mic_grow) * 1px;
         border-radius: Math.round((8 + 28 * mic_grow) / 2) * 1px;
         background: phase == 1 ? #FF334B : phase == 4 ? #3A1414 : #000000;
@@ -340,7 +342,7 @@ export component PillWidget inherits Window {
             // Enlarged mic icon: 25px
             width: Math.round(25 * mic_grow) * 1px;
             height: Math.round(25 * mic_grow) * 1px;
-            x: Math.round(((30 + 18 * mic_grow) - 25 * mic_grow) / 2) * 1px;
+            x: Math.round(((45 + 3 * mic_grow) - 25 * mic_grow) / 2) * 1px;
             y: Math.round(((8 + 28 * mic_grow) - 25 * mic_grow) / 2) * 1px;
             source: (phase == 1 || phase == 4) ? @image-url("../../assets/mic_inactive.svg") : @image-url("../../assets/mic_active.svg");
             image-fit: contain;
@@ -379,11 +381,11 @@ export component PillWidget inherits Window {
         pill_opacity: pill_opacity;
     }
     if expanded && vertical && !mirror: Rectangle {
-        // Morphs from the 9x34 mini bar into the slender 35x52 vertical capsule.
+        // Morphs from the 9x51 mini bar into the slender 35x52 vertical capsule.
         x: win_w - Math.round(9 + 26 * mic_grow) * 1px - 2px;
-        y: Math.round((win_h / 1px - (34 + 18 * mic_grow)) / 2) * 1px;
+        y: Math.round((win_h / 1px - (51 + 1 * mic_grow)) / 2) * 1px;
         width: Math.round(9 + 26 * mic_grow) * 1px;
-        height: Math.round(34 + 18 * mic_grow) * 1px;
+        height: Math.round(51 + 1 * mic_grow) * 1px;
         border-radius: Math.round((9 + 26 * mic_grow) / 2) * 1px;
         background: phase == 1 ? #FF334B : phase == 4 ? #3A1414 : #000000;
         opacity: pill_opacity;
@@ -396,7 +398,7 @@ export component PillWidget inherits Window {
             width: Math.round(25 * mic_grow) * 1px;
             height: Math.round(25 * mic_grow) * 1px;
             x: Math.round(((9 + 26 * mic_grow) - 25 * mic_grow) / 2) * 1px;
-            y: Math.round(((34 + 18 * mic_grow) - 25 * mic_grow) / 2) * 1px;
+            y: Math.round(((51 + 1 * mic_grow) - 25 * mic_grow) / 2) * 1px;
             source: (phase == 1 || phase == 4) ? @image-url("../../assets/mic_inactive.svg") : @image-url("../../assets/mic_active.svg");
             image-fit: contain;
         }
@@ -423,9 +425,9 @@ export component PillWidget inherits Window {
     if expanded && vertical && mirror: Rectangle {
         // Mirrored morph: left (screen-edge) side pinned, slender 35x52 vertical capsule.
         x: 2px;
-        y: Math.round((win_h / 1px - (34 + 18 * mic_grow)) / 2) * 1px;
+        y: Math.round((win_h / 1px - (51 + 1 * mic_grow)) / 2) * 1px;
         width: Math.round(9 + 26 * mic_grow) * 1px;
-        height: Math.round(34 + 18 * mic_grow) * 1px;
+        height: Math.round(51 + 1 * mic_grow) * 1px;
         border-radius: Math.round((9 + 26 * mic_grow) / 2) * 1px;
         background: phase == 1 ? #FF334B : phase == 4 ? #3A1414 : #000000;
         opacity: pill_opacity;
@@ -438,7 +440,7 @@ export component PillWidget inherits Window {
             width: Math.round(25 * mic_grow) * 1px;
             height: Math.round(25 * mic_grow) * 1px;
             x: Math.round(((9 + 26 * mic_grow) - 25 * mic_grow) / 2) * 1px;
-            y: Math.round(((34 + 18 * mic_grow) - 25 * mic_grow) / 2) * 1px;
+            y: Math.round(((51 + 1 * mic_grow) - 25 * mic_grow) / 2) * 1px;
             source: (phase == 1 || phase == 4) ? @image-url("../../assets/mic_inactive.svg") : @image-url("../../assets/mic_active.svg");
             image-fit: contain;
         }

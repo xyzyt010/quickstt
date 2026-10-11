@@ -21,12 +21,12 @@ const IPC_PORT: u16 = 47631;
 // 6px outer edge, same centre — the morph grows in place, never jumps.
 // Edge gaps are tight: 6px collapsed AND expanded on the sides, 8px above
 // the taskbar at the bottom (see dock_position).
-const MINI_W: i32 = 30;
+const MINI_W: i32 = 45;
 const MINI_H: i32 = 8;
 const EXP_W: i32 = 240;
 const EXP_H: i32 = 86;
 const SIDE_MINI_W: i32 = 13;
-const SIDE_MINI_H: i32 = 38;
+const SIDE_MINI_H: i32 = 55;
 const SIDE_EXP_W: i32 = 240;
 const SIDE_EXP_H: i32 = 58;
 // Compact TextBoard popup footprint (logical px): comfortable readable dimensions.
@@ -2229,7 +2229,7 @@ fn main() -> QuickSttResult<()> {
     // NEVER resizes mid-morph (native resizes flash white frames) — only
     // content props animate, so the morph is pure Slint interpolation.
     // mg0/uo0 let a glide preempt the opposite one mid-flight (quick
-    // sweep-across never waits out the full 340ms before coming back).
+    // sweep-across never waits out the full 460ms before coming back).
     #[derive(Clone, Copy)]
     struct FootAnim {
         t0: std::time::Instant,
@@ -3800,7 +3800,7 @@ fn dock_hop(
     // 60fps morph ticker: drives FootAnim content props only (the window
     // never resizes mid-morph — native resizes flash white frames). The 50ms
     // poll only STARTS glides; this consumes them. Slower + smoother by
-    // request: 340ms expand / 200ms collapse, capsule first (ease-out to
+    // request: 460ms expand / 300ms collapse, capsule first (ease-out to
     // 50%), dictate floats up late (smootherstep 58-100% + 14px drift + 6px
     // rise). Collapse is the exact mirror. Idles on one lock check.
     let anim_ticker = Timer::default();
@@ -4822,6 +4822,14 @@ fn dock_hop(
                 let mic_on = *mlock(&mic_live_timer);
                 let live_session =
                     recording || transcribing || ptt || mic_on || s.mic_open;
+                // Birth tick: the session just opened. The auto-cancel below
+                // MUST skip this tick: sess_start_t still holds the PREVIOUS
+                // session's timestamp until the reset runs further down, so
+                // a fresh trigger with a stale sess_start_t instantly
+                // "expires" (proven: trigger → Mode::Recording → Mode::Idle
+                // 43ms later, cancel logged BEFORE "session start" on the
+                // same tick — the pill flashed and died every time).
+                let is_birth = live_session && !was_live;
 
                 if !live_session {
                     capture_current_fg_window(&last_external_fg_timer);
@@ -4838,12 +4846,14 @@ fn dock_hop(
                 // deliberate speech always opens the VAD first (it is the
                 // same VAD that decides what gets transcribed), and held
                 // PTT/mic turns are never cancelled (explicit user intent).
+                // Never on the birth tick (see is_birth above).
                 // A short pill hint explains the close so it never reads as
                 // a glitch.
                 if recording
                     && !transcribing
                     && !ptt
                     && !mic_on
+                    && !is_birth
                     && std::time::Instant::now().duration_since(sess_start_t)
                         > std::time::Duration::from_millis(8000)
                     && s.transcript_buffer.len() == sess_start_len
@@ -4882,7 +4892,7 @@ fn dock_hop(
                 // Session audio peak over the WHOLE session: mid-speech
                 // pauses never trigger the nothing-heard error — only
                 // silence from the very start does.
-                if live_session && !was_live {
+                if is_birth {
                     sess_start_len = s.transcript_buffer.len();
                     sess_growth_seen = sess_start_len;
                     sess_triggered = !ptt && !mic_on;
@@ -5851,7 +5861,7 @@ fn dock_hop(
                         .map(|a| a.map(|an| an.expanding))
                         .unwrap_or(None);
                     if want && !dragging && (!is_exp || glide == Some(false)) && glide != Some(true) {
-                        // Start the staged morph (340ms, 60fps) from the LIVE
+                        // Start the staged morph (460ms, 60fps) from the LIVE
                         // props, so sweeping back in mid-collapse snaps back
                         // instead of waiting the collapse out. Fresh expands
                         // jump mini -> expanded footprint NOW, while the
@@ -5869,7 +5879,7 @@ fn dock_hop(
                         }
                         *mlock(&foot_anim_timer) = Some(FootAnim {
                             t0: now,
-                            dur_ms: 340,
+                            dur_ms: 460,
                             expanding: true,
                             mg0,
                             uo0,
@@ -5887,13 +5897,13 @@ fn dock_hop(
                         // poll tick: immediate, but immune to single-tick
                         // cursor noise). Preempts an in-flight expand from
                         // the live props — a quick sweep-across never waits
-                        // out the expand first. Fast 200ms mirror: dictate
+                        // out the expand first. Slower 300ms mirror: dictate
                         // sinks + fades first, then the capsule shrinks.
                         // Window untouched (fixed footprint).
                         let (mg0, uo0) = (p.get_mic_grow(), p.get_upper_op());
                         *mlock(&foot_anim_timer) = Some(FootAnim {
                             t0: now,
-                            dur_ms: 200,
+                            dur_ms: 300,
                             expanding: false,
                             mg0,
                             uo0,
