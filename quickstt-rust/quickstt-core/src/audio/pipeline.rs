@@ -145,6 +145,7 @@ impl SpeechSegmenter {
                     vad_result.probability
                 );
                 return Some(SegmenterEvent::SpeechStarted);
+                }
             } else {
                 // First qualifying chunk only arms — a lone click disarms
                 // on the very next chunk.
