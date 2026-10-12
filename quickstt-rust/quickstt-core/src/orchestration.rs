@@ -76,6 +76,10 @@ pub struct AppState {
     /// Consecutive identical ghost-singleton turn results (loop breaker).
     pub last_ghost_text: String,
     pub ghost_run: u32,
+    /// Persistent per-turn transcription history (dashboard History section,
+    /// newest first) + a bump counter so the UI re-syncs only on change.
+    pub history: Vec<crate::history::HistoryItem>,
+    pub history_seq: u64,
 }
 
 impl AppState {
@@ -114,6 +118,8 @@ impl AppState {
             session_saw_speech: false,
             last_ghost_text: String::new(),
             ghost_run: 0,
+            history: Vec::new(),
+            history_seq: 0,
         }
     }
 }
@@ -126,6 +132,12 @@ pub enum OrchestratorCommand {
     AudioLevel(u8),
     TranscribeChunk(Vec<f32>),
     TextRecognized(String),
+    /// A transcribed utterance WITH its source wav: same handling as
+    /// [`OrchestratorCommand::TextRecognized`] plus dashboard-history
+    /// recording (text + audio copy). Sent by the transcribe threads on
+    /// success (even for ghost-filtered empty results — the handler gates
+    /// on non-empty text, so nothing extra is stored).
+    UtteranceTranscribed { text: String, wav_path: std::path::PathBuf },
     PartialText(String),
     /// Watchdog: the transcription engine stopped responding (hung load or
     /// dead helper). Unstick the turn so the widget never sits in
@@ -618,7 +630,10 @@ fn flush_pending_utterance(
                     } else {
                         text
                     };
-                    let _ = tx_clone.try_send(OrchestratorCommand::TextRecognized(text));
+                    let _ = tx_clone.try_send(OrchestratorCommand::UtteranceTranscribed {
+                        text,
+                        wav_path: wav_path.clone(),
+                    });
                 }
                 Err(e) => {
                     // Complete the turn even on failure (empty result): the
@@ -824,7 +839,10 @@ fn process_audio_chunk(
                         };
                         #[cfg(not(feature = "audio-capture"))]
                         let text = text;
-                        let _ = tx_clone.try_send(OrchestratorCommand::TextRecognized(text));
+                        let _ = tx_clone.try_send(OrchestratorCommand::UtteranceTranscribed {
+                            text,
+                            wav_path: wav_clone.clone(),
+                        });
                     }
                     Err(e) => {
                         // Complete the turn even on failure (see above).
@@ -836,6 +854,54 @@ fn process_audio_chunk(
                 }
             });
     }
+}
+
+/// Shared TextRecognized/UtteranceTranscribed body: ghost-run loop breaker +
+/// transcript buffer + landing mode. Returns true when the turn was fully
+/// consumed (3rd+ consecutive identical ghost) and the caller must `continue`
+/// the command loop without further handling.
+fn apply_recognized_text(s: &mut AppState, text: String) -> bool {
+    // Ghost-run loop breaker: the same singleton ("you", "yeah", ...)
+    // coming back turn after turn is the engine hallucinating on
+    // background, never dictation. First occurrence still flows to the UI
+    // gates below; the 3rd consecutive identical ghost is dropped here so
+    // the "you you you ..." chain cannot accumulate. Any real (non-ghost)
+    // text resets the run.
+    #[cfg(feature = "audio-capture")]
+    {
+        let norm = text.trim().to_lowercase();
+        if !norm.is_empty() && is_ghost_singleton(&norm) {
+            if norm == s.last_ghost_text {
+                s.ghost_run += 1;
+            } else {
+                s.last_ghost_text = norm.clone();
+                s.ghost_run = 1;
+            }
+            if s.ghost_run >= 3 {
+                info!(
+                    "ghost run {:?} x{} dropped (loop breaker)",
+                    norm, s.ghost_run
+                );
+                s.mode = AppMode::WakewordListening;
+                s.status_message = "Listening...".into();
+                return true;
+            }
+        } else if !norm.is_empty() {
+            s.last_ghost_text.clear();
+            s.ghost_run = 0;
+        }
+    }
+    if !text.trim().is_empty() {
+        if !s.transcript_buffer.is_empty() {
+            s.transcript_buffer.push('\n');
+        }
+        s.transcript_buffer.push_str(text.trim());
+        s.partial_result.clear();
+        info!("Recognized: {}", text.trim());
+    }
+    s.mode = AppMode::WakewordListening;
+    s.status_message = "Listening...".into();
+    false
 }
 
 impl AppOrchestrator {
@@ -1076,47 +1142,33 @@ impl AppOrchestrator {
                 }
                 OrchestratorCommand::TextRecognized(text) => {
                     let mut s = state.lock().unwrap();
-                    // Ghost-run loop breaker: the same singleton ("you",
-                    // "yeah", ...) coming back turn after turn is the engine
-                    // hallucinating on background, never dictation. First
-                    // occurrence still flows to the UI gates below; the 3rd
-                    // consecutive identical ghost is dropped here so the
-                    // "you you you ..." chain cannot accumulate. Any real
-                    // (non-ghost) text resets the run.
+                    if apply_recognized_text(&mut s, text) {
+                        continue;
+                    }
+                }
+                OrchestratorCommand::UtteranceTranscribed { text, wav_path } => {
+                    let mut s = state.lock().unwrap();
+                    if apply_recognized_text(&mut s, text.clone()) {
+                        continue;
+                    }
+                    // Dashboard history: real dictation only — empty results
+                    // and ghost singletons are never recorded (transcript
+                    // keeps its original case; the lowercase norm is only
+                    // for the ghost check).
+                    let norm = text.trim().to_lowercase();
                     #[cfg(feature = "audio-capture")]
-                    {
-                        let norm = text.trim().to_lowercase();
-                        if !norm.is_empty() && is_ghost_singleton(&norm) {
-                            if norm == s.last_ghost_text {
-                                s.ghost_run += 1;
-                            } else {
-                                s.last_ghost_text = norm.clone();
-                                s.ghost_run = 1;
-                            }
-                            if s.ghost_run >= 3 {
-                                info!(
-                                    "ghost run {:?} x{} dropped (loop breaker)",
-                                    norm, s.ghost_run
-                                );
-                                s.mode = AppMode::WakewordListening;
-                                s.status_message = "Listening...".into();
-                                continue;
-                            }
-                        } else if !norm.is_empty() {
-                            s.last_ghost_text.clear();
-                            s.ghost_run = 0;
+                    let is_ghost = !norm.is_empty() && is_ghost_singleton(&norm);
+                    #[cfg(not(feature = "audio-capture"))]
+                    let is_ghost = false;
+                    if !norm.is_empty() && !is_ghost {
+                        if crate::history::push_turn(
+                            &mut s.history,
+                            text.trim().to_string(),
+                            Some(&wav_path),
+                        ) {
+                            s.history_seq += 1;
                         }
                     }
-                    if !text.trim().is_empty() {
-                        if !s.transcript_buffer.is_empty() {
-                            s.transcript_buffer.push('\n');
-                        }
-                        s.transcript_buffer.push_str(text.trim());
-                        s.partial_result.clear();
-                        info!("Recognized: {}", text.trim());
-                    }
-                    s.mode = AppMode::WakewordListening;
-                    s.status_message = "Listening...".into();
                 }
                 OrchestratorCommand::PartialText(text) => {
                     let mut s = state.lock().unwrap();

@@ -3797,13 +3797,14 @@ fn dock_hop(
     let diag_rx_timer = diag_rx;
     let last_external_fg_timer = last_external_fg.clone();
     let wakeword_handle_timer = wakeword_handle.clone();
-    // 60fps morph ticker: drives FootAnim content props only (the window
+    // 60fps morph ticker: drives the mic-capsule grow only (the window
     // never resizes mid-morph — native resizes flash white frames). The 50ms
-    // poll only STARTS glides; this consumes them. Slower + smoother by
-    // request: 460ms expand / 300ms collapse, smootherstep master (no
-    // corner seams) with overlapping stages — capsule first (ease-out to
-    // 45%), dictate floats up from 45% (smootherstep + 14px drift + 6px
-    // rise). Collapse is the exact mirror. Idles on one lock check.
+    // poll only STARTS glides; this consumes them. 460ms expand / 300ms
+    // collapse, smootherstep master (no corner seams), capsule eases out
+    // over the first 38% on expand (brisker but smooth) and over the full
+    // glide on collapse. The dictate pill is NOT animated — it snaps
+    // in/out instantly at glide start (static, always exactly in place).
+    // Idles on one lock check.
     let anim_ticker = Timer::default();
     {
         let pill_a = pill.as_weak();
@@ -3826,26 +3827,26 @@ fn dock_hop(
                     / an.dur_ms as f32;
                 // Smootherstep master (zero 1st + 2nd derivatives at both
                 // ends): no mechanical ease-in-out corners, the glide
-                // breathes out of and into rest. Stages overlap (capsule
-                // 0-45%, dictate from 45%) so there is never a dead seam
-                // mid-morph — one continuous fluid motion.
+                // breathes out of and into rest. The mic capsule owns the
+                // motion (ease-out over the first 38% — a touch faster but
+                // still smooth); the dictate pill does NOT animate — it
+                // pops in/out instantly with zero fade/slide/drift (static,
+                // always exactly in place), so there is never a glitchy
+                // half-faded drifting label mid-morph.
                 let e = smootherstep(t.clamp(0.0, 1.0));
                 if an.expanding {
                     let mg = an.mg0
-                        + (1.0 - an.mg0) * ease_out_cubic((e / 0.45).clamp(0.0, 1.0));
-                    let uo = an.uo0
-                        + (1.0 - an.uo0) * smootherstep(((e - 0.45) / 0.55).clamp(0.0, 1.0));
+                        + (1.0 - an.mg0) * ease_out_cubic((e / 0.38).clamp(0.0, 1.0));
                     p.set_mic_grow(mg);
-                    p.set_upper_op(uo);
-                    p.set_slide_px(((1.0 - uo) * -14.0).round() as i32);
-                    p.set_rise_px(((1.0 - uo) * 6.0).round() as i32);
+                    p.set_upper_op(1.0);
+                    p.set_slide_px(0);
+                    p.set_rise_px(0);
                 } else {
-                    let uo = an.uo0 * (1.0 - smootherstep((e / 0.45).clamp(0.0, 1.0)));
-                    let mg = an.mg0 * (1.0 - ease_out_cubic(((e - 0.45) / 0.55).clamp(0.0, 1.0)));
+                    let mg = an.mg0 * (1.0 - ease_out_cubic(e.clamp(0.0, 1.0)));
                     p.set_mic_grow(mg);
-                    p.set_upper_op(uo);
-                    p.set_slide_px(((1.0 - uo) * -14.0).round() as i32);
-                    p.set_rise_px(((1.0 - uo) * 6.0).round() as i32);
+                    p.set_upper_op(0.0);
+                    p.set_slide_px(0);
+                    p.set_rise_px(0);
                 }
                 if t >= 1.0 {
                     if !an.expanding {
@@ -5859,6 +5860,11 @@ fn dock_hop(
                             uo0,
                         });
                         p.set_expanded(true);
+                        // Dictate pill appears instantly (no fade/slide): the
+                        // capsule morph owns all motion from here.
+                        p.set_upper_op(1.0);
+                        p.set_slide_px(0);
+                        p.set_rise_px(0);
                         *mlock(&expanded_timer) = true;
                         log_line("ui: expand glide start");
                     } else if !want
@@ -5871,9 +5877,9 @@ fn dock_hop(
                         // poll tick: immediate, but immune to single-tick
                         // cursor noise). Preempts an in-flight expand from
                         // the live props — a quick sweep-across never waits
-                        // out the expand first. Slower 300ms mirror: dictate
-                        // sinks + fades first, then the capsule shrinks.
-                        // Window untouched (fixed footprint).
+                        // out the expand first. Slower 300ms mirror for the
+                        // capsule; the dictate pill vanishes instantly (no
+                        // fade/slide). Window untouched (fixed footprint).
                         let (mg0, uo0) = (p.get_mic_grow(), p.get_upper_op());
                         *mlock(&foot_anim_timer) = Some(FootAnim {
                             t0: now,
@@ -5882,6 +5888,9 @@ fn dock_hop(
                             mg0,
                             uo0,
                         });
+                        p.set_upper_op(0.0);
+                        p.set_slide_px(0);
+                        p.set_rise_px(0);
                         log_line("ui: collapse glide start");
                     }
                 } else if p.window().is_visible() {

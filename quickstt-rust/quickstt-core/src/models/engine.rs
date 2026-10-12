@@ -921,6 +921,12 @@ fn transcribe_whisper_cpp(
     let output = cmd
         .arg("--no-timestamps")
         .arg("--suppress-nst")
+        // Anti-hallucination: the default 0.60 no-speech threshold lets
+        // room-noise clips decode as "you"/"yeah" (measured on 1s noise
+        // clips: RMS 123, ZCR 0.13). At 0.85 those return empty while real
+        // speech (low no-speech probability) decodes untouched.
+        .arg("-nth")
+        .arg("0.85")
         .arg("-t")
         .arg("4")
         .output()

@@ -1,6 +1,7 @@
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod history;
 pub mod ipc;
 pub mod managers;
 pub mod models;

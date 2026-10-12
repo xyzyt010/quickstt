@@ -14,6 +14,10 @@ pub struct SpeechSegmenter {
     preroll_max_chunks: usize,
     utterance: Vec<i16>,
     in_utterance: bool,
+    // Two-chunk start arming: the first qualifying chunk only arms (see
+    // process_chunk); a lone transient disarms on the next chunk. Cleared
+    // on open and on every utterance end.
+    start_armed: bool,
     // Trigger-word deaf window (samples still to discard): a wakeword/clap
     // opens the mic ~100-300ms after the trigger sound, so the trigger
     // itself ("alexa", the clap) is the first thing the fresh stream hears.
@@ -49,6 +53,7 @@ impl SpeechSegmenter {
             preroll_max_chunks: preroll_chunks.max(1),
             utterance: Vec::new(),
             in_utterance: false,
+            start_armed: false,
             deaf_samples: 0,
             ptt_mode: false,
             silence_frames: 0,
@@ -85,6 +90,7 @@ impl SpeechSegmenter {
         self.preroll.clear();
         self.utterance.clear();
         self.in_utterance = false;
+        self.start_armed = false;
         self.silence_frames = 0;
         self.hard_silence_frames = 0;
         // Deaf windows are per-open, never per-utterance: mid-session resets
@@ -109,17 +115,24 @@ impl SpeechSegmenter {
                 self.preroll.pop_front();
             }
 
-            // Hands-free start (wakeword/clap turns): faint but real energy
-            // (level>=1) with any VAD probability opens the utterance — the
-            // same bar as PTT fast-start. A stricter gate here (level>=2 +
-            // speech_likely) starved soft follow-up speech: wakeword turns
-            // heard the trigger, then "Nothing detected" on real dictation.
-            // Ghost safety is untouched: preroll bounds the head, and the
-            // orchestration fraction gate + run breaker still drop noise.
-            if vad_result.speech_likely && level >= 2
-                || level >= 1 && vad_result.probability > 0.30
-            {
-                self.in_utterance = true;
+            // Hands-free start (wakeword/clap turns): the gate is the same
+            // bar as PTT fast-start (level>=2 + speech_likely, or faint
+            // level>=1 with real VAD probability) — but it must hold for TWO
+            // consecutive chunks. A single transient click (door tick, mic
+            // pop, clap tail) trips one chunk and opened whole 1s turns
+            // that Whisper then hallucinated as "you" (measured: RMS 123,
+            // ZCR 0.13 noise clips typed as words). Real speech sustains
+            // across chunks; clicks don't. The preroll already buffers, so
+            // the arming chunk still lands in the utterance — no audio lost.
+            // (A level>=2 + speech_likely-only gate was tried before and
+            // starved soft follow-up speech; the sustain rule keeps the
+            // loose bar but demands it twice.)
+            let start_qualifies = vad_result.speech_likely && level >= 2
+                || level >= 1 && vad_result.probability > 0.30;
+            if start_qualifies {
+                if self.start_armed {
+                    self.start_armed = false;
+                    self.in_utterance = true;
                 for pr in self.preroll.drain(..) {
                     self.utterance.extend_from_slice(&pr);
                 }
@@ -132,6 +145,10 @@ impl SpeechSegmenter {
                     vad_result.probability
                 );
                 return Some(SegmenterEvent::SpeechStarted);
+            } else {
+                // First qualifying chunk only arms — a lone click disarms
+                // on the very next chunk.
+                self.start_armed = true;
             }
             return None;
         }
