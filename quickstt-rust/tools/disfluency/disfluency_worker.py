@@ -113,46 +113,134 @@ def main() -> int:
         active_dir = None
         log("tagger unloaded")
 
+    NUM_WORDS = {
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+    }
+
+    def apply_repairs(text: str) -> str:
+        import re
+
+        # 1. Explicit '<X>[?.,!] (oh,) (sorry|wait|no), not <X>. <Y>' retraction:
+        # e.g. 'Can you please buy me a car? Oh, sorry, not a car. A jet.' -> 'Can you please buy me a jet.'
+        pat_not = re.compile(
+            r"\b([A-Za-z]+(?:\s+[A-Za-z]+){0,3})[?.,!]*\s+(?:oh\s*,?\s*)?(?:sorry|wait|no)\s*,?\s*not\s+\1\s*[.,!?;]*\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,3})([.!?]?)",
+            re.IGNORECASE,
+        )
+
+        def _sub_not(m: "re.Match[str]") -> str:
+            orig, repl, punct = m.group(1), m.group(2), m.group(3)
+            if (
+                orig[0].islower()
+                and repl[0].isupper()
+                and repl.lower().split()[0]
+                in {"a", "an", "the", "my", "your", "his", "her", "our", "their"}
+            ):
+                repl = repl[0].lower() + repl[1:]
+            return repl + (punct or ".")
+
+        text = pat_not.sub(_sub_not, text)
+
+        # 2. '<NP>, I mean, <NP>' substitution when both sides share structure
+        pat_imean = re.compile(
+            r"\b((?:a|an|the|my|your|his|her|our|their)\s+[A-Za-z]+|[A-Za-z]+),\s*I\s+mean,\s*((?:a|an|the|my|your|his|her|our|their)\s+[A-Za-z]+|[A-Za-z]+)",
+            re.IGNORECASE,
+        )
+
+        def _sub_imean(m: "re.Match[str]") -> str:
+            lhs, rhs = m.group(1), m.group(2)
+            lw, rw = lhs.split(), rhs.split()
+            if rw[0].lower() in {
+                "i",
+                "you",
+                "we",
+                "they",
+                "he",
+                "she",
+                "it",
+                "that",
+                "this",
+                "could",
+                "can",
+                "should",
+                "would",
+            }:
+                return m.group(0)
+            if len(lw) == len(rw):
+                return rhs
+            return m.group(0)
+
+        return pat_imean.sub(_sub_imean, text)
+
     def clean(text: str) -> str:
         assert session is not None and tokenizer is not None
         import re
 
         import numpy as _np
 
-        # Whitespace-word spans: the WordPiece pre-tokenizer splits
-        # punctuation ("should," -> "should" + ","), so token word-ids do
-        # NOT match whitespace words. Map every token to its whitespace
-        # word via character offsets; the FIRST token of each whitespace
-        # word decides its tag (standard for token-classification taggers).
-        spans = [(m.start(), m.end()) for m in re.finditer(r"\S+", text)]
-        words = [text[a:b] for a, b in spans]
+        # Normalize multi-segment newline joins into single spaces so the
+        # turn-end post-processor sees one continuous utterance.
+        norm_text = " ".join(text.split())
+        if not norm_text:
+            return text
+        words = norm_text.split()
         if not words:
             return text
 
-        def word_of(char_pos: int) -> int | None:
-            for i, (a, b) in enumerate(spans):
-                if a <= char_pos < b:
-                    return i
-            return None
-
-        enc = tokenizer.encode(text)
+        # Use is_pretokenized=True so enc.words maps [CLS]/[SEP] to None and
+        # groups punctuation with its whitespace word (matching training).
+        enc = tokenizer.encode(words, is_pretokenized=True)
         ids = _np.array([enc.ids], dtype=_np.int64)
         mask = _np.ones_like(ids)
         logits = session.run(None, {"input_ids": ids, "attention_mask": mask})[0][0]
         tags = ["KEEP"] * len(words)
         seen: set[int] = set()
-        for tok_pos, (tok_start, _tok_end) in enumerate(enc.offsets):
-            wi = word_of(tok_start)
+        for tok_pos, wi in enumerate(enc.words):
             if wi is None or wi in seen:
                 continue
             seen.add(wi)
             row = logits[tok_pos]
             best = int(_np.argmax(row))
-            tags[wi] = LABELS[best] if best < len(LABELS) else "KEEP"
-        cleaned = reconstruct(words, tags)
+            tag = LABELS[best] if best < len(LABELS) else "KEEP"
+            w_clean = re.sub(r"[^A-Za-z0-9]", "", words[wi]).lower()
+            # Guard counting numbers ('one two three') unless immediate repeat ('one one')
+            if tag == "DELETE" and (w_clean in NUM_WORDS or w_clean.isdigit()):
+                nxt = (
+                    re.sub(r"[^A-Za-z0-9]", "", words[wi + 1]).lower()
+                    if wi + 1 < len(words)
+                    else ""
+                )
+                if w_clean != nxt:
+                    tag = "KEEP"
+            tags[wi] = tag
+
+        # Preserve sentence-initial capitalization when a leading filler ('Um,') is deleted.
+        cap_pending = False
+        for i, (w, t) in enumerate(zip(words, tags)):
+            is_sent_start = (i == 0) or (
+                i > 0 and words[i - 1].endswith((".", "!", "?"))
+            )
+            if t == "DELETE":
+                if is_sent_start and w and w[0].isupper():
+                    cap_pending = True
+            else:
+                if cap_pending and t == "KEEP":
+                    tags[i] = "KEEP_CAPITALIZE"
+                cap_pending = False
+
+        cleaned = apply_repairs(reconstruct(words, tags))
         # Never blank a turn: all-DELETE (or punctuation-only loss) falls
         # back to the original text.
-        return cleaned if cleaned.strip() else text
+        return cleaned if cleaned.strip() else norm_text
 
     log("ready, waiting for JSON-lines on stdin")
     for raw in sys.stdin:

@@ -336,6 +336,23 @@ pub fn ensure_download(state: SharedState) {
                 s.is_downloading = false;
                 s.download_speed_text = String::new();
             }
+            prewarm();
+        })
+        .ok();
+}
+
+static PREWARM_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Pre-load the 66M int8 ONNX tagger in a background thread so the turn-end
+/// post-processing pass runs in ~15ms with no cold-start delay.
+pub fn prewarm() {
+    if !files_present() || PREWARM_STARTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("disfluency-prewarm".to_string())
+        .spawn(|| {
+            let _ = clean_text("Um, hello.");
         })
         .ok();
 }

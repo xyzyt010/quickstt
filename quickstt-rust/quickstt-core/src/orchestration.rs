@@ -80,6 +80,10 @@ pub struct AppState {
     /// newest first) + a bump counter so the UI re-syncs only on change.
     pub history: Vec<crate::history::HistoryItem>,
     pub history_seq: u64,
+    /// Number of in-flight `stt-transcribe` threads (segments + final flush).
+    /// Non-zero keeps the turn non-settled until the last segment lands in
+    /// `transcript_buffer`, so turn-end post-processing sees the whole text.
+    pub pending_transcribes: u32,
 }
 
 impl AppState {
@@ -120,6 +124,7 @@ impl AppState {
             ghost_run: 0,
             history: Vec::new(),
             history_seq: 0,
+            pending_transcribes: 0,
         }
     }
 }
@@ -595,8 +600,10 @@ fn flush_pending_utterance(
         let mut s = state.lock().unwrap();
         s.mode = AppMode::Transcribing;
         s.status_message = "Transcribing…".into();
+        s.pending_transcribes = s.pending_transcribes.saturating_add(1);
     }
     let tx_clone = tx_cmd.clone();
+    let state_err = Arc::clone(state);
     std::thread::Builder::new()
         .name("stt-transcribe".to_string())
         .spawn(move || {
@@ -643,6 +650,9 @@ fn flush_pending_utterance(
                     // old PartialText("") path left mode=Transcribing forever
                     // and wedged the widget on every engine error.
                     warn!("Transcribe failed for {:?}: {}", wav_path, e);
+                    if let Ok(mut s) = state_err.lock() {
+                        s.pending_transcribes = s.pending_transcribes.saturating_sub(1);
+                    }
                     let _ = tx_clone.try_send(OrchestratorCommand::TextRecognized(String::new()));
                 }
             }
@@ -797,8 +807,13 @@ fn process_audio_chunk(
 
         // Transcription runs in a one-shot thread so we don't block the audio
         // loop for the multi-second inference.
+        {
+            let mut s = state.lock().unwrap();
+            s.pending_transcribes = s.pending_transcribes.saturating_add(1);
+        }
         let tx_clone = tx_cmd.clone();
         let wav_clone = wav_path.clone();
+        let state_err = Arc::clone(state);
         let _ = std::thread::Builder::new()
             .name("stt-transcribe".to_string())
             .spawn(move || {
@@ -850,6 +865,9 @@ fn process_audio_chunk(
                     Err(e) => {
                         // Complete the turn even on failure (see above).
                         warn!("Transcribe failed for {:?}: {}", wav_clone, e);
+                        if let Ok(mut s) = state_err.lock() {
+                            s.pending_transcribes = s.pending_transcribes.saturating_sub(1);
+                        }
                         let _ = tx_clone.try_send(OrchestratorCommand::TextRecognized(
                             String::new(),
                         ));
@@ -885,8 +903,16 @@ fn apply_recognized_text(s: &mut AppState, text: String) -> bool {
                     "ghost run {:?} x{} dropped (loop breaker)",
                     norm, s.ghost_run
                 );
-                s.mode = AppMode::WakewordListening;
-                s.status_message = "Listening...".into();
+                if s.mic_open {
+                    s.mode = AppMode::Recording;
+                    s.status_message = "Listening...".into();
+                } else if s.pending_transcribes > 0 {
+                    s.mode = AppMode::Transcribing;
+                    s.status_message = "Transcribing…".into();
+                } else {
+                    s.mode = AppMode::WakewordListening;
+                    s.status_message = "Listening...".into();
+                }
                 return true;
             }
         } else if !norm.is_empty() {
@@ -902,8 +928,16 @@ fn apply_recognized_text(s: &mut AppState, text: String) -> bool {
         s.partial_result.clear();
         info!("Recognized: {}", text.trim());
     }
-    s.mode = AppMode::WakewordListening;
-    s.status_message = "Listening...".into();
+    if s.mic_open {
+        s.mode = AppMode::Recording;
+        s.status_message = "Listening...".into();
+    } else if s.pending_transcribes > 0 {
+        s.mode = AppMode::Transcribing;
+        s.status_message = "Transcribing…".into();
+    } else {
+        s.mode = AppMode::WakewordListening;
+        s.status_message = "Listening...".into();
+    }
     false
 }
 
@@ -1051,7 +1085,15 @@ impl AppOrchestrator {
             }
         }
 
+        let want_disfluency = app_state.settings.clean_disfluencies;
         let state = Arc::new(Mutex::new(app_state));
+        if want_disfluency {
+            if crate::models::disfluency::files_present() {
+                crate::models::disfluency::prewarm();
+            } else {
+                crate::models::disfluency::ensure_download(Arc::clone(&state));
+            }
+        }
         let (tx_cmd, rx_cmd) = mpsc::channel(256);
 
         #[cfg(feature = "audio-capture")]
@@ -1134,10 +1176,15 @@ impl AppOrchestrator {
                         let _ = audio_control_tx.send(AudioControlCommand::Close);
                     }
                     let mut s = state.lock().unwrap();
-                    s.mode = AppMode::Idle;
-                    s.status_message = "Ready".into();
+                    if s.pending_transcribes > 0 {
+                        s.mode = AppMode::Transcribing;
+                        s.status_message = "Transcribing…".into();
+                    } else {
+                        s.mode = AppMode::Idle;
+                        s.status_message = "Ready".into();
+                    }
                     s.session_saw_speech = false;
-                    info!("Mode → Idle");
+                    info!("Mode → {:?}", s.mode);
                 }
                 OrchestratorCommand::AudioLevel(level) => {
                     let mut s = state.lock().unwrap();
@@ -1150,41 +1197,29 @@ impl AppOrchestrator {
                     }
                 }
                 OrchestratorCommand::UtteranceTranscribed { text, wav_path } => {
-                    // Disfluency cleanup for NON-STREAMING turns (whisper
-                    // tiny/large, canary-qwen, …): strip um/uh/repeats AFTER
-                    // ghost filtering, so the transcript buffer, history and
-                    // paste all receive cleaned text. Streaming deltas
-                    // (PartialText) are untouched — cleanup needs the whole
-                    // utterance for context. Missing tagger files kick off a
-                    // background fetch; turns pass through until it lands.
-                    let model_name = state
-                        .lock()
-                        .map(|s| {
-                            s.model_entries
-                                .get(s.selected_model)
-                                .map(|e| e.name.clone())
-                                .unwrap_or_default()
-                        })
-                        .unwrap_or_default();
+                    // Disfluency cleanup now runs ONCE at the final phase in
+                    // the UI loop (after the user releases Ctrl+Space or stops
+                    // transcription and all STT segments have completed).
+                    // Here we only ensure the 66MB ONNX files are downloaded
+                    // or pre-warmed in the background.
                     let want_clean = state
                         .lock()
                         .map(|s| s.settings.clean_disfluencies)
-                        .unwrap_or(false)
-                        && !crate::models::catalog::is_streaming_model(&model_name);
-                    if want_clean && !crate::models::disfluency::files_present() {
-                        crate::models::disfluency::ensure_download(Arc::clone(&state));
+                        .unwrap_or(false);
+                    if want_clean {
+                        if !crate::models::disfluency::files_present() {
+                            crate::models::disfluency::ensure_download(Arc::clone(&state));
+                        } else {
+                            crate::models::disfluency::prewarm();
+                        }
                     }
                     let norm = text.trim().to_lowercase();
                     #[cfg(feature = "audio-capture")]
                     let is_ghost = !norm.is_empty() && is_ghost_singleton(&norm);
                     #[cfg(not(feature = "audio-capture"))]
                     let is_ghost = false;
-                    let text = if want_clean && !norm.is_empty() && !is_ghost {
-                        crate::models::disfluency::clean_text(text.trim())
-                    } else {
-                        text
-                    };
                     let mut s = state.lock().unwrap();
+                    s.pending_transcribes = s.pending_transcribes.saturating_sub(1);
                     if apply_recognized_text(&mut s, text.clone()) {
                         continue;
                     }
@@ -1204,6 +1239,7 @@ impl AppOrchestrator {
                 }
                 OrchestratorCommand::AbortTranscribe => {
                     let mut s = state.lock().unwrap();
+                    s.pending_transcribes = 0;
                     if s.mode == AppMode::Transcribing {
                         s.mode = AppMode::Idle;
                         s.status_message = "Ready".into();
@@ -1440,10 +1476,6 @@ impl AppOrchestrator {
                         .name("stt-offload".to_string())
                         .spawn(move || {
                             unload_all_workers_except(&active_family);
-                            // The disfluency tagger is model-independent: drop
-                            // its session too (reloads on the next cleaned
-                            // turn). Lean RAM everywhere.
-                            crate::models::disfluency::disfluency_unload();
                             crate::models::engine::compact_working_set();
                         })
                         .ok();

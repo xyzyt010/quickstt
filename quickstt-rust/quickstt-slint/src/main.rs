@@ -4805,7 +4805,7 @@ fn dock_hop(
                 }
             }
 
-            if let Ok(s) = state_timer.lock() {
+            if let Ok(mut s) = state_timer.lock() {
                 // Live session: mic capsule ON, PTT held, core mid-turn, or
                 // capture open. Wakeword-ARMED idle is NOT a session
                 // (renders as idle, hover-to-expand) — counting it kept the
@@ -4818,10 +4818,21 @@ fn dock_hop(
                 // until a real close (mic tap, clap-stop, PTT release,
                 // auto-cancel, silence setting) — never mid-turn.
                 let recording = s.mode == AppMode::Recording;
-                let transcribing = s.mode == AppMode::Transcribing;
+                let transcribing =
+                    s.mode == AppMode::Transcribing || s.pending_transcribes > 0;
                 // PTT held + mic capsule ON both count as live for display.
                 let ptt = *mlock(&ptt_held_timer);
-                let mic_on = *mlock(&mic_live_timer);
+                let mut mic_on = *mlock(&mic_live_timer);
+                if mic_on
+                    && !s.mic_open
+                    && !recording
+                    && was_live
+                    && std::time::Instant::now().duration_since(sess_start_t)
+                        > std::time::Duration::from_millis(500)
+                {
+                    *mlock(&mic_live_timer) = false;
+                    mic_on = false;
+                }
                 let live_session =
                     recording || transcribing || ptt || mic_on || s.mic_open;
                 // Birth tick: the session just opened. sess_start_t still
@@ -4936,11 +4947,13 @@ fn dock_hop(
                         speech_peak = speech_peak.max(s.audio_level as u32);
                     }
                 }
+                let session_just_ended = was_live && !live_session;
                 was_live = live_session;
-                // Done pulse: the engine just finished a turn (any landing
-                // mode — success lands in wakeword-armed, errors land Idle).
+                // Done pulse: the session + any in-flight STT just finished
+                // (never mid-turn while the user is still holding Ctrl+Space
+                // or recording).
                 let mut turn_just_done = false;
-                if prev_transcribing && !transcribing {
+                if (prev_transcribing && !transcribing && !live_session) || session_just_ended {
                     turn_just_done = true;
                     done_until = now + std::time::Duration::from_millis(600);
                     tb_until = now + std::time::Duration::from_secs(8);
@@ -5040,21 +5053,51 @@ fn dock_hop(
                     }
                 } else {
                     if (turn_just_done || settled) && blen > turn_base_len {
-                        let full = s.transcript_buffer[turn_base_len..].trim().to_owned();
-                        if !full.is_empty() {
-                            let low = full.to_lowercase();
+                        let raw_full = s.transcript_buffer[turn_base_len..].trim().to_owned();
+                        if !raw_full.is_empty() {
+                            let low = raw_full.to_lowercase();
                             if should_drop_hallucination(low.as_str(), speech_peak) {
                                 log_line(&format!(
-                                    "hallucination dropped {full:?} peak={sess_peak}"
+                                    "hallucination dropped {raw_full:?} peak={sess_peak}"
                                 ));
                             } else {
+                                // Final post-processing phase: once the user
+                                // has lifted Ctrl+Space / stopped transcription
+                                // and all STT segments have completed, run the
+                                // disfluency AI tagger over the entire turn text
+                                // right before pasting.
+                                let full = if s.settings.clean_disfluencies {
+                                    let t0 = std::time::Instant::now();
+                                    let cleaned =
+                                        quickstt_core::models::disfluency::clean_text(&raw_full);
+                                    log_line(&format!(
+                                        "post-process disfluency ({}ms): {:?} -> {:?}",
+                                        t0.elapsed().as_millis(),
+                                        raw_full,
+                                        cleaned
+                                    ));
+                                    cleaned
+                                } else {
+                                    raw_full.clone()
+                                };
+                                if full != raw_full {
+                                    s.transcript_buffer.truncate(turn_base_len);
+                                    s.transcript_buffer.push_str(&full);
+                                    *mlock(&last_turn_timer) = full.clone();
+                                    if let Some(h) = s.history.first_mut() {
+                                        h.text = full.clone();
+                                        quickstt_core::history::save(&s.history);
+                                        s.history_seq += 1;
+                                    }
+                                }
                                 log_line(&format!("batch turn output bulk +{} chars", full.len()));
                                 let target_fg = *mlock(&last_external_fg_timer);
                                 deliver_transcription_output(&full, out_mode, target_fg);
                             }
                         }
-                        turn_base_len = blen;
-                        last_buf_len = blen;
+                        let new_blen = s.transcript_buffer.len();
+                        turn_base_len = new_blen;
+                        last_buf_len = new_blen;
                     }
                 }
                 let msg = if s.status_message.is_empty() {
