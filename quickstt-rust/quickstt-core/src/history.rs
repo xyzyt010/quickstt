@@ -225,7 +225,8 @@ mod tests {
         }
         assert_eq!(items.len(), HISTORY_CAP);
         assert_eq!(items[0].text, format!("turn {}", HISTORY_CAP + 4));
-        assert!(delete_turn(&mut items, &items[0].id.clone()));
+        let first_id = items[0].id.clone();
+        assert!(delete_turn(&mut items, &first_id));
         assert_eq!(items.len(), HISTORY_CAP - 1);
         assert!(!delete_turn(&mut items, "missing"));
         assert!(!push_turn(&mut items, "   ".to_string(), None));
