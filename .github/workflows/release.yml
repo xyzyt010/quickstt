@@ -64,6 +64,12 @@ jobs:
           mkdir -p quickstt-rust/target/release/tools/photon
           cp -f quickstt-rust/tools/photon/photon_worker.py quickstt-rust/target/release/tools/photon/
           ls -lh quickstt-rust/target/release/tools/photon/
+      - name: Stage Canary + disfluency workers (NeMo SALM runtime, filler cleanup)
+        run: |
+          mkdir -p quickstt-rust/target/release/tools/canary quickstt-rust/target/release/tools/disfluency
+          cp -f quickstt-rust/tools/canary/canary_worker.py quickstt-rust/target/release/tools/canary/
+          cp -f quickstt-rust/tools/disfluency/disfluency_worker.py quickstt-rust/target/release/tools/disfluency/
+          ls -lh quickstt-rust/target/release/tools/canary/ quickstt-rust/target/release/tools/disfluency/
       - name: Build whisper.cpp (Whisper GGML engine)
         run: |
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/wcpp
@@ -126,6 +132,10 @@ jobs:
           # AppImage/tarball need it next to the binary).
           mkdir -p dist/AppDir/usr/bin/tools/photon
           cp -f target/release/tools/photon/photon_worker.py dist/AppDir/usr/bin/tools/photon/ 2>/dev/null || true
+          # Bundle the Canary + disfluency workers the same way.
+          mkdir -p dist/AppDir/usr/bin/tools/canary dist/AppDir/usr/bin/tools/disfluency
+          cp -f target/release/tools/canary/canary_worker.py dist/AppDir/usr/bin/tools/canary/ 2>/dev/null || true
+          cp -f target/release/tools/disfluency/disfluency_worker.py dist/AppDir/usr/bin/tools/disfluency/ 2>/dev/null || true
           # Bundle whisper-cli the same way (the Whisper engine binary).
           mkdir -p dist/AppDir/usr/bin/tools/whisper_cpp
           cp -f target/release/tools/whisper_cpp/whisper-cli dist/AppDir/usr/bin/tools/whisper_cpp/ 2>/dev/null || true

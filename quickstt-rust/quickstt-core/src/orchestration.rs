@@ -195,6 +195,9 @@ fn unload_all_workers_except(active_family: &str) {
     if active_family != "canary" {
         crate::models::engine::canary_unload();
     }
+    if active_family != "canary-qwen" {
+        crate::models::engine::canary_qwen_unload();
+    }
     if active_family != "photon" {
         crate::models::engine::photon_unload();
     }
@@ -1147,19 +1150,44 @@ impl AppOrchestrator {
                     }
                 }
                 OrchestratorCommand::UtteranceTranscribed { text, wav_path } => {
-                    let mut s = state.lock().unwrap();
-                    if apply_recognized_text(&mut s, text.clone()) {
-                        continue;
+                    // Disfluency cleanup for NON-STREAMING turns (whisper
+                    // tiny/large, canary-qwen, …): strip um/uh/repeats AFTER
+                    // ghost filtering, so the transcript buffer, history and
+                    // paste all receive cleaned text. Streaming deltas
+                    // (PartialText) are untouched — cleanup needs the whole
+                    // utterance for context. Missing tagger files kick off a
+                    // background fetch; turns pass through until it lands.
+                    let model_name = state
+                        .lock()
+                        .map(|s| {
+                            s.model_entries
+                                .get(s.selected_model)
+                                .map(|e| e.name.clone())
+                                .unwrap_or_default()
+                        })
+                        .unwrap_or_default();
+                    let want_clean = state
+                        .lock()
+                        .map(|s| s.settings.clean_disfluencies)
+                        .unwrap_or(false)
+                        && !crate::models::catalog::is_streaming_model(&model_name);
+                    if want_clean && !crate::models::disfluency::files_present() {
+                        crate::models::disfluency::ensure_download(Arc::clone(&state));
                     }
-                    // Dashboard history: real dictation only — empty results
-                    // and ghost singletons are never recorded (transcript
-                    // keeps its original case; the lowercase norm is only
-                    // for the ghost check).
                     let norm = text.trim().to_lowercase();
                     #[cfg(feature = "audio-capture")]
                     let is_ghost = !norm.is_empty() && is_ghost_singleton(&norm);
                     #[cfg(not(feature = "audio-capture"))]
                     let is_ghost = false;
+                    let text = if want_clean && !norm.is_empty() && !is_ghost {
+                        crate::models::disfluency::clean_text(text.trim())
+                    } else {
+                        text
+                    };
+                    let mut s = state.lock().unwrap();
+                    if apply_recognized_text(&mut s, text.clone()) {
+                        continue;
+                    }
                     if !norm.is_empty() && !is_ghost {
                         if crate::history::push_turn(
                             &mut s.history,
@@ -1412,6 +1440,10 @@ impl AppOrchestrator {
                         .name("stt-offload".to_string())
                         .spawn(move || {
                             unload_all_workers_except(&active_family);
+                            // The disfluency tagger is model-independent: drop
+                            // its session too (reloads on the next cleaned
+                            // turn). Lean RAM everywhere.
+                            crate::models::disfluency::disfluency_unload();
                             crate::models::engine::compact_working_set();
                         })
                         .ok();

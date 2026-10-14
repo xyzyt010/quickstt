@@ -79,6 +79,8 @@ export component DashboardWidget inherits Window {
     in property <bool> ctrl-space-enabled: true;
     in property <int> ctrl-space-mode: 0;
     in property <int> ctrl-space-output: 0;
+    // Disfluency cleanup toggle (non-streaming utterance text only).
+    in property <bool> clean-disfluencies: true;
     in property <string> recording-dir: "C:\\Users\\hemsh_sfya5gq\\Recordings";
     in property <string> app-version: "2.0.0-alpha.13 (Rust & Slint Edition)";
 
@@ -100,6 +102,7 @@ export component DashboardWidget inherits Window {
     callback set-ctrl-space-enabled(bool);
     callback set-ctrl-space-mode(int);
     callback set-ctrl-space-output(int);
+    callback set-clean-disfluencies(bool);
     callback set-show-waveform(bool);
     callback set-waveform-sensitivity(int);
     callback set-tray-icon-size(int);
@@ -532,6 +535,18 @@ export component DashboardWidget inherits Window {
                                             selected(v) => { root.set-ctrl-space-output(self.current-index); }
                                         }
                                     }
+                                }
+
+                                CheckBox {
+                                    text: "Clean disfluencies (um, uh, repeats) from non-streaming transcripts";
+                                    checked: root.clean-disfluencies;
+                                    toggled => { root.set-clean-disfluencies(self.checked); }
+                                }
+                                Text {
+                                    text: "Deletion-only tagger (66M, local): strips fillers after the utterance window, never rephrases. Research model — see card.";
+                                    font-size: 11px;
+                                    color: #8B949E;
+                                    wrap: word-wrap;
                                 }
                             }
                         }

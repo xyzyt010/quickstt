@@ -6080,6 +6080,16 @@ fn dock_hop(
     }
     {
         let state = state.clone();
+        dashboard.on_set_clean_disfluencies(move |on| {
+            if let Ok(mut s) = state.lock() {
+                s.settings.clean_disfluencies = on;
+                let _ = s.settings.save_all();
+                log_line(&format!("disfluency cleanup {}", if on { "ON" } else { "OFF" }));
+            }
+        });
+    }
+    {
+        let state = state.clone();
         dashboard.on_set_show_waveform(move |on| {
             if let Ok(mut s) = state.lock() {
                 s.settings.show_waveform = on;
@@ -6305,6 +6315,7 @@ fn dock_hop(
             dashboard.set_ctrl_space_enabled(s.settings.ctrl_space_enabled);
             dashboard.set_ctrl_space_mode(s.settings.ctrl_space_mode as i32);
             dashboard.set_ctrl_space_output(s.settings.ctrl_space_output as i32);
+            dashboard.set_clean_disfluencies(s.settings.clean_disfluencies);
             dashboard.set_show_waveform(s.settings.show_waveform);
             dashboard.set_waveform_sensitivity(s.settings.waveform_sensitivity as i32);
             dashboard.set_tray_icon_size(s.settings.tray_icon_size as i32);

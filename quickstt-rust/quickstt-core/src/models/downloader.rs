@@ -164,6 +164,12 @@ fn install_model(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<
         EngineFamily::Nemotron => install_nemotron(desc, state),
         EngineFamily::Canary => install_canary(desc, state),
         EngineFamily::Photon => install_photon(desc, state),
+        // Canary-Qwen weights (~5GB) arrive via NeMo itself on first GPU
+        // load (pip env + NVIDIA GPU required) — our downloader never
+        // fetches them, per request. Surface setup instructions instead.
+        EngineFamily::CanaryQwen => anyhow::bail!(
+            "Canary-Qwen needs an NVIDIA GPU, Python 3.10+ with CUDA torch, and: pip install \"nemo_toolkit[asr]\" — then select it and weights auto-download on first run"
+        ),
         _ => anyhow::bail!("No download source registered for {}", desc.name),
     }
 }
@@ -186,7 +192,8 @@ pub struct FileDl<'a> {
 
 /// Stream a URL to a file with byte-accurate progress + live MB/s.
 /// State writes are throttled (≈5Hz, every percent step, and completion).
-fn download_file(url: &str, dest: &Path, state: &SharedState, file: &FileDl) -> anyhow::Result<()> {
+/// `pub(crate)`: reused by the disfluency tagger fetch.
+pub(crate) fn download_file(url: &str, dest: &Path, state: &SharedState, file: &FileDl) -> anyhow::Result<()> {
     use std::time::{Duration, Instant};
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;

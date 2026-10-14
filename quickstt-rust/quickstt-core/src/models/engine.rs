@@ -29,6 +29,8 @@ pub struct SttEngineConfig {
     pub photon_worker_path: Option<PathBuf>,
     /// Python interpreter that has `moondream` installed (probed once).
     pub photon_python: Option<PathBuf>,
+    /// Persistent Canary-Qwen worker script (tools/canary/canary_worker.py).
+    pub canary_worker_path: Option<PathBuf>,
 }
 
 /// Probe well-known Python launchers; returns the first that runs.
@@ -154,6 +156,20 @@ impl SttEngineConfig {
         }
         let photon_worker_candidates = photon_worker_candidates;
 
+        // Canary-Qwen worker script (NeMo SALM). Same deployed/dev layout
+        // as the Photon worker.
+        let mut canary_worker_candidates = vec![
+            exe_dir.join("tools/canary/canary_worker.py"),
+            PathBuf::from("/usr/lib/quickstt/tools/canary/canary_worker.py"),
+        ];
+        if exe_dir.ends_with("debug") || exe_dir.ends_with("release") {
+            if let Some(quickstt_rust) = exe_dir.parent().and_then(|p| p.parent()) {
+                canary_worker_candidates.push(
+                    quickstt_rust.join("tools/canary/canary_worker.py"),
+                );
+            }
+        }
+
         Self {
             whisper_cli_path: whisper_candidates.iter().find(|p| p.exists()).cloned(),
             sherpa_onnx_path: sherpa_candidates.iter().find(|p| p.exists()).cloned(),
@@ -165,6 +181,10 @@ impl SttEngineConfig {
                 .find(|p| p.exists())
                 .cloned(),
             photon_python: probe_python(),
+            canary_worker_path: canary_worker_candidates
+                .iter()
+                .find(|p| p.exists())
+                .cloned(),
         }
     }
 }
@@ -233,6 +253,7 @@ pub fn transcribe_with_language(
         EngineFamily::Nemotron => transcribe_nemotron(config, &model_dir, wav_path, language),
         EngineFamily::Canary => transcribe_canary(config, &model_dir, wav_path, language),
         EngineFamily::Photon => transcribe_photon(config, descriptor, wav_path),
+        EngineFamily::CanaryQwen => transcribe_canary_qwen(config, descriptor, wav_path),
         EngineFamily::SherpaOnnx | EngineFamily::NemoTransducer | EngineFamily::NemoCTC => {
             transcribe_sherpa_onnx(config, &model_dir, wav_path, &descriptor.engine_family)
         }
@@ -357,6 +378,7 @@ fn should_run_deepfilter_for_model(descriptor: &ModelDescriptor) -> bool {
             | EngineFamily::Canary
             | EngineFamily::Vosk
             | EngineFamily::Photon
+            | EngineFamily::CanaryQwen
     )
 }
 
@@ -875,6 +897,231 @@ pub fn photon_unload() {
             Err(e) => warn!("Photon unload rejected: {e:#}"),
         },
         Err(e) => warn!("Photon unload failed: {e:#}"),
+    }
+}
+
+// ── NVIDIA Canary-Qwen 2.5B (NeMo SALM) ──
+// Persistent `canary_worker.py` helper: same JSON load/transcribe protocol
+// as Photon (load carries the HF repo id; NeMo only accepts registered ids,
+// never local paths). Needs an NVIDIA discrete GPU + Python 3.10+ with CUDA
+// torch + `pip install "nemo_toolkit[asr]"`. Weights (~5GB) auto-fetch from
+// HuggingFace into the shared HF cache on first load — never bundled, never
+// fetched by our downloader (per request: integrate, do NOT download).
+
+struct CanaryQwenSession {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    loaded_repo: Option<String>,
+    worker_path: PathBuf,
+    python: PathBuf,
+}
+
+static CANARY_QWEN_SESSION: Lazy<Mutex<Option<CanaryQwenSession>>> = Lazy::new(|| Mutex::new(None));
+
+/// HF repo for Canary-Qwen checkpoints. Only the stock repo today.
+pub fn canary_repo_id(model_dir: &str) -> Option<&'static str> {
+    if model_dir.contains("canary_qwen") || model_dir.contains("canary-qwen") {
+        Some("nvidia/canary-qwen-2.5b")
+    } else {
+        None
+    }
+}
+
+/// Cached Python-with-NeMo resolution: None = unprobed, Some(None) = probed
+/// and missing (fail fast without re-spawning `python -c import nemo`
+/// every turn — torch import alone takes seconds).
+static NEMO_PYTHON: Lazy<Mutex<Option<Option<PathBuf>>>> = Lazy::new(|| Mutex::new(None));
+
+fn nemo_python() -> Option<PathBuf> {
+    if let Ok(guard) = NEMO_PYTHON.lock() {
+        if let Some(cached) = guard.clone() {
+            return cached;
+        }
+    }
+    let found = ["python", "python3", "py"].into_iter().find_map(|name| {
+        let mut cmd = Command::new(name);
+        no_window(&mut cmd);
+        let ok = cmd
+            .arg("-c")
+            .arg("import nemo.collections.speechlm2, torch; raise SystemExit(0 if torch.cuda.is_available() else 3)")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        ok.then(|| PathBuf::from(name))
+    });
+    if found.is_none() {
+        warn!("No Python with NeMo SALM + CUDA torch found (Canary-Qwen needs an NVIDIA GPU and: pip install \"nemo_toolkit[asr]\")");
+    }
+    if let Ok(mut guard) = NEMO_PYTHON.lock() {
+        *guard = Some(found.clone());
+    }
+    found
+}
+
+fn transcribe_canary_qwen(
+    config: &SttEngineConfig,
+    descriptor: &ModelDescriptor,
+    wav_path: &Path,
+) -> Result<String> {
+    let worker = config
+        .canary_worker_path
+        .as_ref()
+        .context("canary_worker.py not found (expected next to the exe under tools/canary)")?;
+    let python = nemo_python().context(
+        "no Python with NeMo SALM + CUDA found (install Python 3.10+, CUDA torch, and run: pip install \"nemo_toolkit[asr]\")",
+    )?;
+    let repo_id = canary_repo_id(&descriptor.model_dir)
+        .context(format!("No Canary repo registered for {}", descriptor.name))?;
+
+    let mut guard = CANARY_QWEN_SESSION
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Canary session lock poisoned"))?;
+
+    let dead = guard
+        .as_mut()
+        .map(|s| matches!(s.child.try_wait(), Ok(Some(_))))
+        .unwrap_or(true);
+    let changed = guard
+        .as_ref()
+        .map(|s| s.worker_path != *worker || s.python != python)
+        .unwrap_or(true);
+    if dead || changed {
+        *guard = Some(spawn_canary_session(&python, worker)?);
+    }
+
+    let session = guard
+        .as_mut()
+        .context("Canary session was not initialised")?;
+
+    if session.loaded_repo.as_deref() != Some(repo_id) {
+        let response = canary_request(
+            session,
+            json!({
+                "action": "load",
+                "repo_id": repo_id,
+            }),
+        )?;
+        ensure_canary_ok(response, "load")?;
+        session.loaded_repo = Some(repo_id.to_string());
+    }
+
+    let response = canary_request(
+        session,
+        json!({
+            "action": "transcribe",
+            "audio_path": wav_path.to_string_lossy(),
+        }),
+    )?;
+    let text = ensure_canary_ok(response, "transcribe")?;
+    Ok(text.unwrap_or_default())
+}
+
+fn spawn_canary_session(python: &Path, worker: &Path) -> Result<CanaryQwenSession> {
+    let workdir = worker.parent().unwrap_or(Path::new("."));
+    info!("Starting Canary worker: {:?} {:?}", python, worker);
+    let err_log = std::env::temp_dir().join("quickstt-canary-stderr.log");
+    let err_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&err_log)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
+    let mut cmd = Command::new(python);
+    no_window(&mut cmd);
+    let mut child = cmd
+        .arg(worker)
+        .current_dir(workdir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(err_log)
+        .spawn()
+        .context("Failed to start canary_worker.py")?;
+
+    let stdin = child.stdin.take().context("Canary stdin unavailable")?;
+    let stdout = child.stdout.take().context("Canary stdout unavailable")?;
+
+    Ok(CanaryQwenSession {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout),
+        loaded_repo: None,
+        worker_path: worker.to_path_buf(),
+        python: python.to_path_buf(),
+    })
+}
+
+fn canary_request(
+    session: &mut CanaryQwenSession,
+    request: serde_json::Value,
+) -> Result<serde_json::Value> {
+    if let Ok(Some(status)) = session.child.try_wait() {
+        anyhow::bail!("Canary worker exited early: {}", status);
+    }
+
+    let line = serde_json::to_string(&request)?;
+    session.stdin.write_all(line.as_bytes())?;
+    session.stdin.write_all(b"\n")?;
+    session.stdin.flush()?;
+
+    let mut response = String::new();
+    let read = session.stdout.read_line(&mut response)?;
+    if read == 0 {
+        anyhow::bail!("Canary worker closed stdout");
+    }
+    serde_json::from_str(response.trim()).context("Invalid Canary JSON response")
+}
+
+fn ensure_canary_ok(response: serde_json::Value, action: &str) -> Result<Option<String>> {
+    let status = response
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("error");
+    if status == "ok" {
+        return Ok(response
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string()));
+    }
+
+    let error = response
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown Canary error");
+    anyhow::bail!("Canary {} failed: {}", action, error)
+}
+
+/// Idle offload: release the SALM weights from VRAM/RAM (the process stays
+/// alive for fast reload). Safe to call when idle — never yanks mid-turn
+/// (callers only invoke it settled). Next transcribe reloads on demand via
+/// the loaded_repo check in transcribe_canary_qwen.
+pub fn canary_qwen_unload() {
+    let mut guard = match CANARY_QWEN_SESSION.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let session = match guard.as_mut() {
+        Some(s) => s,
+        None => return,
+    };
+    if session.loaded_repo.is_none() {
+        return;
+    }
+    if matches!(session.child.try_wait(), Ok(Some(_))) {
+        *guard = None;
+        return;
+    }
+    match canary_request(session, json!({ "action": "unload" })) {
+        Ok(resp) => match ensure_canary_ok(resp, "unload") {
+            Ok(_) => {
+                session.loaded_repo = None;
+                info!("Canary model unloaded (idle offload)");
+            }
+            Err(e) => warn!("Canary unload rejected: {e:#}"),
+        },
+        Err(e) => warn!("Canary unload failed: {e:#}"),
     }
 }
 

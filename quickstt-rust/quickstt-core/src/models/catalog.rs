@@ -46,6 +46,13 @@ pub enum EngineFamily {
     /// `tools/photon/photon_worker.py` helper: same JSON load/transcribe
     /// protocol as parakeet_engine. Needs Python + `pip install moondream`.
     Photon,
+    /// NVIDIA Canary-Qwen 2.5B (NeMo SALM) via the persistent
+    /// `tools/canary/canary_worker.py` helper: same JSON load/transcribe
+    /// protocol as Photon. Needs an NVIDIA discrete GPU (8GB+ VRAM),
+    /// Python 3.10+ with CUDA torch, and `pip install "nemo_toolkit[asr]"`.
+    /// Weights (~5GB) auto-fetch from HuggingFace into the shared HF cache
+    /// on first GPU load — never bundled, never fetched by our downloader.
+    CanaryQwen,
 }
 
 impl EngineFamily {
@@ -60,6 +67,7 @@ impl EngineFamily {
             EngineFamily::Nemotron => "nemotron",
             EngineFamily::Canary => "canary",
             EngineFamily::Photon => "photon",
+            EngineFamily::CanaryQwen => "canary-qwen",
         }
     }
 }
@@ -173,11 +181,34 @@ pub fn all_descriptors() -> Vec<ModelDescriptor> {
             blurb: "Highest accuracy, broadest language coverage".into(),
             gpu_only: true,
         },
+        // GPU-only per request: NVIDIA Canary-Qwen 2.5B (NeMo SALM, CC-BY-4.0)
+        // — SOTA English ASR at 418 RTFx on data-center GPUs. Shown only when
+        // a discrete NVIDIA GPU is present. Needs Python 3.10+ with CUDA
+        // torch + `pip install "nemo_toolkit[asr]"` (8GB+ VRAM recommended:
+        // 2.5B BF16 weights alone are ~5GB). Weights auto-fetch from
+        // HuggingFace on first load — our downloader never fetches them, and
+        // NOTHING is downloaded by integrating this card.
+        ModelDescriptor {
+            name: "NVIDIA Canary-Qwen 2.5B (NeMo, GPU)".into(),
+            engine_family: EngineFamily::CanaryQwen,
+            model_dir: "canary_qwen/canary-qwen-2.5b".into(),
+            size_mb: 5000,
+            widget_selectable: true,
+            accuracy: 95,
+            speed: 70,
+            blurb: "SOTA English ASR. Needs NVIDIA GPU + NeMo (see card); weights auto-fetch on first run".into(),
+            gpu_only: true,
+        },
     ]
 }
 
 pub fn is_streaming_model(name: &str) -> bool {
     let n = name.to_lowercase();
+    // Canary-Qwen is per-utterance (paste after the window) even though its
+    // name contains "canary" like the streaming Canary-180M GGUF worker.
+    if n.contains("canary-qwen") || n.contains("canary_qwen") {
+        return false;
+    }
     n.contains("streaming") || n.contains("nemotron") || n.contains("moonshine") || n.contains("parakeet") || n.contains("canary")
 }
 
@@ -345,6 +376,12 @@ pub fn is_model_installed(desc: &ModelDescriptor) -> bool {
                 && model_path.join("tokenizer.json").exists()
                 && model_path.join("config.json").exists()
         }
+        EngineFamily::CanaryQwen => {
+            // NeMo weights live in the shared HuggingFace cache (fetched by
+            // NeMo itself on first GPU load, never by our downloader): a
+            // populated snapshot for the repo counts as installed.
+            hf_snapshot_present("nvidia--canary-qwen-2.5b")
+        }
         _ => model_path.exists() && model_path.is_dir(),
     }
 }
@@ -354,6 +391,35 @@ pub fn installed_models() -> Vec<ModelDescriptor> {
         .into_iter()
         .filter(|d| d.widget_selectable && is_model_installed(d))
         .collect()
+}
+
+/// True when the shared HuggingFace cache holds a populated snapshot for a
+/// repo (`models--<org>--<name>/snapshots/<rev>/` non-empty). Used for
+/// runtimes (NeMo) that fetch their own weights outside our downloader.
+fn hf_snapshot_present(repo_cache: &str) -> bool {
+    // Candidate hub roots, first hit wins: HF_HOME override, then the
+    // huggingface_hub default (~/.cache on every OS, including Windows),
+    // then the platform cache dir as a last resort.
+    let mut hubs = Vec::new();
+    if let Some(hf_home) = std::env::var_os("HF_HOME") {
+        hubs.push(PathBuf::from(hf_home));
+    }
+    if let Some(home) = dirs::home_dir() {
+        hubs.push(home.join(".cache").join("huggingface").join("hub"));
+    }
+    hubs.push(dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("huggingface").join("hub"));
+    hubs.into_iter().any(|hub| {
+        let snaps = hub.join(format!("models--{repo_cache}")).join("snapshots");
+        match std::fs::read_dir(snaps) {
+            Ok(entries) => entries.flatten().any(|e| {
+                e.path().is_dir()
+                    && std::fs::read_dir(e.path())
+                        .map(|mut it| it.next().is_some())
+                        .unwrap_or(false)
+            }),
+            Err(_) => false,
+        }
+    })
 }
 
 /// HuggingFace repo id for Photon-family checkpoints (the Python runtime
@@ -391,8 +457,8 @@ pub fn supported_languages(desc: &ModelDescriptor) -> Vec<String> {
             .map(|s| s.to_string())
             .collect();
     }
-    // Nemotron streaming + Parakeet/Vosk/Moonshine/Photon checkpoints ship
-    // English-only weights.
+    // Nemotron streaming + Parakeet/Vosk/Moonshine/Photon/Canary-Qwen
+    // checkpoints ship English-only weights.
     if matches!(
         desc.engine_family,
         EngineFamily::ParakeetRust
@@ -402,6 +468,7 @@ pub fn supported_languages(desc: &ModelDescriptor) -> Vec<String> {
             | EngineFamily::NemoTransducer
             | EngineFamily::Nemotron
             | EngineFamily::Photon
+            | EngineFamily::CanaryQwen
     ) {
         return vec!["English".to_string()];
     }
@@ -419,10 +486,10 @@ pub fn supported_languages(desc: &ModelDescriptor) -> Vec<String> {
     .collect()
 }
 
-/// Hardware-aware model list: discrete-GPU machines see only the two
-/// Whisper GPU models (Tiny + Large Turbo); CPU/iGPU machines see every
-/// non-gpu_only model (existing five + Canary). GPU-only models are hidden
-/// on CPU machines so nobody downloads 800MB they cannot run well.
+/// Hardware-aware model list: discrete-GPU machines see the two Whisper GPU
+/// models (Tiny + Large Turbo) plus Canary-Qwen 2.5B (NeMo, NVIDIA-only);
+/// CPU/iGPU machines see every non-gpu_only model. GPU-only models are
+/// hidden on CPU machines so nobody downloads gigabytes they cannot run.
 pub fn models_for_hardware(
     has_discrete_gpu: bool,
 ) -> Vec<ModelDescriptor> {
@@ -430,9 +497,10 @@ pub fn models_for_hardware(
         .into_iter()
         .filter(|d| {
             if has_discrete_gpu {
-                // GPU path: the two Whisper models only, no other model.
+                // GPU path: Whisper Tiny + Large Turbo + Canary-Qwen only.
                 d.name.contains("Whisper Tiny EN Q5_1")
                     || d.name.contains("Whisper Large v3 Turbo")
+                    || d.name.contains("Canary-Qwen")
             } else {
                 !d.gpu_only
             }
@@ -580,4 +648,39 @@ pub fn whisper_code(display: &str) -> Option<&'static str> {
         "Japanese" => "ja",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canary_qwen_is_non_streaming_gpu_only() {
+        // The name contains "canary" like the streaming Canary-180M GGUF
+        // worker — the explicit override must win (paste after the window).
+        assert!(!is_streaming_model("NVIDIA Canary-Qwen 2.5B (NeMo, GPU)"));
+        assert!(is_streaming_model("Canary 180M Flash Q5_K_M (GGUF)"));
+        let qwen = all_descriptors()
+            .into_iter()
+            .find(|d| matches!(d.engine_family, EngineFamily::CanaryQwen))
+            .expect("CanaryQwen descriptor registered");
+        assert!(qwen.gpu_only);
+        assert_eq!(supported_languages(&qwen), vec!["English".to_string()]);
+    }
+
+    #[test]
+    fn canary_qwen_visible_only_on_discrete_gpu() {
+        let gpu: Vec<String> = models_for_hardware(true)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(gpu.iter().any(|n| n.contains("Canary-Qwen")));
+        assert!(gpu.iter().any(|n| n.contains("Whisper Large v3 Turbo")));
+        let cpu: Vec<String> = models_for_hardware(false)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(!cpu.iter().any(|n| n.contains("Canary-Qwen")));
+        assert!(!cpu.iter().any(|n| n.contains("Large v3 Turbo")));
+    }
 }

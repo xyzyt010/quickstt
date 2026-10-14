@@ -92,6 +92,14 @@ log "installing Photon STT runtime (pip moondream, one-time ~700MB)"
 python3 -m pip install --user --break-system-packages "moondream>=2.4" 2>&1 | tail -2 || \
     log "Photon runtime install failed — Parakeet Ultra/Redux will show setup steps instead"
 
+# 5b. Disfluency-cleanup runtime (filler/repeat stripper for non-streaming
+# turns): tiny pip packages (~30MB one-time, CPU only). Best-effort like
+# Photon — turns pass through uncleaned until present, and the app fetches
+# the 66MB tagger weights itself on first use.
+log "installing disfluency runtime (pip onnxruntime + tokenizers)"
+python3 -m pip install --user --break-system-packages onnxruntime tokenizers 2>&1 | tail -2 || \
+    log "Disfluency runtime install failed — transcripts will skip cleanup until installed"
+
 # 6. Install the package ------------------------------------------------------
 log "installing ${DEB_NAME} (sudo required)"
 sudo apt install -y "$TMP_DEB"
