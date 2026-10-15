@@ -1,22 +1,30 @@
-//! Disfluency cleanup (stillerman/fdt-disfluency-distilbert-66m-v5, int8 ONNX)
-//! via the persistent `tools/disfluency/disfluency_worker.py` helper.
+//! Transcript cleanup via the persistent `tools/disfluency/disfluency_worker.py`
+//! helper. Two engines, chosen by the dashboard (`disfluency_engine`):
 //!
-//! The tagger is deletion-only (KEEP / DELETE / KEEP_STRIP_COMMA /
-//! KEEP_CAPITALIZE per whitespace word): it strips fillers ("um", "uh"),
-//! repeats and false starts from a transcript, and can never rephrase or
-//! hallucinate. It runs on the NON-STREAMING utterance path only — after a
-//! turn's text is final, before it reaches the transcript buffer / history /
-//! paste — gated on the `clean_disfluencies` setting (dashboard toggle).
-//! Streaming deltas (PartialText) are untouched: cleanup needs the whole
-//! utterance for context.
+//! * 0 = FDT 66M (`stillerman/fdt-disfluency-distilbert-66m-v5`, int8 ONNX) —
+//!   a deletion-only word tagger: strips fillers ("um", "uh"), repeats and
+//!   false starts. It can never rephrase or hallucinate, and it cannot rewrite
+//!   numbers/dates or resolve substitution repairs. ~15ms/turn.
+//! * 1 = S1-mini INT4 (`superwhisper/s1-mini`, the Qwen3-0.6B ASR-transcript
+//!   normalizer, via `elbruno/s1-mini-onnx` INT4 + `onnxruntime-genai`) —
+//!   removes fillers AND resolves self-corrections to the landed-on value
+//!   ("nine am no sorry ten thirty" -> "10:30"), and writes spoken
+//!   numbers/dates/times in written form. Apache-2.0 + naming clause: the name
+//!   "S1-mini" by "Superwhisper" must be kept wherever it is used.
 //!
-//! Runtime: Python `onnxruntime` (real ORT — the in-process ort is
-//! tract-backed and cannot run the int8 QDQ graph) + `tokenizers`, CPU-only,
-//! ~10-50ms per turn. The worker stays resident once loaded; `unload`
-//! releases the 66MB session on idle offload. Model files (~66MB) live under
-//! `<models>/disfluency/fdt-disfluency-distilbert-66m-v5/` and are fetched by
-//! the downloader on first use — cleanup passes text through untouched until
-//! they arrive.
+//! Cleanup runs on the NON-STREAMING utterance path only, as the final
+//! post-processing phase of a turn (after the user releases Ctrl+Space or
+//! stops and every STT segment has landed), before the text is buffered,
+//! recorded in history and pasted. Streaming deltas (PartialText) are
+//! untouched: cleanup needs the whole utterance for context.
+//!
+//! MEMORY POLICY (by design): the model is loaded, used for exactly one turn,
+//! then dropped — `clean_text` sends `unload` immediately after cleaning, so no
+//! cleanup model (66MB or 375MB) sits resident between turns. Only the small
+//! Python interpreter stays warm, which makes the next turn's load a fraction
+//! of a second. Model files live under `<models>/disfluency/<engine>/` and are
+//! fetched by the downloader on first use; cleanup passes text through
+//! untouched until they arrive.
 
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
@@ -28,6 +36,10 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
 
+/// Cleanup engine selector (matches `settings.disfluency_engine`).
+pub const ENGINE_FDT: u32 = 0;
+pub const ENGINE_S1MINI: u32 = 1;
+
 /// Never flash a terminal window when spawning the helper.
 #[cfg(target_os = "windows")]
 fn no_window(cmd: &mut Command) {
@@ -37,12 +49,19 @@ fn no_window(cmd: &mut Command) {
 #[cfg(not(target_os = "windows"))]
 fn no_window(_cmd: &mut Command) {}
 
-/// Model subdir (under the shared models root) + required files.
-pub const DISFLUENCY_DIR: &str = "disfluency/fdt-disfluency-distilbert-66m-v5";
-const REQUIRED_FILES: &[&str] = &["model_quantized.onnx", "tokenizer.json"];
+/// Model subdirs (under the shared models root) + required files.
+pub const FDT_DIR: &str = "disfluency/fdt-disfluency-distilbert-66m-v5";
+pub const S1MINI_DIR: &str = "disfluency/s1-mini-int4";
+const FDT_REQUIRED: &[&str] = &["model_quantized.onnx", "tokenizer.json"];
+const S1_REQUIRED: &[&str] = &[
+    "model.onnx",
+    "model.onnx.data",
+    "genai_config.json",
+    "tokenizer.json",
+];
 
-/// Download file list for the downloader (repo path, local name, ~bytes).
-pub const DISFLUENCY_FILES: &[(&str, &str, u64)] = &[
+/// Download file lists for the downloader (repo path, local name, ~bytes).
+pub const FDT_FILES: &[(&str, &str, u64)] = &[
     (
         "onnx/model_quantized.onnx",
         "model_quantized.onnx",
@@ -52,15 +71,69 @@ pub const DISFLUENCY_FILES: &[(&str, &str, u64)] = &[
     ("config.json", "config.json", 831),
     ("tokenizer.json", "tokenizer.json", 669_176),
 ];
+/// `elbruno/s1-mini-onnx` `int4/` (ORT-genai layout). Weights NOT bundled.
+pub const S1MINI_FILES: &[(&str, &str, u64)] = &[
+    ("int4/model.onnx", "model.onnx", 299_040),
+    ("int4/model.onnx.data", "model.onnx.data", 393_740_288),
+    ("int4/genai_config.json", "genai_config.json", 1_571),
+    ("int4/tokenizer.json", "tokenizer.json", 11_422_650),
+    ("int4/tokenizer_config.json", "tokenizer_config.json", 723),
+    ("int4/chat_template.jinja", "chat_template.jinja", 4_256),
+];
 
-pub fn model_dir() -> PathBuf {
-    crate::models::catalog::models_root().join(DISFLUENCY_DIR)
+/// HuggingFace repo each engine's files come from.
+pub fn repo_for(engine: u32) -> &'static str {
+    if engine == ENGINE_S1MINI {
+        "elbruno/s1-mini-onnx"
+    } else {
+        "stillerman/fdt-disfluency-distilbert-66m-v5"
+    }
 }
 
-/// True when the worker can run (script + ONNX + tokenizer present).
-pub fn files_present() -> bool {
+/// Worker-side backend name for an engine id.
+pub fn backend_name(engine: u32) -> &'static str {
+    if engine == ENGINE_S1MINI {
+        "s1mini"
+    } else {
+        "fdt"
+    }
+}
+
+/// Human label for the dashboard combo box.
+pub fn engine_label(engine: u32) -> &'static str {
+    if engine == ENGINE_S1MINI {
+        "S1-mini INT4 (0.6B) - fillers + self-corrections + numbers (375MB)"
+    } else {
+        "FDT 66M tagger - fillers + repeats only (66MB)"
+    }
+}
+
+/// Approximate download size in MB (shown in the dashboard).
+pub fn engine_size_mb(engine: u32) -> u32 {
+    if engine == ENGINE_S1MINI {
+        375
+    } else {
+        66
+    }
+}
+
+pub fn model_dir(engine: u32) -> PathBuf {
+    crate::models::catalog::models_root().join(if engine == ENGINE_S1MINI {
+        S1MINI_DIR
+    } else {
+        FDT_DIR
+    })
+}
+
+/// True when the worker script + every file this engine needs are on disk.
+pub fn files_present(engine: u32) -> bool {
     let worker_ok = worker_candidates().iter().any(|p| p.is_file());
-    worker_ok && REQUIRED_FILES.iter().all(|f| model_dir().join(f).is_file())
+    let required = if engine == ENGINE_S1MINI {
+        S1_REQUIRED
+    } else {
+        FDT_REQUIRED
+    };
+    worker_ok && required.iter().all(|f| model_dir(engine).join(f).is_file())
 }
 
 fn worker_candidates() -> Vec<PathBuf> {
@@ -112,6 +185,8 @@ struct DisfluencySession {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     loaded: bool,
+    /// (worker backend name, model dir) currently resident, if any.
+    loaded_for: Option<(String, String)>,
     worker_path: PathBuf,
     python: PathBuf,
 }
@@ -147,6 +222,7 @@ fn spawn_session(python: &Path, worker: &Path) -> Result<DisfluencySession> {
         stdin,
         stdout: BufReader::new(stdout),
         loaded: false,
+        loaded_for: None,
         worker_path: worker.to_path_buf(),
         python: python.to_path_buf(),
     })
@@ -181,16 +257,19 @@ fn ensure_text(resp: serde_json::Value, action: &str) -> Result<Option<String>> 
     anyhow::bail!("disfluency {} failed: {}", action, err)
 }
 
-/// Clean one utterance transcript. NEVER fails the turn: any unavailability
-/// (files missing, no Python, worker error) returns the original text, with
-/// a one-time warn so the log doesn't spam per turn.
-pub fn clean_text(text: &str) -> String {
+/// Clean one finished turn's transcript with the selected engine. NEVER fails
+/// the turn: any unavailability (files missing, no Python, worker error)
+/// returns the original text, with a one-time warn so the log doesn't spam.
+///
+/// The model is unloaded again before returning — cleanup holds its weights
+/// only for the few hundred milliseconds it actually needs.
+pub fn clean_text_with(engine: u32, text: &str) -> String {
     if text.trim().is_empty() {
         return text.to_string();
     }
-    if !files_present() {
+    if !files_present(engine) {
         if !WARNED_UNAVAILABLE.swap(true, Ordering::Relaxed) {
-            warn!("Disfluency cleanup skipped (model files not ready — background download in progress?)");
+            warn!("Transcript cleanup skipped ({} files not ready — background download in progress?)", backend_name(engine));
         }
         return text.to_string();
     }
@@ -204,7 +283,7 @@ pub fn clean_text(text: &str) -> String {
     let python = match find_python() {
         Some(p) => p,
         None => {
-            warn!("No Python found for disfluency cleanup (need onnxruntime + tokenizers)");
+            warn!("No Python found for transcript cleanup (need onnxruntime + tokenizers / onnxruntime-genai)");
             return text.to_string();
         }
     };
@@ -224,7 +303,7 @@ pub fn clean_text(text: &str) -> String {
         match spawn_session(&python, &worker) {
             Ok(s) => *guard = Some(s),
             Err(e) => {
-                warn!("Disfluency worker spawn failed: {e:#}");
+                warn!("Cleanup worker spawn failed: {e:#}");
                 return text.to_string();
             }
         }
@@ -233,37 +312,74 @@ pub fn clean_text(text: &str) -> String {
         Some(s) => s,
         None => return text.to_string(),
     };
-    if !session.loaded {
-        let dir = model_dir().to_string_lossy().to_string();
-        match request(session, json!({ "action": "load", "model_dir": dir }))
-            .and_then(|r| ensure_text(r, "load").map(|_| ()))
+    let backend = backend_name(engine);
+    let dir = model_dir(engine).to_string_lossy().to_string();
+    if !session.loaded
+        || session.loaded_for.as_ref() != Some(&(backend.to_string(), dir.clone()))
+    {
+        match request(
+            session,
+            json!({ "action": "load", "backend": backend, "model_dir": dir }),
+        )
+        .and_then(|r| ensure_text(r, "load").map(|_| ()))
         {
-            Ok(()) => session.loaded = true,
+            Ok(()) => {
+                session.loaded = true;
+                session.loaded_for = Some((backend.to_string(), dir.clone()));
+            }
             Err(e) => {
-                warn!("Disfluency load failed: {e:#}");
+                warn!("Cleanup model load failed ({backend}): {e:#}");
+                session.loaded = false;
+                session.loaded_for = None;
                 return text.to_string();
             }
         }
     }
-    match request(session, json!({ "action": "clean", "text": text }))
-        .and_then(|r| ensure_text(r, "clean"))
-    {
+    let started = std::time::Instant::now();
+    let outcome = request(
+        session,
+        json!({ "action": "clean", "backend": backend, "model_dir": dir, "text": text }),
+    )
+    .and_then(|r| ensure_text(r, "clean"));
+    // Instant offload: the model exists only for this one cleanup, so drop it
+    // before the paste happens — no cleanup weights linger between turns.
+    if session.loaded {
+        match request(session, json!({ "action": "unload" })) {
+            Ok(_) => {
+                session.loaded = false;
+                session.loaded_for = None;
+            }
+            Err(e) => warn!("Cleanup unload failed: {e:#}"),
+        }
+    }
+    match outcome {
         Ok(Some(cleaned)) if !cleaned.trim().is_empty() => {
             if cleaned.trim() != text.trim() {
-                info!("Disfluency cleanup: {:?} -> {:?}", text.trim(), cleaned.trim());
+                info!(
+                    "Cleanup [{}] took {}ms: {:?} -> {:?}",
+                    backend,
+                    started.elapsed().as_millis(),
+                    text.trim(),
+                    cleaned.trim()
+                );
             }
             cleaned
         }
         Ok(_) => text.to_string(),
         Err(e) => {
-            warn!("Disfluency clean failed: {e:#}");
+            warn!("Cleanup clean failed ({backend}): {e:#}");
             text.to_string()
         }
     }
 }
 
-/// Idle offload: release the tagger session (the process stays for reload).
-/// Safe when idle; next clean reloads on demand.
+/// Default-engine shorthand (FDT 66M) for callers without a setting handy.
+pub fn clean_text(text: &str) -> String {
+    clean_text_with(ENGINE_FDT, text)
+}
+
+/// Release any loaded cleanup model (belt-and-braces; `clean_text_with`
+/// already unloads after every turn).
 pub fn disfluency_unload() {
     let mut guard = match SESSION.lock() {
         Ok(g) => g,
@@ -283,36 +399,45 @@ pub fn disfluency_unload() {
     match request(session, json!({ "action": "unload" })) {
         Ok(_) => {
             session.loaded = false;
-            info!("Disfluency tagger unloaded (idle offload)");
+            session.loaded_for = None;
+            info!("Cleanup model unloaded");
         }
-        Err(e) => warn!("Disfluency unload failed: {e:#}"),
+        Err(e) => warn!("Cleanup unload failed: {e:#}"),
     }
 }
 
 type SharedState = Arc<Mutex<crate::orchestration::AppState>>;
-static DL_STARTED: AtomicBool = AtomicBool::new(false);
+static DL_STARTED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
-/// Fetch the ~66MB tagger in the background (once per process). Cleanup
-/// passes text through until the files land; no turn ever blocks on this.
-pub fn ensure_download(state: SharedState) {
-    if files_present() || DL_STARTED.swap(true, Ordering::Relaxed) {
+/// Fetch an engine's weights in the background (once per engine per process).
+/// Cleanup passes text through until the files land; no turn ever blocks.
+pub fn ensure_download(state: SharedState, engine: u32) {
+    let idx = if engine == ENGINE_S1MINI { 1 } else { 0 };
+    if files_present(engine) || DL_STARTED[idx].swap(true, Ordering::Relaxed) {
         return;
     }
     std::thread::Builder::new()
-        .name("dl-disfluency".to_string())
+        .name("dl-cleanup".to_string())
         .spawn(move || {
+            let label = if engine == ENGINE_S1MINI {
+                "S1-mini normalizer".to_string()
+            } else {
+                "Disfluency tagger".to_string()
+            };
             if let Ok(mut s) = state.lock() {
-                s.download_name = "Disfluency cleaner".to_string();
+                s.download_name = label.clone();
             }
-            let dir = model_dir();
-            let base = "https://huggingface.co/stillerman/fdt-disfluency-distilbert-66m-v5/resolve/main";
-            let files = [
-                ("onnx/model_quantized.onnx", "model_quantized.onnx"),
-                ("vocab.txt", "vocab.txt"),
-                ("config.json", "config.json"),
-                ("tokenizer.json", "tokenizer.json"),
-            ];
-            for (i, (repo, name)) in files.iter().enumerate() {
+            let dir = model_dir(engine);
+            let base = format!(
+                "https://huggingface.co/{}/resolve/main",
+                repo_for(engine)
+            );
+            let files: &[(&str, &str, u64)] = if engine == ENGINE_S1MINI {
+                S1MINI_FILES
+            } else {
+                FDT_FILES
+            };
+            for (i, (repo, name, _bytes)) in files.iter().enumerate() {
                 let url = format!("{base}/{repo}");
                 let dest = dir.join(name);
                 if dest.is_file() {
@@ -326,33 +451,20 @@ pub fn ensure_download(state: SharedState) {
                 if let Err(e) =
                     crate::models::downloader::download_file(&url, &dest, &state, &dl)
                 {
-                    warn!("Disfluency download failed for {name}: {e:#}");
+                    warn!("Cleanup download failed for {name}: {e:#}");
                     let _ = std::fs::remove_file(&dest);
+                    if let Ok(mut s) = state.lock() {
+                        s.is_downloading = false;
+                        s.download_speed_text = String::new();
+                    }
                     return;
                 }
             }
-            info!("Disfluency tagger downloaded (cleanup now active)");
+            info!("{label} downloaded (cleanup now active)");
             if let Ok(mut s) = state.lock() {
                 s.is_downloading = false;
                 s.download_speed_text = String::new();
             }
-            prewarm();
-        })
-        .ok();
-}
-
-static PREWARM_STARTED: AtomicBool = AtomicBool::new(false);
-
-/// Pre-load the 66M int8 ONNX tagger in a background thread so the turn-end
-/// post-processing pass runs in ~15ms with no cold-start delay.
-pub fn prewarm() {
-    if !files_present() || PREWARM_STARTED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    std::thread::Builder::new()
-        .name("disfluency-prewarm".to_string())
-        .spawn(|| {
-            let _ = clean_text("Um, hello.");
         })
         .ok();
 }

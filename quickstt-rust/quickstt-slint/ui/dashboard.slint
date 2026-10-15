@@ -17,6 +17,21 @@ export struct ModelCard {
     downloading: bool,
 }
 
+// One recorded turn for the dashboard History section. Times and labels are
+// pre-formatted in Rust so the rows stay cheap (the whole model is rebuilt at
+// most 10x/second, and only while something is actually playing).
+export struct HistRow {
+    index: int,
+    when: string,
+    dur: string,
+    pos: string,
+    text: string,
+    has_audio: bool,
+    menu_open: bool,
+    playing: bool,
+    progress: float,
+}
+
 // Modern Dark Theme QuickSTT Control Center Dashboard
 // Rendered via DirectWrite / Direct2D / D3D11 on Windows, fully native Slint.
 
@@ -81,6 +96,22 @@ export component DashboardWidget inherits Window {
     in property <int> ctrl-space-output: 0;
     // Disfluency cleanup toggle (non-streaming utterance text only).
     in property <bool> clean-disfluencies: true;
+    // Cleanup engine: 0 = FDT 66M tagger, 1 = S1-mini INT4 0.6B normalizer.
+    in property <int> disfluency-engine: 0;
+
+    // Sidebar: collapsible to icons via the chevron, drag-resizable 150-280px.
+    in-out property <bool> sidebar-collapsed: false;
+    in-out property <int> sidebar-width: 200;
+    // True while the user drags the sidebar edge (cursor + no re-layout jitter).
+    in-out property <bool> sidebar-dragging: false;
+
+    // Dashboard history (newest first). Rows carry pre-formatted labels.
+    in property <[HistRow]> history-items: [];
+    // Row whose ⋮ menu is open (-1 = none). Owned by Rust so it survives
+    // model rebuilds.
+    in-out property <int> history-menu-idx: -1;
+    // Row currently playing (-1 = none), for the play/pause icon.
+    in-out property <int> history-play-idx: -1;
     in property <string> recording-dir: "C:\\Users\\hemsh_sfya5gq\\Recordings";
     in property <string> app-version: "2.0.0-alpha.13 (Rust & Slint Edition)";
 
@@ -103,6 +134,16 @@ export component DashboardWidget inherits Window {
     callback set-ctrl-space-mode(int);
     callback set-ctrl-space-output(int);
     callback set-clean-disfluencies(bool);
+    callback set-disfluency-engine(int);
+    callback set-sidebar-width(length);
+    callback set-sidebar-collapsed(bool);
+    // History row actions (index into history-items).
+    callback history-play(int);
+    callback history-seek(int, float);
+    callback history-copy(int);
+    callback history-delete(int);
+    callback history-download(int);
+    callback history-menu(int, bool);
     callback set-show-waveform(bool);
     callback set-waveform-sensitivity(int);
     callback set-tray-icon-size(int);
@@ -144,14 +185,18 @@ export component DashboardWidget inherits Window {
             spacing: 0px;
 
             // ── Left Navigation Sidebar ──
+            // Collapsible (chevron → 56px icons-only) and drag-resizable
+            // between 150px and 280px. Dragging is disabled while collapsed —
+            // the collapsed rail is a fixed icon strip, so there is nothing to
+            // drag and re-expanding should not jump the layout.
             Rectangle {
-                width: 200px;
+                width: root.sidebar-collapsed ? 56px : root.sidebar-width * 1px;
                 background: #111418;
                 border-width: 1px;
                 border-color: #21262D;
 
                 VerticalLayout {
-                    padding: 12px;
+                    padding: root.sidebar-collapsed ? 4px : 12px;
                     spacing: 6px;
 
                     // Navigation Item 0: General
@@ -163,8 +208,8 @@ export component DashboardWidget inherits Window {
                         border-color: #3898FF;
 
                         HorizontalLayout {
-                            padding-left: 12px;
-                            spacing: 10px;
+                            padding-left: root.sidebar-collapsed ? 0px : 12px;
+                            spacing: root.sidebar-collapsed ? 0px : 10px;
                             Text {
                                 text: "⚙";
                                 font-size: 15px;
@@ -173,6 +218,8 @@ export component DashboardWidget inherits Window {
                             }
                             Text {
                                 text: "General";
+                                visible: !root.sidebar-collapsed;
+
                                 font-size: 13px;
                                 font-weight: root.active-tab == 0 ? 700 : 500;
                                 color: root.active-tab == 0 ? #F0F6FC : #8B949E;
@@ -194,8 +241,8 @@ export component DashboardWidget inherits Window {
                         border-color: #3898FF;
 
                         HorizontalLayout {
-                            padding-left: 12px;
-                            spacing: 10px;
+                            padding-left: root.sidebar-collapsed ? 0px : 12px;
+                            spacing: root.sidebar-collapsed ? 0px : 10px;
                             Text {
                                 text: "🎙";
                                 font-size: 15px;
@@ -204,6 +251,8 @@ export component DashboardWidget inherits Window {
                             }
                             Text {
                                 text: "Speech Models";
+                                visible: !root.sidebar-collapsed;
+
                                 font-size: 13px;
                                 font-weight: root.active-tab == 1 ? 700 : 500;
                                 color: root.active-tab == 1 ? #F0F6FC : #8B949E;
@@ -225,8 +274,8 @@ export component DashboardWidget inherits Window {
                         border-color: #3898FF;
 
                         HorizontalLayout {
-                            padding-left: 12px;
-                            spacing: 10px;
+                            padding-left: root.sidebar-collapsed ? 0px : 12px;
+                            spacing: root.sidebar-collapsed ? 0px : 10px;
                             Text {
                                 text: "🎨";
                                 font-size: 15px;
@@ -235,6 +284,8 @@ export component DashboardWidget inherits Window {
                             }
                             Text {
                                 text: "Widget Style";
+                                visible: !root.sidebar-collapsed;
+
                                 font-size: 13px;
                                 font-weight: root.active-tab == 2 ? 700 : 500;
                                 color: root.active-tab == 2 ? #F0F6FC : #8B949E;
@@ -256,8 +307,8 @@ export component DashboardWidget inherits Window {
                         border-color: #3898FF;
 
                         HorizontalLayout {
-                            padding-left: 12px;
-                            spacing: 10px;
+                            padding-left: root.sidebar-collapsed ? 0px : 12px;
+                            spacing: root.sidebar-collapsed ? 0px : 10px;
                             Text {
                                 text: "👂";
                                 font-size: 15px;
@@ -266,6 +317,8 @@ export component DashboardWidget inherits Window {
                             }
                             Text {
                                 text: "Wake Words & VAD";
+                                visible: !root.sidebar-collapsed;
+
                                 font-size: 13px;
                                 font-weight: root.active-tab == 3 ? 700 : 500;
                                 color: root.active-tab == 3 ? #F0F6FC : #8B949E;
@@ -287,8 +340,8 @@ export component DashboardWidget inherits Window {
                         border-color: #3898FF;
 
                         HorizontalLayout {
-                            padding-left: 12px;
-                            spacing: 10px;
+                            padding-left: root.sidebar-collapsed ? 0px : 12px;
+                            spacing: root.sidebar-collapsed ? 0px : 10px;
                             Text {
                                 text: "🔄";
                                 font-size: 15px;
@@ -297,6 +350,8 @@ export component DashboardWidget inherits Window {
                             }
                             Text {
                                 text: "System & Info";
+                                visible: !root.sidebar-collapsed;
+
                                 font-size: 13px;
                                 font-weight: root.active-tab == 4 ? 700 : 500;
                                 color: root.active-tab == 4 ? #F0F6FC : #8B949E;
@@ -312,6 +367,30 @@ export component DashboardWidget inherits Window {
                     // Spacer
                     Rectangle { }
 
+                    // Collapse / expand (chevron). Bottom of the rail so it
+                    // never shifts the nav items when toggled.
+                    Rectangle {
+                        height: 32px;
+                        border-radius: 8px;
+                        background: chev_touch.has-hover ? #21262D : #161B22;
+                        border-width: 1px;
+                        border-color: #30363D;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            Text {
+                                text: root.sidebar-collapsed ? "›" : "‹";
+                                font-size: 20px;
+                                color: chev_touch.has-hover ? #F0F6FC : #8B949E;
+                                vertical-alignment: center;
+                            }
+                        }
+                        chev_touch := TouchArea {
+                            clicked => { root.set-sidebar-collapsed(!root.sidebar-collapsed); }
+                            mouse-cursor: pointer;
+                        }
+                    }
+
                     // Status Pill at Bottom of Sidebar
                     Rectangle {
                         height: 36px;
@@ -319,6 +398,7 @@ export component DashboardWidget inherits Window {
                         background: #161B22;
                         border-width: 1px;
                         border-color: #30363D;
+                        visible: !root.sidebar-collapsed;
                         HorizontalLayout {
                             alignment: center;
                             spacing: 6px;
@@ -335,6 +415,23 @@ export component DashboardWidget inherits Window {
                                 color: #8B949E;
                                 vertical-alignment: center;
                             }
+                        }
+                    }
+                }
+
+                // Drag-to-resize handle on the right edge: 6px grab strip,
+                // col-resize cursor, width clamped 150-280px and persisted.
+                sidebar_drag := TouchArea {
+                    x: parent.width - 6px;
+                    width: 6px;
+                    height: parent.height;
+                    enabled: !root.sidebar-collapsed;
+                    mouse-cursor: col-resize;
+                    // pressed-x is where the button went down, so the delta works without
+                    // any manual press bookkeeping.
+                    moved => {
+                        if (self.pressed) {
+                            root.set-sidebar-width(root.sidebar-width * 1px + (self.mouse-x - self.pressed-x));
                         }
                     }
                 }
@@ -365,6 +462,251 @@ export component DashboardWidget inherits Window {
                             text: "Configure Windows integration, silence auto-commit, memory auto-offload, and recording output.";
                             font-size: 12px;
                             color: #8B949E;
+                        }
+
+                        // ── Transcript History (top of General) ──
+                        // Every finished turn with its audio: play/pause, a
+                        // click-to-seek timeline with the elapsed/total time on
+                        // the right, the transcript, plus copy / delete and a
+                        // ⋮ menu with download. Rows are pre-formatted in Rust
+                        // and rebuilt only when the history changes or
+                        // something is playing (10Hz), so the dashboard stays
+                        // smooth with 100 turns in the list.
+                        Rectangle {
+                            background: #161B22;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #30363D;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 10px;
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: "Transcript History";
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        color: #58A6FF;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.history-items.length == 0 ? "" : root.history-items.length + " turns";
+                                        font-size: 11px;
+                                        color: #8B949E;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+
+                                if root.history-items.length == 0 : Text {
+                                    text: "No transcriptions yet. Hold Ctrl+Space and speak — every finished turn lands here with its audio.";
+                                    font-size: 12px;
+                                    color: #8B949E;
+                                    wrap: word-wrap;
+                                }
+
+                                for item[i] in root.history-items : Rectangle {
+                                    background: #0D1117;
+                                    border-radius: 8px;
+                                    border-width: 1px;
+                                    border-color: #21262D;
+
+                                    VerticalLayout {
+                                        padding: 10px;
+                                        spacing: 8px;
+
+                                        HorizontalLayout {
+                                            spacing: 10px;
+
+                                            // Play / pause
+                                            Rectangle {
+                                                width: 30px;
+                                                height: 30px;
+                                                border-radius: 15px;
+                                                background: play_touch.has-hover ? #21262D : #161B22;
+                                                border-width: 1px;
+                                                border-color: item.playing ? #58A6FF : #30363D;
+                                                Text {
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                    
+                                                    font-size: 12px;
+                                                    color: item.playing ? #58A6FF : #F0F6FC;
+                                                }
+                                                play_touch := TouchArea {
+                                                    clicked => { root.history-play(i); }
+                                                    mouse-cursor: pointer;
+                                                }
+                                            }
+
+                                            Text {
+                                                text: item.when;
+                                                font-size: 11px;
+                                                color: #8B949E;
+                                                vertical-alignment: center;
+                                                min-width: 104px;
+                                            }
+
+                                            // Seek timeline (click to jump). height: 14px so the 8px track plus
+                                            // hover padding is an easy grab target; the track itself is centred.
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                height: 14px;
+                                                Rectangle {
+                                                    y: 3px;
+                                                    width: parent.width;
+                                                    height: 8px;
+                                                    border-radius: 4px;
+                                                    background: #21262D;
+                                                    Rectangle {
+                                                        x: 0px;
+                                                        width: parent.width * item.progress;
+                                                        height: parent.height;
+                                                        border-radius: 4px;
+                                                        background: item.playing ? #58A6FF : #30363D;
+                                                    }
+                                                }
+                                                seek_touch := TouchArea {
+                                                    clicked => {
+                                                        root.history-seek(i, self.mouse-x / self.width);
+                                                    }
+                                                    mouse-cursor: pointer;
+                                                }
+                                            }
+
+                                            // Elapsed / total, right of the bar
+                                            Text {
+                                                text: item.playing ? (item.pos + " / " + item.dur) : item.dur;
+                                                font-size: 11px;
+                                                color: item.playing ? #F0F6FC : #8B949E;
+                                                vertical-alignment: center;
+                                                min-width: 82px;
+                                                horizontal-alignment: right;
+                                            }
+
+                                            // Copy
+                                            Rectangle {
+                                                width: 26px;
+                                                height: 26px;
+                                                border-radius: 6px;
+                                                background: copy_touch.has-hover ? #21262D : transparent;
+                                                border-width: 1px;
+                                                border-color: #30363D;
+                                                Text {
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                    
+                                                    font-size: 12px;
+                                                    color: copy_touch.has-hover ? #F0F6FC : #8B949E;
+                                                }
+                                                copy_touch := TouchArea {
+                                                    clicked => { root.history-copy(i); }
+                                                    mouse-cursor: pointer;
+                                                }
+                                            }
+
+                                            // Delete
+                                            Rectangle {
+                                                width: 26px;
+                                                height: 26px;
+                                                border-radius: 6px;
+                                                background: del_touch.has-hover ? #3D1A1A : transparent;
+                                                border-width: 1px;
+                                                border-color: #30363D;
+                                                Text {
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                    
+                                                    font-size: 11px;
+                                                    color: del_touch.has-hover ? #FF7B72 : #8B949E;
+                                                }
+                                                del_touch := TouchArea {
+                                                    clicked => { root.history-delete(i); }
+                                                    mouse-cursor: pointer;
+                                                }
+                                            }
+
+                                            // ⋮ more options (expands in place —
+                                            // no popup to clip or z-order fight)
+                                            Rectangle {
+                                                width: 26px;
+                                                height: 26px;
+                                                border-radius: 6px;
+                                                background: more_touch.has-hover || item.menu_open ? #21262D : transparent;
+                                                border-width: 1px;
+                                                border-color: #30363D;
+                                                Text {
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                    
+                                                    font-size: 14px;
+                                                    color: more_touch.has-hover || item.menu_open ? #F0F6FC : #8B949E;
+                                                }
+                                                more_touch := TouchArea {
+                                                    clicked => { root.history-menu(i, !item.menu_open); }
+                                                    mouse-cursor: pointer;
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            text: item.text;
+                                            font-size: 12px;
+                                            color: #F0F6FC;
+                                            wrap: word-wrap;
+                                        }
+
+                                        if item.menu_open : Rectangle {
+                                            background: #161B22;
+                                            border-radius: 6px;
+                                            border-width: 1px;
+                                            border-color: #30363D;
+                                            HorizontalLayout {
+                                                padding: 8px;
+                                                spacing: 8px;
+                                                Text {
+                                                    text: item.has_audio ? "Export this turn as audio + text to your recordings folder:" : "No audio stored for this turn — export the text:";
+                                                    font-size: 11px;
+                                                    color: #8B949E;
+                                                    vertical-alignment: center;
+                                                }
+                                                Rectangle {
+                                                    width: 130px;
+                                                    height: 26px;
+                                                    border-radius: 6px;
+                                                    background: dl_touch.has-hover ? #21262D : transparent;
+                                                    border-width: 1px;
+                                                    border-color: #58A6FF;
+                                                    Text {
+                                                        width: parent.width;
+                                                        height: parent.height;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                        
+                                                        font-size: 11px;
+                                                        font-weight: 600;
+                                                        color: dl_touch.has-hover ? #F0F6FC : #58A6FF;
+                                                    }
+                                                    dl_touch := TouchArea {
+                                                        clicked => { root.history-download(i); }
+                                                        mouse-cursor: pointer;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // Group 1: Startup & Behavior Card
@@ -542,8 +884,24 @@ export component DashboardWidget inherits Window {
                                     checked: root.clean-disfluencies;
                                     toggled => { root.set-clean-disfluencies(self.checked); }
                                 }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text {
+                                        text: "Cleanup model:";
+                                        font-size: 13px;
+                                        color: #F0F6FC;
+                                        vertical-alignment: center;
+                                        min-width: 110px;
+                                    }
+                                    ComboBox {
+                                        model: ["FDT 66M tagger - fillers + repeats only (66MB)", "S1-mini INT4 (0.6B) - fillers + self-corrections + numbers (375MB)"];
+                                        current-index: root.disfluency-engine;
+                                        enabled: root.clean-disfluencies;
+                                        selected(v) => { root.set-disfluency-engine(self.current-index); }
+                                    }
+                                }
                                 Text {
-                                    text: "Deletion-only tagger (66M, local): strips fillers after the utterance window, never rephrases. Research model — see card.";
+                                    text: "Deletion-only 66M tagger (Apache-2.0-ish research model, instant) OR \"S1-mini\" by Superwhisper - a 0.6B ASR text normalizer (Apache-2.0 + naming clause) that also resolves self-corrections (\"no wait, thursday\") and writes spoken numbers, dates and times in written form. Weights download on first use; the model loads only for the turn being cleaned and is dropped immediately after.";
                                     font-size: 11px;
                                     color: #8B949E;
                                     wrap: word-wrap;

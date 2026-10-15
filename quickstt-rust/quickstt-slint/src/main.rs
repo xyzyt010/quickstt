@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod autostart;
+mod history_player;
 mod widget_platform;
 
 slint::include_modules!();
@@ -114,26 +115,31 @@ fn menu_action(
 
 /// "Hide for 1 hour" from any menu (pill, tray, SNI): the pill window hides
 /// NOW and the poll keeps it hidden until expiry, then re-shows it. The app,
-/// tray, hotkeys and wakewords keep running throughout, and any trigger
-/// pops the pill straight back (the session re-show path ignores snooze —
-/// an explicit user summons always wins). Safe only because the event loop
-/// survives hidden windows (re-entered until quit).
+/// tray, hotkeys and wakewords keep running throughout. Triggers never cancel
+/// the snooze — Ctrl+Space only transiently shows the pill for its session.
+/// Safe only because the event loop survives hidden windows (re-entered until
+/// quit).
 fn snooze_pill_1h(
     pill: &slint::Weak<PillWidget>,
     hide_until: &Arc<Mutex<Option<std::time::Instant>>>,
+    snooze_ptt_show: &Arc<Mutex<bool>>,
 ) {
     *mlock(hide_until) =
         Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+    *mlock(snooze_ptt_show) = false;
     if let Some(p) = pill.upgrade() {
         let _ = p.hide();
     }
     log_line("menu: pill hidden for 1 hour");
 }
 
-/// Tray left/double-click: flip the Slint pill widget visibility.
+/// Tray left/double-click: flip the Slint pill widget visibility. An explicit
+/// show ALSO cancels the Hide-1h snooze (that is the documented escape).
 fn toggle_pill_widget(
     pill: &slint::Weak<PillWidget>,
     state: &Arc<Mutex<quickstt_core::orchestration::AppState>>,
+    hide_until: &Arc<Mutex<Option<std::time::Instant>>>,
+    snooze_ptt_show: &Arc<Mutex<bool>>,
     why: &str,
 ) {
     if let Some(p) = pill.upgrade() {
@@ -149,6 +155,12 @@ fn toggle_pill_widget(
                 }
             }
         } else {
+            // Explicit show: the hour-hide ends here.
+            if hide_until.lock().map(|h| h.is_some()).unwrap_or(false) {
+                *hide_until.lock().unwrap() = None;
+                *mlock(snooze_ptt_show) = false;
+                log_line("snooze cancelled by explicit show widget");
+            }
             log_line(&format!("tray {why}: show Rust pill widget"));
             widget_platform::show_widget(p.window());
             widget_platform::restack_topmost(p.window());
@@ -1758,6 +1770,41 @@ fn capture_current_fg_window(target: &Arc<Mutex<Option<isize>>>) {
     }
 }
 
+/// Copy text to the system clipboard on both platforms (dashboard History
+/// rows, "copy transcript"). Windows: Win32 clipboard. Linux: wl-copy on
+/// Wayland, xclip/xsel on X11 — no keystroke is injected, this is a pure copy.
+fn copy_text_to_clipboard(text: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        copy_to_windows_clipboard(text)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let spawn_copy = |prog: &str, args: &[&str]| -> bool {
+            Command::new(prog)
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()
+                .and_then(|mut c| {
+                    let _ = c.stdin.as_mut().map(|s| s.write_all(text.as_bytes()));
+                    c.wait().map(|s| s.success()).ok()
+                })
+                .unwrap_or(false)
+        };
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            spawn_copy("wl-copy", &[])
+        } else {
+            spawn_copy("xclip", &["-selection", "clipboard"])
+                || spawn_copy("xsel", &["--clipboard", "--input"])
+        }
+    }
+}
+
 /// Linux paste: clipboard + Ctrl+V into the focused window, mirroring the
 /// Windows timing (40ms settle, 50ms refocus). Wayland via wl-copy + wtype,
 /// X11 via xclip + xdotool (all installed by scripts/install.sh).
@@ -2207,10 +2254,20 @@ fn main() -> QuickSttResult<()> {
         Arc::new(Mutex::new(None));
     // "Hide for 1 hour" snooze: while set in the future the pill stays
     // hidden (tray icon + menus still work; it reappears on expiry).
+    // Trigger sessions NEVER cancel it — only an explicit Show does.
     let hide_until: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+    // True while a Ctrl+Space (PTT) session deliberately runs during the
+    // snooze: the pill appears for that session only, then hides again with
+    // the snooze still ticking. Wakeword/clap sessions never set this.
+    let snooze_ptt_show: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     // Transcript-history mode: the TextBoard shows the FULL buffer instead
     // of just the current turn until the user closes it / a new session.
     let tb_full: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    // Dashboard history playback bookkeeping: which row is playing, whose ⋮
+    // menu is open, and whether the row model must be rebuilt this tick.
+    let history_play_idx: Arc<Mutex<i32>> = Arc::new(Mutex::new(-1));
+    let history_menu_idx: Arc<Mutex<i32>> = Arc::new(Mutex::new(-1));
+    let history_dirty: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     // Last finished turn (trimmed): "Paste last transcript" types this.
     let last_turn: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     // Smooth footprint morph: window size+pos lerp over ~240ms so expand /
@@ -2549,6 +2606,8 @@ fn dock_hop(
         let st = state.clone();
         let ph = ptt_held.clone();
         let fg_ptt = last_external_fg.clone();
+        let hide_until_ptt = hide_until.clone();
+        let snooze_ptt_show_ptt = snooze_ptt_show.clone();
         std::thread::Builder::new()
             .name("ptt-hotkey".into())
             .spawn(move || {
@@ -2612,8 +2671,21 @@ fn dock_hop(
                                 capture_current_fg_window(&fg_ptt);
                                 log_line("PTT press");
                                 *mlock(&ph) = true;
+                                // Hide-1h is NOT cancelled by a trigger. Only a
+                                // PTT session may transiently show the pill for
+                                // its own duration (it hides again when the
+                                // session ends; the snooze keeps ticking).
+                                let snoozed = hide_until_ptt
+                                    .lock()
+                                    .map(|h| h.map(|u| std::time::Instant::now() < u).unwrap_or(false))
+                                    .unwrap_or(false);
                                 if let Ok(mut s) = st.lock() {
-                                    s.widget_visible = true;
+                                    if snoozed {
+                                        *mlock(&snooze_ptt_show_ptt) = true;
+                                        log_line("PTT during hide-1h: transient show (snooze kept)");
+                                    } else {
+                                        s.widget_visible = true;
+                                    }
                                     if s.status_message.eq_ignore_ascii_case("Hidden") {
                                         s.status_message = "Listening...".into();
                                     }
@@ -3338,6 +3410,7 @@ fn dock_hop(
         let pw = pill.as_weak();
         let anim = foot_anim.clone();
         let hide_until = hide_until.clone();
+        let snooze_ptt_row = snooze_ptt_show.clone();
         pillmenu.on_hide_row(move || {
             hide_pill_menus(&pm, &fly);
             if let Some(p) = pw.upgrade() {
@@ -3350,7 +3423,7 @@ fn dock_hop(
                     uo0,
                 });
             }
-            snooze_pill_1h(&pw, &hide_until);
+            snooze_pill_1h(&pw, &hide_until, &snooze_ptt_row);
         });
     }
     {
@@ -3676,6 +3749,7 @@ fn dock_hop(
         let dash_visible_menu = dash_visible.clone();
         let state_menu = state.clone();
         let hide_until_menu = hide_until.clone();
+        let snooze_ptt_menu = snooze_ptt_show.clone();
         traymenu.on_row_clicked(move |i| {
             if let Some(t) = tm.upgrade() {
                 let _ = t.hide();
@@ -3683,7 +3757,7 @@ fn dock_hop(
             // Row 3 is snooze (handled here — menu_action rows are
             // 0 dashboard / 1 show / 2 hide / 4 quit).
             if i == 3 {
-                snooze_pill_1h(&pill_menu_w, &hide_until_menu);
+                snooze_pill_1h(&pill_menu_w, &hide_until_menu, &snooze_ptt_menu);
             } else {
                 menu_action(i, &dash_menu, &pill_menu_w, &dash_visible_menu, &state_menu);
             }
@@ -3763,6 +3837,15 @@ fn dock_hop(
     let tb_full_timer = tb_full.clone();
     let last_turn_timer = last_turn.clone();
     let hide_until_timer = hide_until.clone();
+    let snooze_ptt_show_timer = snooze_ptt_show.clone();
+    // Dashboard history row sync: rebuilt on demand (new turn / user action)
+    // and at 10Hz while audio is playing so the seek bar and clock advance.
+    let hist_play_idx = history_play_idx.clone();
+    let hist_menu_idx = history_menu_idx.clone();
+    let hist_dirty = history_dirty.clone();
+    let mut hist_model: Vec<HistRow> = Vec::new();
+    let mut hist_last_seq: u64 = u64::MAX;
+    let mut hist_last_push: std::time::Instant = std::time::Instant::now() - std::time::Duration::from_secs(1);
     let menu_pin_timer = menu_pin.clone();
     let flyout_ui_timer = flyout_ui.clone();
     let menu2_open_at_timer = menu2_open_at.clone();
@@ -4219,13 +4302,19 @@ fn dock_hop(
                     });
                     log_line(&format!("releasetest ({x},{y})"));
                 } else if cmd == "SHOW" {
+                    // Explicit show cancels the Hide-1h snooze (documented escape).
+                    if hide_until_timer.lock().map(|h| h.is_some()).unwrap_or(false) {
+                        *mlock(&hide_until_timer) = None;
+                        *mlock(&snooze_ptt_show_timer) = false;
+                        log_line("ipc SHOW: snooze cancelled by explicit show widget");
+                    }
                     widget_platform::show_widget(p.window());
                     widget_platform::restack_topmost(p.window());
                 } else if cmd == "HIDE" {
                     let _ = p.hide();
                     log_line("diag: pill hidden via ipc (event loop must survive this)");
                 } else if cmd == "TOGGLE" {
-                    toggle_pill_widget(&pill_w, &state_timer, "ipc");
+                    toggle_pill_widget(&pill_w, &state_timer, &hide_until_timer, &snooze_ptt_show_timer, "ipc");
                 } else if cmd == "DASH" {
                     if let Some(d) = dash_timer.upgrade() {
                         widget_platform::show_app_window(d.window());
@@ -4412,11 +4501,11 @@ fn dock_hop(
                                             }
                                             2 => {
                                                 log_line("tray native menu: Show/Hide Widget");
-                                                toggle_pill_widget(&pill_w, &state_timer, "tray-native-menu");
+                                                toggle_pill_widget(&pill_w, &state_timer, &hide_until_timer, &snooze_ptt_show_timer, "tray-native-menu");
                                             }
                                             4 => {
                                                 log_line("tray native menu: Hide for 1 hour");
-                                                snooze_pill_1h(&pill_w, &hide_until_timer);
+                                                snooze_pill_1h(&pill_w, &hide_until_timer, &snooze_ptt_show_timer);
                                             }
                                             3 => {
                                                 log_line("tray native menu: Quit QuickSTT");
@@ -4461,6 +4550,8 @@ fn dock_hop(
                                     toggle_pill_widget(
                                         &pill_w,
                                         &state_timer,
+                                        &hide_until_timer,
+                                        &snooze_ptt_show_timer,
                                         "double",
                                     );
                                 } else {
@@ -4486,6 +4577,8 @@ fn dock_hop(
                                 toggle_pill_widget(
                                     &pill_w,
                                     &state_timer,
+                                    &hide_until_timer,
+                                    &snooze_ptt_show_timer,
                                     "double",
                                 );
                             }
@@ -4524,7 +4617,7 @@ fn dock_hop(
             if let Some(t) = tray_pending_single {
                 if t.elapsed() > std::time::Duration::from_millis(350) {
                     tray_pending_single = None;
-                    toggle_pill_widget(&pill_w, &state_timer, "left");
+                    toggle_pill_widget(&pill_w, &state_timer, &hide_until_timer, &snooze_ptt_show_timer, "left");
                 }
             }
             // SNI tray clicks (Linux): same actions as the native menu rows.
@@ -4533,7 +4626,7 @@ fn dock_hop(
                 use sni_tray::SniClick::*;
                 while let Ok(click) = rx.try_recv() {
                     match click {
-                        Activate => toggle_pill_widget(&pill_w, &state_timer, "sni"),
+                        Activate => toggle_pill_widget(&pill_w, &state_timer, &hide_until_timer, &snooze_ptt_show_timer, "sni"),
                         Dashboard => menu_action(
                             0,
                             &dash_timer,
@@ -4541,8 +4634,8 @@ fn dock_hop(
                             &dash_visible_timer,
                             &state_timer,
                         ),
-                        ToggleWidget => toggle_pill_widget(&pill_w, &state_timer, "sni-menu"),
-                        Snooze => snooze_pill_1h(&pill_w, &hide_until_timer),
+                        ToggleWidget => toggle_pill_widget(&pill_w, &state_timer, &hide_until_timer, &snooze_ptt_show_timer, "sni-menu"),
+                        Snooze => snooze_pill_1h(&pill_w, &hide_until_timer, &snooze_ptt_show_timer),
                         Quit => {
                             quit_app();
                             std::process::exit(0);
@@ -4892,14 +4985,21 @@ fn dock_hop(
                     // leaves history mode (fresh turns show current only).
                     *mlock(&tb_closed_timer) = false;
                     *mlock(&tb_full_timer) = false;
-                    // An explicit summons always wins over snooze: a trigger,
-                    // PTT press or mic tap cancels "hide for 1 hour" and the
-                    // pill pops back with the session.
-                    if hide_until_timer.lock().map(|h| h.is_some()).unwrap_or(false) {
-                        *mlock(&hide_until_timer) = None;
-                        log_line("snooze cancelled by live session");
+                    // Hide-1h overrides every summons EXCEPT Ctrl+Space: a
+                    // wakeword/clap/mic-tap session never starts while the
+                    // pill is snoozed (the pill stays hidden, the snooze keeps
+                    // ticking). PTT is exempt — it transiently shows the pill
+                    // for the session and hides again afterwards.
+                    let snooze_active = hide_until_timer
+                        .lock()
+                        .map(|h| h.map(|u| std::time::Instant::now() < u).unwrap_or(false))
+                        .unwrap_or(false);
+                    if snooze_active && !ptt {
+                        log_line("trigger session refused (hide-1h active)");
+                        let _ = tx_cmd_timer.try_send(OrchestratorCommand::StopListening);
+                    } else {
+                        log_line("session start");
                     }
-                    log_line("session start");
                     // Pop to front on trigger: the turn must open above
                     // whatever the user is doing.
                     widget_platform::restack_topmost(p.window());
@@ -5064,14 +5164,25 @@ fn dock_hop(
                                 // Final post-processing phase: once the user
                                 // has lifted Ctrl+Space / stopped transcription
                                 // and all STT segments have completed, run the
-                                // disfluency AI tagger over the entire turn text
-                                // right before pasting.
+                                // selected cleanup model over the entire turn
+                                // text right before pasting.
                                 let full = if s.settings.clean_disfluencies {
+                                    let engine = s.settings.disfluency_engine;
+                                    if !quickstt_core::models::disfluency::files_present(engine)
+                                    {
+                                        quickstt_core::models::disfluency::ensure_download(
+                                            Arc::clone(&state_timer),
+                                            engine,
+                                        );
+                                    }
                                     let t0 = std::time::Instant::now();
-                                    let cleaned =
-                                        quickstt_core::models::disfluency::clean_text(&raw_full);
+                                    let cleaned = quickstt_core::models::disfluency::clean_text_with(
+                                        engine,
+                                        &raw_full,
+                                    );
                                     log_line(&format!(
-                                        "post-process disfluency ({}ms): {:?} -> {:?}",
+                                        "post-process [{}] {}ms: {:?} -> {:?}",
+                                        quickstt_core::models::disfluency::backend_name(engine),
                                         t0.elapsed().as_millis(),
                                         raw_full,
                                         cleaned
@@ -5608,7 +5719,9 @@ fn dock_hop(
 
                 // Hover-only expand (no pin): collapsed unless hovered or live.
                 // "Hide for 1 hour" snooze overrides widget_visible (tray +
-                // menus keep working; the pill comes back on expiry).
+                // menus keep working; the pill comes back on expiry). A PTT
+                // session may transiently show the pill during the snooze —
+                // it hides again when that session ends, snooze untouched.
                 let dragging = drag_timer.lock().map(|dd| dd.active).unwrap_or(false);
                 let session = live_session || transcribing;
                 let snoozed = hide_until_timer
@@ -5622,7 +5735,27 @@ fn dock_hop(
                     log_line("pill snooze expired — back");
                 }
                 prev_snoozed = snoozed;
-                if s.widget_visible && !snoozed {
+                // Transient PTT show during snooze: live while the session
+                // lives; once it ends (release + mic closed + done
+                // transcribing) the pill hides again and the flag clears.
+                let mut ptt_transient = false;
+                if snoozed && *mlock(&snooze_ptt_show_timer) {
+                    if *mlock(&ptt_held_timer) || s.mic_open || transcribing {
+                        ptt_transient = true;
+                    } else {
+                        *mlock(&snooze_ptt_show_timer) = false;
+                        if p.window().is_visible() {
+                            let _ = p.hide();
+                            log_line("hide-1h: PTT session over — pill hidden again (snooze kept)");
+                        }
+                    }
+                }
+                let want_pill = if snoozed {
+                    ptt_transient
+                } else {
+                    s.widget_visible
+                };
+                if want_pill {
                     if !p.window().is_visible() {
                         widget_platform::show_widget(p.window());
                     }
@@ -6127,8 +6260,226 @@ fn dock_hop(
             if let Ok(mut s) = state.lock() {
                 s.settings.clean_disfluencies = on;
                 let _ = s.settings.save_all();
-                log_line(&format!("disfluency cleanup {}", if on { "ON" } else { "OFF" }));
+                log_line(&format!("transcript cleanup {}", if on { "ON" } else { "OFF" }));
             }
+        });
+    }
+    {
+        let state = state.clone();
+        dashboard.on_set_disfluency_engine(move |v| {
+            if let Ok(mut s) = state.lock() {
+                s.settings.disfluency_engine = v.clamp(0, 1) as u32;
+                let engine = s.settings.disfluency_engine;
+                let _ = s.settings.save_all();
+                log_line(&format!(
+                    "cleanup engine -> {}",
+                    quickstt_core::models::disfluency::engine_label(engine)
+                ));
+                // Fetch the newly selected weights in the background so the
+                // first turn with it does not silently pass text through.
+                if s.settings.clean_disfluencies
+                    && !quickstt_core::models::disfluency::files_present(engine)
+                {
+                    quickstt_core::models::disfluency::ensure_download(
+                        Arc::clone(&state),
+                        engine,
+                    );
+                }
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        dashboard.on_set_sidebar_width(move |v: f32| {
+            if let Ok(mut s) = state.lock() {
+                s.settings.dash_sidebar_width = (v.round() as i64).clamp(150, 280) as u32;
+                let _ = s.settings.save_all();
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        dashboard.on_set_sidebar_collapsed(move |on| {
+            if let Ok(mut s) = state.lock() {
+                s.settings.dash_sidebar_collapsed = on;
+                let _ = s.settings.save_all();
+            }
+        });
+    }
+    // ── Dashboard history: playback, copy, delete, download ──
+    {
+        let state = state.clone();
+        let play_idx = history_play_idx.clone();
+        let menu_idx = history_menu_idx.clone();
+        let dirty = history_dirty.clone();
+        dashboard.on_history_play(move |i| {
+            let item = match state.lock() {
+                Ok(s) => s.history.get(i as usize).cloned(),
+                Err(_) => None,
+            };
+            let Some(item) = item else { return };
+            let same = play_idx.lock().map(|p| *p == i).unwrap_or(false);
+            if same && history_player::is_playing() {
+                history_player::pause();
+                *mlock(&play_idx) = -1;
+            } else if let Some(audio) = quickstt_core::history::audio_path(&item) {
+                match history_player::play(&audio) {
+                    Ok(_) => {
+                        *mlock(&play_idx) = i;
+                        log_line(&format!("history: playing turn {} ({:?})", i, audio));
+                    }
+                    Err(e) => log_line(&format!("history: play failed: {e:#}")),
+                }
+            } else {
+                log_line("history: no audio stored for this turn");
+            }
+            *mlock(&dirty) = true;
+            let _ = &menu_idx;
+        });
+    }
+    {
+        let play_idx = history_play_idx.clone();
+        let state = state.clone();
+        let dirty = history_dirty.clone();
+        dashboard.on_history_seek(move |i, frac| {
+            if play_idx.lock().map(|p| *p != i).unwrap_or(true) {
+                // Seeking a different row starts it first, then jumps.
+                if let Ok(s) = state.lock() {
+                    if let Some(item) = s.history.get(i as usize) {
+                        if let Some(audio) = quickstt_core::history::audio_path(item) {
+                            if history_player::play(&audio).is_ok() {
+                                *mlock(&play_idx) = i;
+                            }
+                        }
+                    }
+                }
+            }
+            history_player::seek(frac);
+            *mlock(&dirty) = true;
+        });
+    }
+    {
+        let state = state.clone();
+        dashboard.on_history_copy(move |i| {
+            if let Ok(s) = state.lock() {
+                if let Some(item) = s.history.get(i as usize) {
+                    let text = item.text.clone();
+                    let ok = copy_text_to_clipboard(&text);
+                    log_line(&format!(
+                        "history: copied turn {} ({} chars, ok={ok})",
+                        i,
+                        text.len()
+                    ));
+                }
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let play_idx = history_play_idx.clone();
+        let menu_idx = history_menu_idx.clone();
+        let dirty = history_dirty.clone();
+        dashboard.on_history_delete(move |i| {
+            let deleted = match state.lock() {
+                Ok(mut s) => {
+                    let id = s
+                        .history
+                        .get(i as usize)
+                        .map(|it| it.id.clone())
+                        .unwrap_or_default();
+                    if id.is_empty() {
+                        false
+                    } else {
+                        let ok = quickstt_core::history::delete_turn(&mut s.history, &id);
+                        if ok {
+                            quickstt_core::history::save(&s.history);
+                            s.history_seq += 1;
+                        }
+                        ok
+                    }
+                }
+                Err(_) => false,
+            };
+            if deleted {
+                if play_idx.lock().map(|p| *p == i).unwrap_or(false) {
+                    history_player::stop();
+                    *mlock(&play_idx) = -1;
+                }
+                *mlock(&menu_idx) = -1;
+                *mlock(&dirty) = true;
+                log_line(&format!("history: deleted turn {i} (audio removed)"));
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let menu_idx = history_menu_idx.clone();
+        let dirty = history_dirty.clone();
+        dashboard.on_history_download(move |i| {
+            let payload = match state.lock() {
+                Ok(s) => s.history.get(i as usize).map(|it| {
+                    (
+                        it.id.clone(),
+                        it.text.clone(),
+                        it.created_ms,
+                        quickstt_core::history::audio_path(it),
+                    )
+                }),
+                Err(_) => None,
+            };
+            let Some((id, text, created_ms, audio)) = payload else { return };
+            let dest_dir = state
+                .lock()
+                .ok()
+                .map(|s| s.settings.recording_dir.clone())
+                .filter(|d| !d.trim().is_empty())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(quickstt_core::history::history_dir);
+            let _ = std::fs::create_dir_all(&dest_dir);
+            let stamp = quickstt_core::history::display_label(created_ms, quickstt_core::history::now_ms());
+            let base = format!("{}_{}", stamp.replace([':', '/'], "-"), id);
+            let wav_dest = dest_dir.join(format!("{base}.wav"));
+            let txt_dest = dest_dir.join(format!("{base}.txt"));
+            let mut copied_audio = false;
+            if let Some(src) = audio {
+                if let Err(e) = std::fs::copy(&src, &wav_dest) {
+                    log_line(&format!("history: audio export failed: {e}"));
+                } else {
+                    copied_audio = true;
+                }
+            }
+            if let Err(e) = std::fs::write(&txt_dest, text.as_bytes()) {
+                log_line(&format!("history: text export failed: {e}"));
+            }
+            log_line(&format!(
+                "history: exported turn {i} -> {} (audio={copied_audio})",
+                dest_dir.display()
+            ));
+            // Show the user where it landed.
+            #[cfg(target_os = "windows")]
+            if copied_audio {
+                let _ = std::process::Command::new("explorer")
+                    .arg(format!("/select,{}", wav_dest.display()))
+                    .spawn();
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(dest_dir.as_os_str())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
+            *mlock(&menu_idx) = -1;
+            *mlock(&dirty) = true;
+        });
+    }
+    {
+        let menu_idx = history_menu_idx.clone();
+        let dirty = history_dirty.clone();
+        dashboard.on_history_menu(move |i, open| {
+            *mlock(&menu_idx) = if open { i } else { -1 };
+            *mlock(&dirty) = true;
         });
     }
     {
@@ -6359,6 +6710,86 @@ fn dock_hop(
             dashboard.set_ctrl_space_mode(s.settings.ctrl_space_mode as i32);
             dashboard.set_ctrl_space_output(s.settings.ctrl_space_output as i32);
             dashboard.set_clean_disfluencies(s.settings.clean_disfluencies);
+            dashboard.set_disfluency_engine(s.settings.disfluency_engine.clamp(0, 1) as i32);
+            dashboard.set_sidebar_width(s.settings.dash_sidebar_width.clamp(150, 280) as i32);
+            dashboard.set_sidebar_collapsed(s.settings.dash_sidebar_collapsed);
+
+            // ── History rows (dashboard) ──
+            // Rebuild only when something actually changed: a new/deleted turn
+            // (history_seq), a user action (dirty), or at most 10x/second while
+            // a clip is playing (seek bar + elapsed clock). With 100 turns this
+            // keeps the dashboard smooth instead of re-laying out every tick.
+            let playing_now = history_player::is_playing();
+            if !playing_now && history_play_idx.lock().map(|p| *p >= 0).unwrap_or(false) {
+                // Playback ended on its own: drop the playing marker so the
+                // row falls back to its ▶ icon.
+                *mlock(&hist_play_idx) = -1;
+                *mlock(&hist_dirty) = true;
+            }
+            let since_push = hist_last_push.elapsed();
+            let need_hist = *mlock(&hist_dirty)
+                || s.history_seq != hist_last_seq
+                || (playing_now && since_push >= std::time::Duration::from_millis(100));
+            if need_hist {
+                hist_last_push = std::time::Instant::now();
+                hist_last_seq = s.history_seq;
+                *mlock(&hist_dirty) = false;
+                let play_i = *mlock(&hist_play_idx);
+                let menu_i = *mlock(&hist_menu_idx);
+                let pos_s = if playing_now {
+                    history_player::position_s()
+                } else {
+                    0.0
+                };
+                let now_ms = quickstt_core::history::now_ms();
+                let rows: Vec<HistRow> = s
+                    .history
+                    .iter()
+                    .enumerate()
+                    .map(|(i, it)| {
+                        let dur_s = it.duration_ms as f32 / 1000.0;
+                        let is_playing = play_i == i as i32 && playing_now;
+                        let shown = if is_playing { pos_s } else { 0.0 };
+                        HistRow {
+                            index: i as i32,
+                            when: quickstt_core::history::display_label(it.created_ms, now_ms).into(),
+                            dur: quickstt_core::history::fmt_dur(it.duration_ms).into(),
+                            pos: quickstt_core::history::fmt_dur((shown * 1000.0) as u64).into(),
+                            text: if it.text.chars().count() > 240 {
+                                // Keep rows compact with 100 turns in the list;
+                                // the full text lives in the copy/export paths.
+                                let mut t: String = it.text.chars().take(237).collect();
+                                t.push('…');
+                                t.into()
+                            } else {
+                                it.text.clone().into()
+                            },
+                            has_audio: !it.audio_file.is_empty(),
+                            menu_open: menu_i == i as i32,
+                            playing: is_playing,
+                            progress: if dur_s > 0.0 {
+                                (shown / dur_s).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            },
+                        }
+                    })
+                    .collect();
+                if rows.len() != hist_model.len()
+                    || rows.iter().zip(hist_model.iter()).any(|(a, b)| {
+                        a.text != b.text
+                            || a.playing != b.playing
+                            || a.menu_open != b.menu_open
+                            || (a.progress - b.progress).abs() > 0.004
+                            || a.pos != b.pos
+                    })
+                {
+                    hist_model = rows;
+                    dashboard.set_history_items(ModelRc::new(VecModel::from_slice(
+                        hist_model.as_slice(),
+                    )));
+                }
+            }
             dashboard.set_show_waveform(s.settings.show_waveform);
             dashboard.set_waveform_sensitivity(s.settings.waveform_sensitivity as i32);
             dashboard.set_tray_icon_size(s.settings.tray_icon_size as i32);

@@ -16,6 +16,11 @@ muda = "0.14"
 global-hotkey = "0.6"
 anyhow = "1"
 dirs = "5"
+# Dashboard history playback: decode recorded turn wavs (hound) and stream
+# them to the default output device (cpal). Both are already in the workspace
+# lockfile via quickstt-core, so this adds no new compile cost.
+hound = "3.5"
+cpal = "0.15"
 quickstt-core = { path = "../quickstt-core", features = ["audio-capture", "wakeword"] }
 raw-window-handle = "0.6"
 # Lean decoders for the tray icon PNG/ICO only (no SVG stack, no extra codecs).

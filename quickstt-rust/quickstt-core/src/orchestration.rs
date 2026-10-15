@@ -1085,14 +1085,15 @@ impl AppOrchestrator {
             }
         }
 
-        let want_disfluency = app_state.settings.clean_disfluencies;
+        let (want_disfluency, cleanup_engine) = (
+            app_state.settings.clean_disfluencies,
+            app_state.settings.disfluency_engine,
+        );
         let state = Arc::new(Mutex::new(app_state));
-        if want_disfluency {
-            if crate::models::disfluency::files_present() {
-                crate::models::disfluency::prewarm();
-            } else {
-                crate::models::disfluency::ensure_download(Arc::clone(&state));
-            }
+        if want_disfluency
+            && !crate::models::disfluency::files_present(cleanup_engine)
+        {
+            crate::models::disfluency::ensure_download(Arc::clone(&state), cleanup_engine);
         }
         let (tx_cmd, rx_cmd) = mpsc::channel(256);
 
@@ -1207,10 +1208,12 @@ impl AppOrchestrator {
                         .map(|s| s.settings.clean_disfluencies)
                         .unwrap_or(false);
                     if want_clean {
-                        if !crate::models::disfluency::files_present() {
-                            crate::models::disfluency::ensure_download(Arc::clone(&state));
-                        } else {
-                            crate::models::disfluency::prewarm();
+                        let engine = state
+                            .lock()
+                            .map(|s| s.settings.disfluency_engine)
+                            .unwrap_or(0);
+                        if !crate::models::disfluency::files_present(engine) {
+                            crate::models::disfluency::ensure_download(Arc::clone(&state), engine);
                         }
                     }
                     let norm = text.trim().to_lowercase();

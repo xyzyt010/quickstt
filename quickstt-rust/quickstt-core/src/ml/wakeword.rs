@@ -554,25 +554,52 @@ mod tests {
     fn wakeword_vad_gate_blocks_quiet_nonspeech() {
         let heads = oww_heads();
         let mut eng = WakeWordEngine::from_oww_heads(&heads).expect("engine loads");
-        // Quiet tone (raw RMS ≈ 0.0022, ≈0.0065 after the 3x input gain)
-        // with VAD closed: still under the VAD gate floor, so gated before
-        // the heads. (Peak 100 keeps the boosted level under the 0.008
-        // floor; the 150-peak variant from the 2x era now legitimately
-        // reaches inference at 3x gain yet still scores ~0.000.)
-        let tone: Vec<i16> = (0..1280)
-            .map(|i| {
-                ((2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin() * 100.0)
-                    as i16
-            })
-            .collect();
+        // Two related guarantees, split because the 3x input gain moved them
+        // apart (see INPUT_GAIN):
+        //
+        // A) The GATE: a tone quiet enough that the boosted level stays under
+        //    the VAD floor must never even reach the heads. Peak 40 (raw RMS
+        //    ~0.0009, ~0.0026 after the 3x gain).
+        // B) The SAFETY NET: a slightly louder tone (peak 100) legitimately
+        //    reaches inference at 3x gain, and must still never trigger.
+        let tone_at = |peak: f32| -> Vec<i16> {
+            (0..1280)
+                .map(|i| {
+                    ((2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin() * peak)
+                        as i16
+                })
+                .collect()
+        };
+        // A) gate floor.
+        let gated = tone_at(40.0);
         for _ in 0..40 {
-            for ev in eng.process_chunk(&tone, false) {
+            for ev in eng.process_chunk(&gated, false) {
                 assert!(
                     !matches!(ev, WakeWordEvent::Triggered(..)),
                     "VAD-gated audio must not trigger wakeword"
                 );
             }
         }
-        assert_eq!(eng.infer_count(), 0, "quiet non-speech must be VAD-gated");
+        assert_eq!(
+            eng.infer_count(),
+            0,
+            "audio under the VAD gate floor must be blocked before inference"
+        );
+        // B) reaches inference at 3x gain but must stay silent on scores.
+        let audible = tone_at(100.0);
+        let before = eng.infer_count();
+        let mut triggered = 0usize;
+        for _ in 0..40 {
+            for ev in eng.process_chunk(&audible, false) {
+                if matches!(ev, WakeWordEvent::Triggered(..)) {
+                    triggered += 1;
+                }
+            }
+        }
+        assert_eq!(triggered, 0, "a pure tone must never trigger a wakeword");
+        assert!(
+            eng.infer_count() > before,
+            "this tone is above the gate floor and is expected to be scored"
+        );
     }
 }

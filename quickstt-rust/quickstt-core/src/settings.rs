@@ -89,9 +89,20 @@ pub struct Settings {
     #[serde(default = "default_silence_duration")]
     pub silence_duration: u32,
     /// Strip fillers/repeats from non-streaming utterance text via the
-    /// disfluency tagger (dashboard toggle). Default ON.
+    /// transcript cleanup models (dashboard toggle). Default ON.
     #[serde(default = "default_clean_disfluencies")]
     pub clean_disfluencies: bool,
+    /// Which cleanup engine: 0 = FDT 66M tagger (fillers only, 66MB),
+    /// 1 = S1-mini INT4 0.6B normalizer (fillers + self-corrections +
+    /// spoken numbers, 375MB).
+    #[serde(default = "default_disfluency_engine")]
+    pub disfluency_engine: u32,
+    /// Dashboard sidebar collapsed to icons (56px) instead of labels (200px).
+    #[serde(default = "default_dash_sidebar_collapsed")]
+    pub dash_sidebar_collapsed: bool,
+    /// Dashboard sidebar width in px, clamped to 150..=280.
+    #[serde(default = "default_dash_sidebar_width")]
+    pub dash_sidebar_width: u32,
     #[serde(default = "default_lrc_enabled")]
     pub lrc_enabled: bool,
     #[serde(default = "default_ww_phrase_enabled")]
@@ -138,6 +149,9 @@ fn default_vad_sensitivity() -> u32 { 50 }
 fn default_auto_stop_silence() -> bool { false }
 fn default_silence_duration() -> u32 { 8 }
 fn default_clean_disfluencies() -> bool { true }
+fn default_disfluency_engine() -> u32 { 0 }
+fn default_dash_sidebar_collapsed() -> bool { false }
+fn default_dash_sidebar_width() -> u32 { 200 }
 fn default_lrc_enabled() -> bool { true }
 fn default_ww_phrase_enabled() -> bool { true }
 fn default_snap_action() -> u32 { 0 }
@@ -205,6 +219,9 @@ impl Default for Settings {
             auto_stop_silence: false,
             silence_duration: 8,
             clean_disfluencies: true,
+            disfluency_engine: 0,
+            dash_sidebar_collapsed: false,
+            dash_sidebar_width: 200,
             lrc_enabled: true,
             ww_hey_jarvis: true,
             ww_jarvis: true,
@@ -380,6 +397,13 @@ impl Settings {
             read_dword(key, "silenceDuration").unwrap_or(8);
         settings.clean_disfluencies =
             read_bool(key, "cleanDisfluencies").unwrap_or(true);
+        settings.disfluency_engine =
+            read_dword(key, "disfluencyEngine").unwrap_or(0).min(1);
+        settings.dash_sidebar_collapsed =
+            read_bool(key, "dashSidebarCollapsed").unwrap_or(false);
+        settings.dash_sidebar_width = read_dword(key, "dashSidebarWidth")
+            .unwrap_or(200)
+            .clamp(150, 280);
         settings.lrc_enabled =
             read_bool(key, "lrcEnabled").unwrap_or(true);
         settings.ww_hey_jarvis =
@@ -761,6 +785,9 @@ impl Settings {
             let _ = write_str("autoStopSilence", if self.auto_stop_silence { "true" } else { "false" });
             let _ = write_dword("silenceDuration", self.silence_duration);
             let _ = write_str("cleanDisfluencies", if self.clean_disfluencies { "true" } else { "false" });
+            let _ = write_dword("disfluencyEngine", self.disfluency_engine);
+            let _ = write_str("dashSidebarCollapsed", if self.dash_sidebar_collapsed { "true" } else { "false" });
+            let _ = write_dword("dashSidebarWidth", self.dash_sidebar_width.clamp(150, 280));
             let _ = write_str("lrcEnabled", if self.lrc_enabled { "true" } else { "false" });
             let _ = write_str("wwHeyJarvis", if self.ww_hey_jarvis { "true" } else { "false" });
             let _ = write_str("wwJarvis", if self.ww_jarvis { "true" } else { "false" });
