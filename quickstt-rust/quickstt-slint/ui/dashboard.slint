@@ -103,6 +103,9 @@ export component DashboardWidget inherits Window {
     // Sidebar: collapsible to icons via the chevron, drag-resizable 150-280px.
     in-out property <bool> sidebar-collapsed: false;
     in-out property <int> sidebar-width: 200;
+    // History backup: ON stores every finished turn (text + audio) in the
+    // dashboard history; OFF stops new recordings (existing rows stay).
+    in-out property <bool> history-enabled: true;
     // True while the user drags the sidebar edge (cursor + no re-layout jitter).
     in-out property <bool> sidebar-dragging: false;
 
@@ -138,6 +141,8 @@ export component DashboardWidget inherits Window {
     callback set-disfluency-engine(int);
     callback set-sidebar-width(length);
     callback set-sidebar-collapsed(bool);
+    // History backup toggle (top of the General tab's history card).
+    callback set-history-enabled(bool);
     // History row actions (index into history-items).
     callback history-play(int);
     callback history-seek(int, float);
@@ -199,6 +204,34 @@ export component DashboardWidget inherits Window {
                 VerticalLayout {
                     padding: root.sidebar-collapsed ? 4px : 12px;
                     spacing: 6px;
+
+                    // Collapse / expand — TOP RIGHT of the rail (the panel's
+                    // title-bar control): right-aligned, always reachable and
+                    // visible in both states, and it never shifts nav items.
+                    HorizontalLayout {
+                        alignment: end;
+                        Rectangle {
+                            width: 32px;
+                            height: 28px;
+                            border-radius: 6px;
+                            background: chev_touch.has-hover ? #1A1A1A : transparent;
+                            border-width: chev_touch.has-hover ? 1px : 0px;
+                            border-color: #262626;
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                text: root.sidebar-collapsed ? "›" : "‹";
+                                font-size: 18px;
+                                color: chev_touch.has-hover ? #FFFFFF : #9A9A9A;
+                            }
+                            chev_touch := TouchArea {
+                                clicked => { root.set-sidebar-collapsed(!root.sidebar-collapsed); }
+                                mouse-cursor: pointer;
+                            }
+                        }
+                    }
 
                     // Navigation Item 0: General
                     Rectangle {
@@ -368,30 +401,6 @@ export component DashboardWidget inherits Window {
                     // Spacer
                     Rectangle { }
 
-                    // Collapse / expand (chevron). Bottom of the rail so it
-                    // never shifts the nav items when toggled.
-                    Rectangle {
-                        height: 32px;
-                        border-radius: 8px;
-                        background: chev_touch.has-hover ? #1A1A1A : #0E0E0E;
-                        border-width: 1px;
-                        border-color: #262626;
-
-                        HorizontalLayout {
-                            alignment: center;
-                            Text {
-                                text: root.sidebar-collapsed ? "›" : "‹";
-                                font-size: 20px;
-                                color: chev_touch.has-hover ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
-                            }
-                        }
-                        chev_touch := TouchArea {
-                            clicked => { root.set-sidebar-collapsed(!root.sidebar-collapsed); }
-                            mouse-cursor: pointer;
-                        }
-                    }
-
                     // Status Pill at Bottom of Sidebar
                     Rectangle {
                         height: 36px;
@@ -499,6 +508,13 @@ export component DashboardWidget inherits Window {
                                         vertical-alignment: center;
                                     }
                                     Rectangle { horizontal-stretch: 1; }
+                                    // Backup toggle: OFF stops new turns from
+                                    // being recorded (existing rows stay).
+                                    CheckBox {
+                                        text: "Back up new turns";
+                                        checked: root.history-enabled;
+                                        toggled => { root.set-history-enabled(self.checked); }
+                                    }
                                 }
 
                                 if root.history-items.length == 0 : Text {

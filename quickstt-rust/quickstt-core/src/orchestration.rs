@@ -80,6 +80,12 @@ pub struct AppState {
     /// newest first) + a bump counter so the UI re-syncs only on change.
     pub history: Vec<crate::history::HistoryItem>,
     pub history_seq: u64,
+    /// `created_ms` of the row created by the last successful history push
+    /// (0 = no row for the current turn). The post-cleanup text swap in the
+    /// UI loop only rewrites `history[0]` while it still carries this stamp —
+    /// with history backup OFF nothing was pushed and the head row belongs
+    /// to an older turn and must stay untouched.
+    pub history_push_ms: u64,
     /// Number of in-flight `stt-transcribe` threads (segments + final flush).
     /// Non-zero keeps the turn non-settled until the last segment lands in
     /// `transcript_buffer`, so turn-end post-processing sees the whole text.
@@ -124,6 +130,7 @@ impl AppState {
             ghost_run: 0,
             history: Vec::new(),
             history_seq: 0,
+            history_push_ms: 0,
             pending_transcribes: 0,
         }
     }
@@ -1226,13 +1233,26 @@ impl AppOrchestrator {
                     if apply_recognized_text(&mut s, text.clone()) {
                         continue;
                     }
-                    if !norm.is_empty() && !is_ghost {
-                        if crate::history::push_turn(
-                            &mut s.history,
-                            text.trim().to_string(),
-                            Some(&wav_path),
-                        ) {
-                            s.history_seq += 1;
+                    if !norm.is_empty() {
+                        if !is_ghost && s.settings.history_enabled {
+                            if crate::history::push_turn(
+                                &mut s.history,
+                                text.trim().to_string(),
+                                Some(&wav_path),
+                            ) {
+                                s.history_seq += 1;
+                                s.history_push_ms = s
+                                    .history
+                                    .first()
+                                    .map(|h| h.created_ms)
+                                    .unwrap_or(0);
+                            }
+                        } else {
+                            // Backup OFF or ghost singleton: this turn has no
+                            // row of its own. Clearing the stamp keeps the
+                            // post-cleanup text swap (UI loop) from rewriting
+                            // the newest OLDER row with unrelated text.
+                            s.history_push_ms = 0;
                         }
                     }
                 }

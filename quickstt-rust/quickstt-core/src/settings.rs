@@ -103,6 +103,10 @@ pub struct Settings {
     /// Dashboard sidebar width in px, clamped to 150..=280.
     #[serde(default = "default_dash_sidebar_width")]
     pub dash_sidebar_width: u32,
+    /// Save every finished turn (text + audio) into the dashboard history.
+    /// OFF = new turns are not recorded; existing history stays untouched.
+    #[serde(default = "default_history_enabled")]
+    pub history_enabled: bool,
     #[serde(default = "default_lrc_enabled")]
     pub lrc_enabled: bool,
     #[serde(default = "default_ww_phrase_enabled")]
@@ -152,6 +156,7 @@ fn default_clean_disfluencies() -> bool { true }
 fn default_disfluency_engine() -> u32 { 0 }
 fn default_dash_sidebar_collapsed() -> bool { false }
 fn default_dash_sidebar_width() -> u32 { 200 }
+fn default_history_enabled() -> bool { true }
 fn default_lrc_enabled() -> bool { true }
 fn default_ww_phrase_enabled() -> bool { true }
 fn default_snap_action() -> u32 { 0 }
@@ -222,6 +227,7 @@ impl Default for Settings {
             disfluency_engine: 0,
             dash_sidebar_collapsed: false,
             dash_sidebar_width: 200,
+            history_enabled: true,
             lrc_enabled: true,
             ww_hey_jarvis: true,
             ww_jarvis: true,
@@ -404,6 +410,8 @@ impl Settings {
         settings.dash_sidebar_width = read_dword(key, "dashSidebarWidth")
             .unwrap_or(200)
             .clamp(150, 280);
+        settings.history_enabled =
+            read_bool(key, "historyEnabled").unwrap_or(true);
         settings.lrc_enabled =
             read_bool(key, "lrcEnabled").unwrap_or(true);
         settings.ww_hey_jarvis =
@@ -788,6 +796,7 @@ impl Settings {
             let _ = write_dword("disfluencyEngine", self.disfluency_engine.min(3));
             let _ = write_str("dashSidebarCollapsed", if self.dash_sidebar_collapsed { "true" } else { "false" });
             let _ = write_dword("dashSidebarWidth", self.dash_sidebar_width.clamp(150, 280));
+            let _ = write_str("historyEnabled", if self.history_enabled { "true" } else { "false" });
             let _ = write_str("lrcEnabled", if self.lrc_enabled { "true" } else { "false" });
             let _ = write_str("wwHeyJarvis", if self.ww_hey_jarvis { "true" } else { "false" });
             let _ = write_str("wwJarvis", if self.ww_jarvis { "true" } else { "false" });

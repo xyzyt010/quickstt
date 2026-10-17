@@ -3836,6 +3836,9 @@ fn dock_hop(
     // cleaned text — any speech recorded meanwhile stays untouched.
     let mut cleanup_spawn_start = 0usize;
     let mut cleanup_spawn_blen = 0usize;
+    // history_push_ms captured when the cleanup was spawned: the swap only
+    // rewrites history[0] while it still carries this stamp.
+    let mut cleanup_spawn_hist_ms = 0u64;
     // Foreground window captured when the turn ENDED — the paste lands in the
     // app the user was dictating into even though cleanup finishes seconds
     // later (capturing at paste time could target a window the user merely
@@ -5235,10 +5238,18 @@ fn dock_hop(
                                 last_buf_len = turn_base_len;
                             }
                             *mlock(&last_turn_timer) = full.clone();
-                            if let Some(h) = s.history.first_mut() {
-                                h.text = full.clone();
-                                quickstt_core::history::save(&s.history);
-                                s.history_seq += 1;
+                            // Only rewrite the row THIS turn pushed: with
+                            // backup OFF (or a ghost segment) no row exists
+                            // and history[0] is an older, unrelated turn.
+                            if cleanup_spawn_hist_ms != 0
+                                && s.history.first().map(|h| h.created_ms)
+                                    == Some(cleanup_spawn_hist_ms)
+                            {
+                                if let Some(h) = s.history.first_mut() {
+                                    h.text = full.clone();
+                                    quickstt_core::history::save(&s.history);
+                                    s.history_seq += 1;
+                                }
                             }
                         } else if cleanup_spawn_blen >= cleanup_spawn_start {
                             turn_base_len = cleanup_spawn_blen;
@@ -5283,6 +5294,7 @@ fn dock_hop(
                                 let engine = s.settings.disfluency_engine;
                                 cleanup_spawn_start = turn_base_len;
                                 cleanup_spawn_blen = blen;
+                                cleanup_spawn_hist_ms = s.history_push_ms;
                                 cleanup_target_fg = *mlock(&last_external_fg_timer);
                                 let raw_thread = raw_full.clone();
                                 let res_slot = Arc::clone(&cleanup_result_timer);
@@ -6453,6 +6465,19 @@ fn dock_hop(
             }
         });
     }
+    {
+        let state = state.clone();
+        dashboard.on_set_history_enabled(move |on| {
+            if let Ok(mut s) = state.lock() {
+                s.settings.history_enabled = on;
+                let _ = s.settings.save_all();
+                log_line(&format!(
+                    "history backup -> {}",
+                    if on { "on" } else { "off" }
+                ));
+            }
+        });
+    }
     // ── Dashboard history: playback, copy, delete, download ──
     {
         let state = state.clone();
@@ -6860,6 +6885,7 @@ fn dock_hop(
             dashboard.set_disfluency_engine(s.settings.disfluency_engine.clamp(0, 3) as i32);
             dashboard.set_sidebar_width(s.settings.dash_sidebar_width.clamp(150, 280) as i32);
             dashboard.set_sidebar_collapsed(s.settings.dash_sidebar_collapsed);
+            dashboard.set_history_enabled(s.settings.history_enabled);
 
             // ── History rows (dashboard) ──
             // Rebuild only when something actually changed: a new/deleted turn
