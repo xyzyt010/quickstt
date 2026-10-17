@@ -1,5 +1,5 @@
 //! Transcript cleanup via the persistent `tools/disfluency/disfluency_worker.py`
-//! helper. Two engines, chosen by the dashboard (`disfluency_engine`):
+//! helper. Four engines, chosen by the dashboard (`disfluency_engine`):
 //!
 //! * 0 = FDT 66M (`stillerman/fdt-disfluency-distilbert-66m-v5`, int8 ONNX) —
 //!   a deletion-only word tagger: strips fillers ("um", "uh"), repeats and
@@ -10,7 +10,18 @@
 //!   removes fillers AND resolves self-corrections to the landed-on value
 //!   ("nine am no sorry ten thirty" -> "10:30"), and writes spoken
 //!   numbers/dates/times in written form. Apache-2.0 + naming clause: the name
-//!   "S1-mini" by "Superwhisper" must be kept wherever it is used.
+//!   "S1-mini" by "Superwhisper" must be kept wherever it is used. Slower
+//!   (~seconds per turn) — kept selectable, no longer the only rewriting op.
+//! * 2 = SmolLM2-360M-Instruct Q4_K_M (`bartowski/SmolLM2-360M-Instruct-GGUF`
+//!   via llama.cpp, Apache-2.0) — same job family as S1-mini (fillers +
+//!   self-corrections + digit normalizing) with a much smaller/faster model.
+//! * 3 = Gemma-3-270m-it Q4_K_M (`bartowski/google_gemma-3-270m-it-GGUF` via
+//!   llama.cpp) — Google's smallest instruction-tuned Gemma 3; same job
+//!   family. NOTE: Gemma terms of use, not Apache — unlike SmolLM2.
+//!
+//! Engines 2/3 load one GGUF through llama.cpp (CPU, mmap) per turn exactly
+//! like the others — warm page cache makes the load a fraction of a second
+//! and generation is temperature-0 greedy, so output is repeatable.
 //!
 //! Cleanup runs on the NON-STREAMING utterance path only, as the final
 //! post-processing phase of a turn (after the user releases Ctrl+Space or
@@ -20,7 +31,7 @@
 //!
 //! MEMORY POLICY (by design): the model is loaded, used for exactly one turn,
 //! then dropped — `clean_text` sends `unload` immediately after cleaning, so no
-//! cleanup model (66MB or 375MB) sits resident between turns. Only the small
+//! cleanup model (66MB – 375MB) sits resident between turns. Only the small
 //! Python interpreter stays warm, which makes the next turn's load a fraction
 //! of a second. Model files live under `<models>/disfluency/<engine>/` and are
 //! fetched by the downloader on first use; cleanup passes text through
@@ -39,6 +50,10 @@ use tracing::{info, warn};
 /// Cleanup engine selector (matches `settings.disfluency_engine`).
 pub const ENGINE_FDT: u32 = 0;
 pub const ENGINE_S1MINI: u32 = 1;
+/// SmolLM2-360M-Instruct Q4_K_M via llama.cpp (Apache-2.0; bartowski GGUF).
+pub const ENGINE_SMOLLM2: u32 = 2;
+/// Gemma-3-270m-it Q4_K_M via llama.cpp (Gemma terms; bartowski GGUF).
+pub const ENGINE_GEMMA3: u32 = 3;
 
 /// Never flash a terminal window when spawning the helper.
 #[cfg(target_os = "windows")]
@@ -52,6 +67,8 @@ fn no_window(_cmd: &mut Command) {}
 /// Model subdirs (under the shared models root) + required files.
 pub const FDT_DIR: &str = "disfluency/fdt-disfluency-distilbert-66m-v5";
 pub const S1MINI_DIR: &str = "disfluency/s1-mini-int4";
+pub const SMOLLM2_DIR: &str = "disfluency/smollm2-360m-instruct-q4km";
+pub const GEMMA3_DIR: &str = "disfluency/gemma-3-270m-it-q4km";
 const FDT_REQUIRED: &[&str] = &["model_quantized.onnx", "tokenizer.json"];
 const S1_REQUIRED: &[&str] = &[
     "model.onnx",
@@ -59,6 +76,8 @@ const S1_REQUIRED: &[&str] = &[
     "genai_config.json",
     "tokenizer.json",
 ];
+const SMOLLM2_REQUIRED: &[&str] = &["SmolLM2-360M-Instruct-Q4_K_M.gguf"];
+const GEMMA3_REQUIRED: &[&str] = &["google_gemma-3-270m-it-Q4_K_M.gguf"];
 
 /// Download file lists for the downloader (repo path, local name, ~bytes).
 pub const FDT_FILES: &[(&str, &str, u64)] = &[
@@ -81,57 +100,82 @@ pub const S1MINI_FILES: &[(&str, &str, u64)] = &[
     ("int4/chat_template.jinja", "chat_template.jinja", 4_256),
 ];
 
+/// `bartowski/SmolLM2-360M-Instruct-GGUF` Q4_K_M — one GGUF, 270_590_880 B.
+pub const SMOLLM2_FILES: &[(&str, &str, u64)] = &[(
+    "SmolLM2-360M-Instruct-Q4_K_M.gguf",
+    "SmolLM2-360M-Instruct-Q4_K_M.gguf",
+    270_590_880,
+)];
+/// `bartowski/google_gemma-3-270m-it-GGUF` Q4_K_M — one GGUF, 253_115_168 B.
+pub const GEMMA3_FILES: &[(&str, &str, u64)] = &[(
+    "google_gemma-3-270m-it-Q4_K_M.gguf",
+    "google_gemma-3-270m-it-Q4_K_M.gguf",
+    253_115_168,
+)];
+
 /// HuggingFace repo each engine's files come from.
 pub fn repo_for(engine: u32) -> &'static str {
-    if engine == ENGINE_S1MINI {
-        "elbruno/s1-mini-onnx"
-    } else {
-        "stillerman/fdt-disfluency-distilbert-66m-v5"
+    match engine {
+        ENGINE_S1MINI => "elbruno/s1-mini-onnx",
+        ENGINE_SMOLLM2 => "bartowski/SmolLM2-360M-Instruct-GGUF",
+        ENGINE_GEMMA3 => "bartowski/google_gemma-3-270m-it-GGUF",
+        _ => "stillerman/fdt-disfluency-distilbert-66m-v5",
     }
 }
 
 /// Worker-side backend name for an engine id.
 pub fn backend_name(engine: u32) -> &'static str {
-    if engine == ENGINE_S1MINI {
-        "s1mini"
-    } else {
-        "fdt"
+    match engine {
+        ENGINE_S1MINI => "s1mini",
+        ENGINE_SMOLLM2 => "smollm2",
+        ENGINE_GEMMA3 => "gemma3",
+        _ => "fdt",
     }
 }
 
 /// Human label for the dashboard combo box.
 pub fn engine_label(engine: u32) -> &'static str {
-    if engine == ENGINE_S1MINI {
-        "S1-mini INT4 (0.6B) - fillers + self-corrections + numbers (375MB)"
-    } else {
-        "FDT 66M tagger - fillers + repeats only (66MB)"
+    match engine {
+        ENGINE_S1MINI => {
+            "S1-mini INT4 (0.6B) - self-corrections + numbers (375MB, slow)"
+        }
+        ENGINE_SMOLLM2 => {
+            "SmolLM2 360M Q4 - self-corrections + numbers (271MB, fast)"
+        }
+        ENGINE_GEMMA3 => {
+            "Gemma 3 270M Q4 - self-corrections + numbers (253MB, fast)"
+        }
+        _ => "FDT 66M tagger - fillers + repeats only (66MB)",
     }
 }
 
 /// Approximate download size in MB (shown in the dashboard).
 pub fn engine_size_mb(engine: u32) -> u32 {
-    if engine == ENGINE_S1MINI {
-        375
-    } else {
-        66
+    match engine {
+        ENGINE_S1MINI => 375,
+        ENGINE_SMOLLM2 => 271,
+        ENGINE_GEMMA3 => 253,
+        _ => 66,
     }
 }
 
 pub fn model_dir(engine: u32) -> PathBuf {
-    crate::models::catalog::models_root().join(if engine == ENGINE_S1MINI {
-        S1MINI_DIR
-    } else {
-        FDT_DIR
+    crate::models::catalog::models_root().join(match engine {
+        ENGINE_S1MINI => S1MINI_DIR,
+        ENGINE_SMOLLM2 => SMOLLM2_DIR,
+        ENGINE_GEMMA3 => GEMMA3_DIR,
+        _ => FDT_DIR,
     })
 }
 
 /// True when the worker script + every file this engine needs are on disk.
 pub fn files_present(engine: u32) -> bool {
     let worker_ok = worker_candidates().iter().any(|p| p.is_file());
-    let required = if engine == ENGINE_S1MINI {
-        S1_REQUIRED
-    } else {
-        FDT_REQUIRED
+    let required = match engine {
+        ENGINE_S1MINI => S1_REQUIRED,
+        ENGINE_SMOLLM2 => SMOLLM2_REQUIRED,
+        ENGINE_GEMMA3 => GEMMA3_REQUIRED,
+        _ => FDT_REQUIRED,
     };
     worker_ok && required.iter().all(|f| model_dir(engine).join(f).is_file())
 }
@@ -407,22 +451,33 @@ pub fn disfluency_unload() {
 }
 
 type SharedState = Arc<Mutex<crate::orchestration::AppState>>;
-static DL_STARTED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+static DL_STARTED: [AtomicBool; 4] = [
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+];
 
 /// Fetch an engine's weights in the background (once per engine per process).
 /// Cleanup passes text through until the files land; no turn ever blocks.
 pub fn ensure_download(state: SharedState, engine: u32) {
-    let idx = if engine == ENGINE_S1MINI { 1 } else { 0 };
+    let idx = match engine {
+        ENGINE_S1MINI => 1,
+        ENGINE_SMOLLM2 => 2,
+        ENGINE_GEMMA3 => 3,
+        _ => 0,
+    };
     if files_present(engine) || DL_STARTED[idx].swap(true, Ordering::Relaxed) {
         return;
     }
     std::thread::Builder::new()
         .name("dl-cleanup".to_string())
         .spawn(move || {
-            let label = if engine == ENGINE_S1MINI {
-                "S1-mini normalizer".to_string()
-            } else {
-                "Disfluency tagger".to_string()
+            let label = match engine {
+                ENGINE_S1MINI => "S1-mini normalizer".to_string(),
+                ENGINE_SMOLLM2 => "SmolLM2 normalizer".to_string(),
+                ENGINE_GEMMA3 => "Gemma 3 normalizer".to_string(),
+                _ => "Disfluency tagger".to_string(),
             };
             if let Ok(mut s) = state.lock() {
                 s.download_name = label.clone();
@@ -432,10 +487,11 @@ pub fn ensure_download(state: SharedState, engine: u32) {
                 "https://huggingface.co/{}/resolve/main",
                 repo_for(engine)
             );
-            let files: &[(&str, &str, u64)] = if engine == ENGINE_S1MINI {
-                S1MINI_FILES
-            } else {
-                FDT_FILES
+            let files: &[(&str, &str, u64)] = match engine {
+                ENGINE_S1MINI => S1MINI_FILES,
+                ENGINE_SMOLLM2 => SMOLLM2_FILES,
+                ENGINE_GEMMA3 => GEMMA3_FILES,
+                _ => FDT_FILES,
             };
             for (i, (repo, name, _bytes)) in files.iter().enumerate() {
                 let url = format!("{base}/{repo}");

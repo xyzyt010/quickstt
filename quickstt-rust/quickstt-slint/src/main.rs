@@ -9,6 +9,7 @@ slint::include_modules!();
 use quickstt_core::error::QuickSttResult;
 use quickstt_core::orchestration::{AppMode, AppOrchestrator, AppState, OrchestratorCommand};
 use slint::{Model, ModelRc, Timer, TimerMode, VecModel};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 const IPC_PORT: u16 = 47631;
@@ -143,7 +144,18 @@ fn toggle_pill_widget(
     why: &str,
 ) {
     if let Some(p) = pill.upgrade() {
-        let visible = p.window().is_visible();
+        // A transient Ctrl+Space show during hide-1h LOOKS visible in the
+        // window tree — but it is not the user's persistent pill. An explicit
+        // Show (tray click / native menu / IPC) during such a session must
+        // turn it INTO the persistent pill (cancel the snooze + keep it up),
+        // never hide it; the bare is_visible() check flipped it off mid-
+        // transcription and the user lost the widget they asked to see.
+        let snoozing = hide_until
+            .lock()
+            .map(|h| h.map(|u| std::time::Instant::now() < u).unwrap_or(false))
+            .unwrap_or(false);
+        let transient = snoozing && *mlock(snooze_ptt_show);
+        let visible = p.window().is_visible() && !transient;
         if visible {
             log_line(&format!("tray {why}: hide Rust pill widget"));
             let _ = p.hide();
@@ -2260,6 +2272,13 @@ fn main() -> QuickSttResult<()> {
     // snooze: the pill appears for that session only, then hides again with
     // the snooze still ticking. Wakeword/clap sessions never set this.
     let snooze_ptt_show: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    // Final cleanup post-pass runs on a WORKER thread: a 0.6B model needs
+    // seconds to answer and running it inline in the 50ms poll froze the
+    // pill mid-morph (the observed lock-up). The poll ships the raw turn
+    // text, keeps animating, and pastes the cleaned text when it lands.
+    let cleanup_busy: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    // (raw, cleaned) published by the worker; poll takes it and delivers.
+    let cleanup_result: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
     // Transcript-history mode: the TextBoard shows the FULL buffer instead
     // of just the current turn until the user closes it / a new session.
     let tb_full: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
@@ -3812,6 +3831,16 @@ fn dock_hop(
     let mut last_buf_len = 0usize;
     // Bulk end-delivery (C++-style): start offset of the current turn.
     let mut turn_base_len = 0usize;
+    // Buffer region (+ its end) handed to the background cleanup worker:
+    // when its result lands the poll swaps exactly this region for the
+    // cleaned text — any speech recorded meanwhile stays untouched.
+    let mut cleanup_spawn_start = 0usize;
+    let mut cleanup_spawn_blen = 0usize;
+    // Foreground window captured when the turn ENDED — the paste lands in the
+    // app the user was dictating into even though cleanup finishes seconds
+    // later (capturing at paste time could target a window the user merely
+    // clicked meanwhile).
+    let mut cleanup_target_fg: Option<isize> = None;
     let mut tb_until = std::time::Instant::now();
     let mut transcribing_since: Option<std::time::Instant> = None;
     let mut alert_until = std::time::Instant::now();
@@ -3838,6 +3867,8 @@ fn dock_hop(
     let last_turn_timer = last_turn.clone();
     let hide_until_timer = hide_until.clone();
     let snooze_ptt_show_timer = snooze_ptt_show.clone();
+    let cleanup_busy_timer = cleanup_busy.clone();
+    let cleanup_result_timer = cleanup_result.clone();
     // Dashboard history row sync: rebuilt on demand (new turn / user action)
     // and at 10Hz while audio is playing so the seek bar and clock advance.
     let hist_play_idx = history_play_idx.clone();
@@ -4911,8 +4942,13 @@ fn dock_hop(
                 // until a real close (mic tap, clap-stop, PTT release,
                 // auto-cancel, silence setting) — never mid-turn.
                 let recording = s.mode == AppMode::Recording;
-                let transcribing =
-                    s.mode == AppMode::Transcribing || s.pending_transcribes > 0;
+                // A pending background cleanup keeps the turn "transcribing"
+                // for the pill: phase 2 stays until the cleaned text is
+                // pasted, then Done — exactly the invisible post-pass the
+                // user gets, with zero UI-thread stalls.
+                let transcribing = s.mode == AppMode::Transcribing
+                    || s.pending_transcribes > 0
+                    || cleanup_busy_timer.load(Ordering::Relaxed);
                 // PTT held + mic capsule ON both count as live for display.
                 let ptt = *mlock(&ptt_held_timer);
                 let mut mic_on = *mlock(&mic_live_timer);
@@ -4999,19 +5035,23 @@ fn dock_hop(
                         let _ = tx_cmd_timer.try_send(OrchestratorCommand::StopListening);
                     } else {
                         log_line("session start");
-                    }
-                    // Pop to front on trigger: the turn must open above
-                    // whatever the user is doing.
-                    widget_platform::restack_topmost(p.window());
-                    // Trigger-opened turns (wakeword/clap — not held PTT or
-                    // mic tap) get a proactive coaching hint: there is no
-                    // beep, so users otherwise say the wakeword and wait.
-                    // "Speak your command" teaches the one-breath flow
-                    // in-product.
-                    if !ptt && !mic_on {
-                        alert_msg = "Speak your command…".to_string();
-                        alert_until =
-                            now + std::time::Duration::from_millis(3000);
+                        // Pop to front on trigger: the turn must open above
+                        // whatever the user is doing. Refused sessions skip
+                        // both the restack and the coaching hint — restacking
+                        // a hidden pill rattled z-order and the "Speak your
+                        // command…" alert leaked out of a session the user
+                        // never sees.
+                        widget_platform::restack_topmost(p.window());
+                        // Trigger-opened turns (wakeword/clap — not held PTT
+                        // or mic tap) get a proactive coaching hint: there is
+                        // no beep, so users otherwise say the wakeword and
+                        // wait. "Speak your command" teaches the one-breath
+                        // flow in-product.
+                        if !ptt && !mic_on {
+                            alert_msg = "Speak your command…".to_string();
+                            alert_until =
+                                now + std::time::Duration::from_millis(3000);
+                        }
                     }
                 }
                 // Optional auto-close on silence (dashboard setting, default
@@ -5152,63 +5192,170 @@ fn dock_hop(
                         last_buf_len = blen;
                     }
                 } else {
-                    if (turn_just_done || settled) && blen > turn_base_len {
+                    // Background cleanup result FIRST: swap the handed-off
+                    // buffer region for the cleaned text (new speech recorded
+                    // meanwhile sits after the region and is untouched), land
+                    // it in the target app exactly once, then resume normal
+                    // turn bookkeeping. cleanup_busy counts as transcribing
+                    // above, so the pill held its "Transcribing…" phase the
+                    // whole time — no freeze, no flicker.
+                    let finished = mlock(&cleanup_result_timer).take();
+                    if let Some((raw, cleaned)) = finished {
+                        cleanup_busy_timer.store(false, Ordering::Relaxed);
+                        let full = if cleaned.trim().is_empty() {
+                            raw.clone()
+                        } else {
+                            cleaned
+                        };
+                        if full != raw {
+                            let region_len =
+                                cleanup_spawn_blen.saturating_sub(cleanup_spawn_start);
+                            if s.transcript_buffer.len() >= cleanup_spawn_blen {
+                                s.transcript_buffer.replace_range(
+                                    cleanup_spawn_start..cleanup_spawn_blen,
+                                    &full,
+                                );
+                                turn_base_len = cleanup_spawn_start + full.len();
+                                // Keep the cursor aligned when it pointed
+                                // past the replaced region (new speech came
+                                // in while cleanup ran).
+                                if last_buf_len <= cleanup_spawn_blen {
+                                    last_buf_len = turn_base_len;
+                                } else {
+                                    let shifted = last_buf_len as i64
+                                        + full.len() as i64
+                                        - region_len as i64;
+                                    last_buf_len =
+                                        shifted.max(turn_base_len as i64) as usize;
+                                }
+                            } else {
+                                s.transcript_buffer.truncate(cleanup_spawn_start);
+                                s.transcript_buffer.push_str(&full);
+                                turn_base_len = s.transcript_buffer.len();
+                                last_buf_len = turn_base_len;
+                            }
+                            *mlock(&last_turn_timer) = full.clone();
+                            if let Some(h) = s.history.first_mut() {
+                                h.text = full.clone();
+                                quickstt_core::history::save(&s.history);
+                                s.history_seq += 1;
+                            }
+                        } else if cleanup_spawn_blen >= cleanup_spawn_start {
+                            turn_base_len = cleanup_spawn_blen;
+                            if last_buf_len < turn_base_len {
+                                last_buf_len = turn_base_len;
+                            }
+                        }
+                        log_line(&format!(
+                            "batch turn output bulk +{} chars (post-processed)",
+                            full.len()
+                        ));
+                        let target_fg = cleanup_target_fg;
+                        deliver_transcription_output(&full, out_mode, target_fg);
+                    } else if (turn_just_done || settled)
+                        && blen > turn_base_len
+                        && !cleanup_busy_timer.load(Ordering::Relaxed)
+                    {
                         let raw_full = s.transcript_buffer[turn_base_len..].trim().to_owned();
-                        if !raw_full.is_empty() {
+                        if raw_full.is_empty() {
+                            let new_blen = s.transcript_buffer.len();
+                            turn_base_len = new_blen;
+                            last_buf_len = new_blen;
+                        } else {
                             let low = raw_full.to_lowercase();
                             if should_drop_hallucination(low.as_str(), speech_peak) {
                                 log_line(&format!(
                                     "hallucination dropped {raw_full:?} peak={sess_peak}"
                                 ));
-                            } else {
-                                // Final post-processing phase: once the user
-                                // has lifted Ctrl+Space / stopped transcription
-                                // and all STT segments have completed, run the
-                                // selected cleanup model over the entire turn
-                                // text right before pasting.
-                                let full = if s.settings.clean_disfluencies {
-                                    let engine = s.settings.disfluency_engine;
-                                    if !quickstt_core::models::disfluency::files_present(engine)
-                                    {
-                                        quickstt_core::models::disfluency::ensure_download(
-                                            Arc::clone(&state_timer),
-                                            engine,
-                                        );
+                                let new_blen = s.transcript_buffer.len();
+                                turn_base_len = new_blen;
+                                last_buf_len = new_blen;
+                            } else if s.settings.clean_disfluencies
+                                && quickstt_core::models::disfluency::files_present(
+                                    s.settings.disfluency_engine,
+                                )
+                            {
+                                // Final post-processing phase — OFF the UI
+                                // thread now: ship the raw turn to the
+                                // cleanup worker; the poll picks the cleaned
+                                // text up above on a later tick. The UI
+                                // keeps animating at 60fps throughout.
+                                let engine = s.settings.disfluency_engine;
+                                cleanup_spawn_start = turn_base_len;
+                                cleanup_spawn_blen = blen;
+                                cleanup_target_fg = *mlock(&last_external_fg_timer);
+                                let raw_thread = raw_full.clone();
+                                let res_slot = Arc::clone(&cleanup_result_timer);
+                                let spawn_res = std::thread::Builder::new()
+                                    .name("cleanup-final".into())
+                                    .spawn(move || {
+                                        let t0 = std::time::Instant::now();
+                                        let cleaned = std::panic::catch_unwind(
+                                            std::panic::AssertUnwindSafe(|| {
+                                                quickstt_core::models::disfluency::clean_text_with(
+                                                    engine,
+                                                    &raw_thread,
+                                                )
+                                            }),
+                                        )
+                                        .unwrap_or_else(|_| {
+                                            log_line(
+                                                "post-process worker panicked — raw text kept",
+                                            );
+                                            raw_thread.clone()
+                                        });
+                                        log_line(&format!(
+                                            "post-process [{}] worker {}ms: {:?} -> {:?}",
+                                            quickstt_core::models::disfluency::backend_name(
+                                                engine
+                                            ),
+                                            t0.elapsed().as_millis(),
+                                            raw_thread,
+                                            cleaned
+                                        ));
+                                        *mlock(&res_slot) = Some((raw_thread, cleaned));
+                                    });
+                                match spawn_res {
+                                    Ok(_) => {
+                                        cleanup_busy_timer.store(true, Ordering::Relaxed);
                                     }
-                                    let t0 = std::time::Instant::now();
-                                    let cleaned = quickstt_core::models::disfluency::clean_text_with(
-                                        engine,
-                                        &raw_full,
-                                    );
-                                    log_line(&format!(
-                                        "post-process [{}] {}ms: {:?} -> {:?}",
-                                        quickstt_core::models::disfluency::backend_name(engine),
-                                        t0.elapsed().as_millis(),
-                                        raw_full,
-                                        cleaned
-                                    ));
-                                    cleaned
-                                } else {
-                                    raw_full.clone()
-                                };
-                                if full != raw_full {
-                                    s.transcript_buffer.truncate(turn_base_len);
-                                    s.transcript_buffer.push_str(&full);
-                                    *mlock(&last_turn_timer) = full.clone();
-                                    if let Some(h) = s.history.first_mut() {
-                                        h.text = full.clone();
-                                        quickstt_core::history::save(&s.history);
-                                        s.history_seq += 1;
+                                    Err(e) => {
+                                        // Worker never started: keep the old
+                                        // guarantee — the turn always pastes.
+                                        log_line(&format!(
+                                            "cleanup worker spawn failed: {e}"
+                                        ));
+                                        log_line(&format!(
+                                            "batch turn output bulk +{} chars",
+                                            raw_full.len()
+                                        ));
+                                        let target_fg = *mlock(&last_external_fg_timer);
+                                        deliver_transcription_output(
+                                            &raw_full, out_mode, target_fg,
+                                        );
+                                        let new_blen = s.transcript_buffer.len();
+                                        turn_base_len = new_blen;
+                                        last_buf_len = new_blen;
                                     }
                                 }
-                                log_line(&format!("batch turn output bulk +{} chars", full.len()));
+                            } else {
+                                if s.settings.clean_disfluencies {
+                                    quickstt_core::models::disfluency::ensure_download(
+                                        Arc::clone(&state_timer),
+                                        s.settings.disfluency_engine,
+                                    );
+                                }
+                                log_line(&format!(
+                                    "batch turn output bulk +{} chars",
+                                    raw_full.len()
+                                ));
                                 let target_fg = *mlock(&last_external_fg_timer);
-                                deliver_transcription_output(&full, out_mode, target_fg);
+                                deliver_transcription_output(&raw_full, out_mode, target_fg);
+                                let new_blen = s.transcript_buffer.len();
+                                turn_base_len = new_blen;
+                                last_buf_len = new_blen;
                             }
                         }
-                        let new_blen = s.transcript_buffer.len();
-                        turn_base_len = new_blen;
-                        last_buf_len = new_blen;
                     }
                 }
                 let msg = if s.status_message.is_empty() {
@@ -6268,7 +6415,7 @@ fn dock_hop(
         let state = state.clone();
         dashboard.on_set_disfluency_engine(move |v| {
             if let Ok(mut s) = state.lock() {
-                s.settings.disfluency_engine = v.clamp(0, 1) as u32;
+                s.settings.disfluency_engine = v.clamp(0, 3) as u32;
                 let engine = s.settings.disfluency_engine;
                 let _ = s.settings.save_all();
                 log_line(&format!(
@@ -6710,7 +6857,7 @@ fn dock_hop(
             dashboard.set_ctrl_space_mode(s.settings.ctrl_space_mode as i32);
             dashboard.set_ctrl_space_output(s.settings.ctrl_space_output as i32);
             dashboard.set_clean_disfluencies(s.settings.clean_disfluencies);
-            dashboard.set_disfluency_engine(s.settings.disfluency_engine.clamp(0, 1) as i32);
+            dashboard.set_disfluency_engine(s.settings.disfluency_engine.clamp(0, 3) as i32);
             dashboard.set_sidebar_width(s.settings.dash_sidebar_width.clamp(150, 280) as i32);
             dashboard.set_sidebar_collapsed(s.settings.dash_sidebar_collapsed);
 

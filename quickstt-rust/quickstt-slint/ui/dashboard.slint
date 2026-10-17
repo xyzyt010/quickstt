@@ -41,7 +41,7 @@ export component DashboardWidget inherits Window {
     preferred-height: 620px;
     min-width: 720px;
     min-height: 480px;
-    background: #0D1117;
+    background: #000000;
 
     in-out property <int> active-tab: 0;
 
@@ -96,7 +96,8 @@ export component DashboardWidget inherits Window {
     in property <int> ctrl-space-output: 0;
     // Disfluency cleanup toggle (non-streaming utterance text only).
     in property <bool> clean-disfluencies: true;
-    // Cleanup engine: 0 = FDT 66M tagger, 1 = S1-mini INT4 0.6B normalizer.
+    // Cleanup engine: 0 = FDT 66M tagger, 1 = S1-mini INT4 0.6B normalizer,
+    // 2 = SmolLM2 360M Q4 (llama.cpp), 3 = Gemma 3 270M Q4 (llama.cpp).
     in property <int> disfluency-engine: 0;
 
     // Sidebar: collapsible to icons via the chevron, drag-resizable 150-280px.
@@ -191,9 +192,9 @@ export component DashboardWidget inherits Window {
             // drag and re-expanding should not jump the layout.
             Rectangle {
                 width: root.sidebar-collapsed ? 56px : root.sidebar-width * 1px;
-                background: #111418;
+                background: #050505;
                 border-width: 1px;
-                border-color: #21262D;
+                border-color: #1A1A1A;
 
                 VerticalLayout {
                     padding: root.sidebar-collapsed ? 4px : 12px;
@@ -203,9 +204,9 @@ export component DashboardWidget inherits Window {
                     Rectangle {
                         height: 40px;
                         border-radius: 8px;
-                        background: root.active-tab == 0 ? #21262D : (tab0_touch.has-hover ? #161B22 : transparent);
+                        background: root.active-tab == 0 ? #1A1A1A : (tab0_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 0 ? 1px : 0px;
-                        border-color: #3898FF;
+                        border-color: #FFFFFF;
 
                         HorizontalLayout {
                             padding-left: root.sidebar-collapsed ? 0px : 12px;
@@ -213,7 +214,7 @@ export component DashboardWidget inherits Window {
                             Text {
                                 text: "⚙";
                                 font-size: 15px;
-                                color: root.active-tab == 0 ? #58A6FF : #8B949E;
+                                color: root.active-tab == 0 ? #FFFFFF : #9A9A9A;
                                 vertical-alignment: center;
                             }
                             Text {
@@ -222,7 +223,7 @@ export component DashboardWidget inherits Window {
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 0 ? 700 : 500;
-                                color: root.active-tab == 0 ? #F0F6FC : #8B949E;
+                                color: root.active-tab == 0 ? #FFFFFF : #9A9A9A;
                                 vertical-alignment: center;
                             }
                         }
@@ -236,9 +237,9 @@ export component DashboardWidget inherits Window {
                     Rectangle {
                         height: 40px;
                         border-radius: 8px;
-                        background: root.active-tab == 1 ? #21262D : (tab1_touch.has-hover ? #161B22 : transparent);
+                        background: root.active-tab == 1 ? #1A1A1A : (tab1_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 1 ? 1px : 0px;
-                        border-color: #3898FF;
+                        border-color: #FFFFFF;
 
                         HorizontalLayout {
                             padding-left: root.sidebar-collapsed ? 0px : 12px;
@@ -246,7 +247,7 @@ export component DashboardWidget inherits Window {
                             Text {
                                 text: "🎙";
                                 font-size: 15px;
-                                color: root.active-tab == 1 ? #58A6FF : #8B949E;
+                                color: root.active-tab == 1 ? #FFFFFF : #9A9A9A;
                                 vertical-alignment: center;
                             }
                             Text {
@@ -255,7 +256,7 @@ export component DashboardWidget inherits Window {
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 1 ? 700 : 500;
-                                color: root.active-tab == 1 ? #F0F6FC : #8B949E;
+                                color: root.active-tab == 1 ? #FFFFFF : #9A9A9A;
                                 vertical-alignment: center;
                             }
                         }
@@ -269,9 +270,9 @@ export component DashboardWidget inherits Window {
                     Rectangle {
                         height: 40px;
                         border-radius: 8px;
-                        background: root.active-tab == 2 ? #21262D : (tab2_touch.has-hover ? #161B22 : transparent);
+                        background: root.active-tab == 2 ? #1A1A1A : (tab2_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 2 ? 1px : 0px;
-                        border-color: #3898FF;
+                        border-color: #FFFFFF;
 
                         HorizontalLayout {
                             padding-left: root.sidebar-collapsed ? 0px : 12px;
@@ -279,7 +280,7 @@ export component DashboardWidget inherits Window {
                             Text {
                                 text: "🎨";
                                 font-size: 15px;
-                                color: root.active-tab == 2 ? #58A6FF : #8B949E;
+                                color: root.active-tab == 2 ? #FFFFFF : #9A9A9A;
                                 vertical-alignment: center;
                             }
                             Text {
@@ -288,7 +289,7 @@ export component DashboardWidget inherits Window {
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 2 ? 700 : 500;
-                                color: root.active-tab == 2 ? #F0F6FC : #8B949E;
+                                color: root.active-tab == 2 ? #FFFFFF : #9A9A9A;
                                 vertical-alignment: center;
                             }
                         }
@@ -302,9 +303,9 @@ export component DashboardWidget inherits Window {
                     Rectangle {
                         height: 40px;
                         border-radius: 8px;
-                        background: root.active-tab == 3 ? #21262D : (tab3_touch.has-hover ? #161B22 : transparent);
+                        background: root.active-tab == 3 ? #1A1A1A : (tab3_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 3 ? 1px : 0px;
-                        border-color: #3898FF;
+                        border-color: #FFFFFF;
 
                         HorizontalLayout {
                             padding-left: root.sidebar-collapsed ? 0px : 12px;
@@ -312,7 +313,7 @@ export component DashboardWidget inherits Window {
                             Text {
                                 text: "👂";
                                 font-size: 15px;
-                                color: root.active-tab == 3 ? #58A6FF : #8B949E;
+                                color: root.active-tab == 3 ? #FFFFFF : #9A9A9A;
                                 vertical-alignment: center;
                             }
                             Text {
@@ -321,7 +322,7 @@ export component DashboardWidget inherits Window {
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 3 ? 700 : 500;
-                                color: root.active-tab == 3 ? #F0F6FC : #8B949E;
+                                color: root.active-tab == 3 ? #FFFFFF : #9A9A9A;
                                 vertical-alignment: center;
                             }
                         }
@@ -335,9 +336,9 @@ export component DashboardWidget inherits Window {
                     Rectangle {
                         height: 40px;
                         border-radius: 8px;
-                        background: root.active-tab == 4 ? #21262D : (tab4_touch.has-hover ? #161B22 : transparent);
+                        background: root.active-tab == 4 ? #1A1A1A : (tab4_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 4 ? 1px : 0px;
-                        border-color: #3898FF;
+                        border-color: #FFFFFF;
 
                         HorizontalLayout {
                             padding-left: root.sidebar-collapsed ? 0px : 12px;
@@ -345,7 +346,7 @@ export component DashboardWidget inherits Window {
                             Text {
                                 text: "🔄";
                                 font-size: 15px;
-                                color: root.active-tab == 4 ? #58A6FF : #8B949E;
+                                color: root.active-tab == 4 ? #FFFFFF : #9A9A9A;
                                 vertical-alignment: center;
                             }
                             Text {
@@ -354,7 +355,7 @@ export component DashboardWidget inherits Window {
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 4 ? 700 : 500;
-                                color: root.active-tab == 4 ? #F0F6FC : #8B949E;
+                                color: root.active-tab == 4 ? #FFFFFF : #9A9A9A;
                                 vertical-alignment: center;
                             }
                         }
@@ -372,16 +373,16 @@ export component DashboardWidget inherits Window {
                     Rectangle {
                         height: 32px;
                         border-radius: 8px;
-                        background: chev_touch.has-hover ? #21262D : #161B22;
+                        background: chev_touch.has-hover ? #1A1A1A : #0E0E0E;
                         border-width: 1px;
-                        border-color: #30363D;
+                        border-color: #262626;
 
                         HorizontalLayout {
                             alignment: center;
                             Text {
                                 text: root.sidebar-collapsed ? "›" : "‹";
                                 font-size: 20px;
-                                color: chev_touch.has-hover ? #F0F6FC : #8B949E;
+                                color: chev_touch.has-hover ? #FFFFFF : #9A9A9A;
                                 vertical-alignment: center;
                             }
                         }
@@ -395,9 +396,9 @@ export component DashboardWidget inherits Window {
                     Rectangle {
                         height: 36px;
                         border-radius: 6px;
-                        background: #161B22;
+                        background: #0E0E0E;
                         border-width: 1px;
-                        border-color: #30363D;
+                        border-color: #262626;
                         visible: !root.sidebar-collapsed;
                         HorizontalLayout {
                             alignment: center;
@@ -406,13 +407,13 @@ export component DashboardWidget inherits Window {
                                 width: 8px;
                                 height: 8px;
                                 border-radius: 4px;
-                                background: #2EA043;
+                                background: #FFFFFF;
                                 y: 14px;
                             }
                             Text {
                                 text: "Offline Ready";
                                 font-size: 11px;
-                                color: #8B949E;
+                                color: #9A9A9A;
                                 vertical-alignment: center;
                             }
                         }
@@ -439,7 +440,7 @@ export component DashboardWidget inherits Window {
 
             // ── Right Main Content Area ──
             Rectangle {
-                background: #0D1117;
+                background: #000000;
 
                 ScrollView {
                     VerticalLayout {
@@ -456,12 +457,12 @@ export component DashboardWidget inherits Window {
                             text: "General Configuration";
                             font-size: 18px;
                             font-weight: 700;
-                            color: #F0F6FC;
+                            color: #FFFFFF;
                         }
                         Text {
                             text: "Configure Windows integration, silence auto-commit, memory auto-offload, and recording output.";
                             font-size: 12px;
-                            color: #8B949E;
+                            color: #9A9A9A;
                         }
 
                         // ── Transcript History (top of General) ──
@@ -473,10 +474,10 @@ export component DashboardWidget inherits Window {
                         // something is playing (10Hz), so the dashboard stays
                         // smooth with 100 turns in the list.
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
@@ -488,13 +489,13 @@ export component DashboardWidget inherits Window {
                                         text: "Transcript History";
                                         font-size: 14px;
                                         font-weight: 600;
-                                        color: #58A6FF;
+                                        color: #FFFFFF;
                                         vertical-alignment: center;
                                     }
                                     Text {
                                         text: root.history-items.length == 0 ? "" : root.history-items.length + " turns";
                                         font-size: 11px;
-                                        color: #8B949E;
+                                        color: #9A9A9A;
                                         vertical-alignment: center;
                                     }
                                     Rectangle { horizontal-stretch: 1; }
@@ -503,15 +504,15 @@ export component DashboardWidget inherits Window {
                                 if root.history-items.length == 0 : Text {
                                     text: "No transcriptions yet. Hold Ctrl+Space and speak — every finished turn lands here with its audio.";
                                     font-size: 12px;
-                                    color: #8B949E;
+                                    color: #9A9A9A;
                                     wrap: word-wrap;
                                 }
 
                                 for item[i] in root.history-items : Rectangle {
-                                    background: #0D1117;
+                                    background: #000000;
                                     border-radius: 8px;
                                     border-width: 1px;
-                                    border-color: #21262D;
+                                    border-color: #1A1A1A;
 
                                     VerticalLayout {
                                         padding: 10px;
@@ -525,17 +526,18 @@ export component DashboardWidget inherits Window {
                                                 width: 30px;
                                                 height: 30px;
                                                 border-radius: 15px;
-                                                background: play_touch.has-hover ? #21262D : #161B22;
+                                                background: play_touch.has-hover ? #1A1A1A : #0E0E0E;
                                                 border-width: 1px;
-                                                border-color: item.playing ? #58A6FF : #30363D;
+                                                border-color: item.playing ? #FFFFFF : #262626;
                                                 Text {
                                                     width: parent.width;
                                                     height: parent.height;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
-                                                    
+
+                                                    text: item.playing ? "❚❚" : "▶";
                                                     font-size: 12px;
-                                                    color: item.playing ? #58A6FF : #F0F6FC;
+                                                    color: item.playing ? #FFFFFF : #C9C9C9;
                                                 }
                                                 play_touch := TouchArea {
                                                     clicked => { root.history-play(i); }
@@ -546,7 +548,7 @@ export component DashboardWidget inherits Window {
                                             Text {
                                                 text: item.when;
                                                 font-size: 11px;
-                                                color: #8B949E;
+                                                color: #9A9A9A;
                                                 vertical-alignment: center;
                                                 min-width: 104px;
                                             }
@@ -561,13 +563,13 @@ export component DashboardWidget inherits Window {
                                                     width: parent.width;
                                                     height: 8px;
                                                     border-radius: 4px;
-                                                    background: #21262D;
+                                                    background: #1A1A1A;
                                                     Rectangle {
                                                         x: 0px;
                                                         width: parent.width * item.progress;
                                                         height: parent.height;
                                                         border-radius: 4px;
-                                                        background: item.playing ? #58A6FF : #30363D;
+                                                        background: item.playing ? #FFFFFF : #262626;
                                                     }
                                                 }
                                                 seek_touch := TouchArea {
@@ -582,7 +584,7 @@ export component DashboardWidget inherits Window {
                                             Text {
                                                 text: item.playing ? (item.pos + " / " + item.dur) : item.dur;
                                                 font-size: 11px;
-                                                color: item.playing ? #F0F6FC : #8B949E;
+                                                color: item.playing ? #FFFFFF : #9A9A9A;
                                                 vertical-alignment: center;
                                                 min-width: 82px;
                                                 horizontal-alignment: right;
@@ -593,17 +595,18 @@ export component DashboardWidget inherits Window {
                                                 width: 26px;
                                                 height: 26px;
                                                 border-radius: 6px;
-                                                background: copy_touch.has-hover ? #21262D : transparent;
+                                                background: copy_touch.has-hover ? #1A1A1A : transparent;
                                                 border-width: 1px;
-                                                border-color: #30363D;
+                                                border-color: #262626;
                                                 Text {
                                                     width: parent.width;
                                                     height: parent.height;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
-                                                    
+
+                                                    text: "⧉";
                                                     font-size: 12px;
-                                                    color: copy_touch.has-hover ? #F0F6FC : #8B949E;
+                                                    color: copy_touch.has-hover ? #FFFFFF : #9A9A9A;
                                                 }
                                                 copy_touch := TouchArea {
                                                     clicked => { root.history-copy(i); }
@@ -616,17 +619,18 @@ export component DashboardWidget inherits Window {
                                                 width: 26px;
                                                 height: 26px;
                                                 border-radius: 6px;
-                                                background: del_touch.has-hover ? #3D1A1A : transparent;
+                                                background: del_touch.has-hover ? #2A1414 : transparent;
                                                 border-width: 1px;
-                                                border-color: #30363D;
+                                                border-color: #262626;
                                                 Text {
                                                     width: parent.width;
                                                     height: parent.height;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
-                                                    
+
+                                                    text: "🗑";
                                                     font-size: 11px;
-                                                    color: del_touch.has-hover ? #FF7B72 : #8B949E;
+                                                    color: del_touch.has-hover ? #FF8888 : #9A9A9A;
                                                 }
                                                 del_touch := TouchArea {
                                                     clicked => { root.history-delete(i); }
@@ -640,17 +644,18 @@ export component DashboardWidget inherits Window {
                                                 width: 26px;
                                                 height: 26px;
                                                 border-radius: 6px;
-                                                background: more_touch.has-hover || item.menu_open ? #21262D : transparent;
+                                                background: more_touch.has-hover || item.menu_open ? #1A1A1A : transparent;
                                                 border-width: 1px;
-                                                border-color: #30363D;
+                                                border-color: #262626;
                                                 Text {
                                                     width: parent.width;
                                                     height: parent.height;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
-                                                    
+
+                                                    text: "⋮";
                                                     font-size: 14px;
-                                                    color: more_touch.has-hover || item.menu_open ? #F0F6FC : #8B949E;
+                                                    color: more_touch.has-hover || item.menu_open ? #FFFFFF : #9A9A9A;
                                                 }
                                                 more_touch := TouchArea {
                                                     clicked => { root.history-menu(i, !item.menu_open); }
@@ -662,40 +667,41 @@ export component DashboardWidget inherits Window {
                                         Text {
                                             text: item.text;
                                             font-size: 12px;
-                                            color: #F0F6FC;
+                                            color: #FFFFFF;
                                             wrap: word-wrap;
                                         }
 
                                         if item.menu_open : Rectangle {
-                                            background: #161B22;
+                                            background: #0E0E0E;
                                             border-radius: 6px;
                                             border-width: 1px;
-                                            border-color: #30363D;
+                                            border-color: #262626;
                                             HorizontalLayout {
                                                 padding: 8px;
                                                 spacing: 8px;
                                                 Text {
                                                     text: item.has_audio ? "Export this turn as audio + text to your recordings folder:" : "No audio stored for this turn — export the text:";
                                                     font-size: 11px;
-                                                    color: #8B949E;
+                                                    color: #9A9A9A;
                                                     vertical-alignment: center;
                                                 }
                                                 Rectangle {
                                                     width: 130px;
                                                     height: 26px;
                                                     border-radius: 6px;
-                                                    background: dl_touch.has-hover ? #21262D : transparent;
+                                                    background: dl_touch.has-hover ? #1A1A1A : transparent;
                                                     border-width: 1px;
-                                                    border-color: #58A6FF;
+                                                    border-color: #FFFFFF;
                                                     Text {
                                                         width: parent.width;
                                                         height: parent.height;
                                                         horizontal-alignment: center;
                                                         vertical-alignment: center;
-                                                        
+
+                                                        text: "Download";
                                                         font-size: 11px;
                                                         font-weight: 600;
-                                                        color: dl_touch.has-hover ? #F0F6FC : #58A6FF;
+                                                        color: dl_touch.has-hover ? #FFFFFF : #FFFFFF;
                                                     }
                                                     dl_touch := TouchArea {
                                                         clicked => { root.history-download(i); }
@@ -711,16 +717,16 @@ export component DashboardWidget inherits Window {
 
                         // Group 1: Startup & Behavior Card
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 12px;
 
-                                Text { text: "System Startup & Behavior"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                Text { text: "System Startup & Behavior"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 CheckBox {
                                     text: "Start with Windows on logon";
@@ -742,16 +748,16 @@ export component DashboardWidget inherits Window {
 
                         // Group 2: Silence Detection Auto-Stop
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 12px;
 
-                                Text { text: "Inactivity & Silence Auto-Stop"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                Text { text: "Inactivity & Silence Auto-Stop"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 CheckBox {
                                     text: "Automatically stop and commit transcription when silence is detected";
@@ -764,7 +770,7 @@ export component DashboardWidget inherits Window {
                                     Text {
                                         text: "Silence threshold duration:";
                                         font-size: 13px;
-                                        color: #F0F6FC;
+                                        color: #FFFFFF;
                                         vertical-alignment: center;
                                         min-width: 180px;
                                     }
@@ -778,7 +784,7 @@ export component DashboardWidget inherits Window {
                                     Text {
                                         text: root.silence-duration + " sec";
                                         font-size: 13px;
-                                        color: #58A6FF;
+                                        color: #FFFFFF;
                                         font-weight: 600;
                                         vertical-alignment: center;
                                         min-width: 55px;
@@ -789,16 +795,16 @@ export component DashboardWidget inherits Window {
 
                         // Group 3: Memory Auto-Offload
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 12px;
 
-                                Text { text: "Memory Management & Model Offloading"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                Text { text: "Memory Management & Model Offloading"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 CheckBox {
                                     text: "Auto-offload speech model when idle (saves RAM)";
@@ -811,7 +817,7 @@ export component DashboardWidget inherits Window {
                                     Text {
                                         text: "Offload model after inactivity:";
                                         font-size: 13px;
-                                        color: #F0F6FC;
+                                        color: #FFFFFF;
                                         vertical-alignment: center;
                                         min-width: 180px;
                                     }
@@ -825,7 +831,7 @@ export component DashboardWidget inherits Window {
                                     Text {
                                         text: root.offload-seconds + " sec";
                                         font-size: 13px;
-                                        color: #58A6FF;
+                                        color: #FFFFFF;
                                         font-weight: 600;
                                         vertical-alignment: center;
                                         min-width: 55px;
@@ -836,16 +842,16 @@ export component DashboardWidget inherits Window {
 
                         // Group 4: Quick Transcription (Ctrl+Space)
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 12px;
 
-                                Text { text: "Quick Transcription Hotkey (Ctrl+Space)"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                Text { text: "Quick Transcription Hotkey (Ctrl+Space)"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 CheckBox {
                                     text: "Enable global Ctrl+Space dictation overlay";
@@ -861,7 +867,7 @@ export component DashboardWidget inherits Window {
                                     spacing: 8px;
                                     HorizontalLayout {
                                         spacing: 8px;
-                                        Text { text: "Trigger Mode:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 110px; }
+                                        Text { text: "Trigger Mode:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
                                         ComboBox {
                                             model: ["Push-to-Talk (Hold)", "Toggle (Press on/off)"];
                                             current-index: root.ctrl-space-mode;
@@ -870,7 +876,7 @@ export component DashboardWidget inherits Window {
                                     }
                                     HorizontalLayout {
                                         spacing: 8px;
-                                        Text { text: "Output Target:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 110px; }
+                                        Text { text: "Output Target:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
                                         ComboBox {
                                             model: ["Type into active app", "Copy to clipboard", "Show only"];
                                             current-index: root.ctrl-space-output;
@@ -889,21 +895,21 @@ export component DashboardWidget inherits Window {
                                     Text {
                                         text: "Cleanup model:";
                                         font-size: 13px;
-                                        color: #F0F6FC;
+                                        color: #FFFFFF;
                                         vertical-alignment: center;
                                         min-width: 110px;
                                     }
                                     ComboBox {
-                                        model: ["FDT 66M tagger - fillers + repeats only (66MB)", "S1-mini INT4 (0.6B) - fillers + self-corrections + numbers (375MB)"];
+                                        model: ["FDT 66M tagger - fillers + repeats only (66MB)", "S1-mini INT4 (0.6B) - self-corrections + numbers (375MB, slow)", "SmolLM2 360M Q4 - self-corrections + numbers (271MB, fast)", "Gemma 3 270M Q4 - self-corrections + numbers (253MB, fast)"];
                                         current-index: root.disfluency-engine;
                                         enabled: root.clean-disfluencies;
                                         selected(v) => { root.set-disfluency-engine(self.current-index); }
                                     }
                                 }
                                 Text {
-                                    text: "Deletion-only 66M tagger (Apache-2.0-ish research model, instant) OR \"S1-mini\" by Superwhisper - a 0.6B ASR text normalizer (Apache-2.0 + naming clause) that also resolves self-corrections (\"no wait, thursday\") and writes spoken numbers, dates and times in written form. Weights download on first use; the model loads only for the turn being cleaned and is dropped immediately after.";
+                                    text: "FDT is an instant deletion-only tagger. The three normalizer engines also resolve self-corrections (\"no wait, thursday\") and write spoken numbers, dates and times in written form: S1-mini (0.6B, highest quality, slowest), SmolLM2 360M and Gemma 3 270M (llama.cpp, fast). Weights download on first use; the model loads only for the turn being cleaned, off the UI thread, and is dropped immediately after.";
                                     font-size: 11px;
-                                    color: #8B949E;
+                                    color: #9A9A9A;
                                     wrap: word-wrap;
                                 }
                             }
@@ -921,20 +927,20 @@ export component DashboardWidget inherits Window {
                             text: "Speech Recognition Models";
                             font-size: 18px;
                             font-weight: 700;
-                            color: #F0F6FC;
+                            color: #FFFFFF;
                         }
                         Text {
                             text: "Select your active transcription engine or download additional neural acoustic models.";
                             font-size: 12px;
-                            color: #8B949E;
+                            color: #9A9A9A;
                         }
 
                         // Dynamic Download Progress Bar Card (Shows whenever downloading)
                         if root.is-downloading || root.download-progress > 0 : Rectangle {
-                            background: #1C2128;
+                            background: #141414;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #3898FF;
+                            border-color: #FFFFFF;
 
                             VerticalLayout {
                                 padding: 14px;
@@ -946,14 +952,14 @@ export component DashboardWidget inherits Window {
                                         text: root.download-status != "" ? root.download-status : "Downloading Speech Model…";
                                         font-size: 13px;
                                         font-weight: 600;
-                                        color: #58A6FF;
+                                        color: #FFFFFF;
                                         vertical-alignment: center;
                                     }
                                     Text {
                                         text: root.download-progress + "%";
                                         font-size: 13px;
                                         font-weight: 700;
-                                        color: #F0F6FC;
+                                        color: #FFFFFF;
                                         vertical-alignment: center;
                                     }
                                 }
@@ -964,7 +970,7 @@ export component DashboardWidget inherits Window {
                                     Text {
                                         text: root.download-file;
                                         font-size: 11px;
-                                        color: #8B949E;
+                                        color: #9A9A9A;
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }
@@ -972,7 +978,7 @@ export component DashboardWidget inherits Window {
                                         text: (root.download-bytes != "" && root.download-speed != "") ? (root.download-bytes + " • " + root.download-speed) : root.download-bytes;
                                         font-size: 11px;
                                         font-weight: 600;
-                                        color: #8B949E;
+                                        color: #9A9A9A;
                                         vertical-alignment: center;
                                     }
                                 }
@@ -981,7 +987,7 @@ export component DashboardWidget inherits Window {
                                 Rectangle {
                                     height: 8px;
                                     border-radius: 4px;
-                                    background: #21262D;
+                                    background: #1A1A1A;
 
                                     Rectangle {
                                         x: 0px;
@@ -989,7 +995,7 @@ export component DashboardWidget inherits Window {
                                         height: 8px;
                                         width: (parent.width * root.download-progress / 100);
                                         border-radius: 4px;
-                                        background: #3898FF;
+                                        background: #FFFFFF;
                                     }
                                 }
                             }
@@ -997,20 +1003,20 @@ export component DashboardWidget inherits Window {
 
                         // Active Model & Language Selector Card
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 14px;
 
-                                Text { text: "Active Recognition Engine"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                Text { text: "Active Recognition Engine"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    Text { text: "Selected Model:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 110px; }
+                                    Text { text: "Selected Model:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
                                     ComboBox {
                                         model: root.models;
                                         current-index: root.selected-model;
@@ -1020,7 +1026,7 @@ export component DashboardWidget inherits Window {
 
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    Text { text: "Active Language:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 110px; }
+                                    Text { text: "Active Language:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
                                     ComboBox {
                                         model: root.languages;
                                         current-index: root.selected-language;
@@ -1029,14 +1035,14 @@ export component DashboardWidget inherits Window {
                                 }
 
                                 Rectangle {
-                                    background: #21262D;
+                                    background: #1A1A1A;
                                     border-radius: 6px;
                                     VerticalLayout {
                                         padding: 10px;
                                         Text {
                                             text: root.models-info;
                                             font-size: 12px;
-                                            color: #8B949E;
+                                            color: #9A9A9A;
                                             wrap: word-wrap;
                                         }
                                     }
@@ -1046,21 +1052,21 @@ export component DashboardWidget inherits Window {
 
                         // Model Catalog Overview Card
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 12px;
 
-                                Text { text: "Transcription Models"; font-size: 16px; font-weight: 700; color: #F0F6FC; }
+                                Text { text: "Transcription Models"; font-size: 16px; font-weight: 700; color: #FFFFFF; }
 
                                 Text {
                                     text: "Select a transcription model or download additional models. Different models offer varying levels of accuracy and speed. The list is filtered for your hardware — search or filter by language anytime.";
                                     font-size: 12px;
-                                    color: #8B949E;
+                                    color: #9A9A9A;
                                     wrap: word-wrap;
                                 }
 
@@ -1082,20 +1088,20 @@ export component DashboardWidget inherits Window {
 
                                 // Recommendation banner (smart algorithm)
                                 if root.recommend-name != "": Rectangle {
-                                    background: #2A1F33;
+                                    background: #1A1A1A;
                                     border-radius: 10px;
                                     border-width: 1px;
-                                    border-color: #F778BA;
+                                    border-color: #FFFFFF;
                                     VerticalLayout {
                                         padding: 12px;
                                         spacing: 6px;
                                         HorizontalLayout {
                                             spacing: 8px;
-                                            Text { text: "Recommended:"; font-size: 12px; font-weight: 700; color: #F778BA; vertical-alignment: center; }
-                                            Text { text: root.recommend-name; font-size: 13px; font-weight: 700; color: #F0F6FC; vertical-alignment: center; }
+                                            Text { text: "Recommended:"; font-size: 12px; font-weight: 700; color: #FFFFFF; vertical-alignment: center; }
+                                            Text { text: root.recommend-name; font-size: 13px; font-weight: 700; color: #FFFFFF; vertical-alignment: center; }
                                             Rectangle {
-                                                width: 110px; height: 24px; border-radius: 12px; background: #F778BA;
-                                                Text { text: "Use it"; font-size: 11px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                                width: 110px; height: 24px; border-radius: 12px; background: #FFFFFF;
+                                                Text { text: "Use it"; font-size: 11px; font-weight: 700; color: #000000; horizontal-alignment: center; vertical-alignment: center; }
                                                 TouchArea {
                                                     x: 0px;
                                                     y: 0px;
@@ -1106,19 +1112,19 @@ export component DashboardWidget inherits Window {
                                                 }
                                             }
                                         }
-                                        Text { text: root.recommend-reason; font-size: 11px; color: #D8B4C8; wrap: word-wrap; }
-                                        Text { text: root.hardware-info; font-size: 11px; color: #8B949E; wrap: word-wrap; }
+                                        Text { text: root.recommend-reason; font-size: 11px; color: #B0B0B0; wrap: word-wrap; }
+                                        Text { text: root.hardware-info; font-size: 11px; color: #9A9A9A; wrap: word-wrap; }
                                     }
                                 }
 
-                                Text { text: "Downloaded Models"; font-size: 13px; font-weight: 700; color: #F0F6FC; }
+                                Text { text: "Downloaded Models"; font-size: 13px; font-weight: 700; color: #FFFFFF; }
                                 for card in root.catalog: Rectangle {
                                     height: card.installed ? 96px : 0px;
                                     visible: card.installed;
                                     border-radius: 10px;
-                                    background: card.is-active ? #2A1F33 : #21262D;
+                                    background: card.is-active ? #1A1A1A : #1A1A1A;
                                     border-width: 1px;
-                                    border-color: card.is-active ? #F778BA : #30363D;
+                                    border-color: card.is-active ? #FFFFFF : #262626;
                                     // Card tap = select model. Declared FIRST so it
                                     // stays beneath the Delete button above.
                                     TouchArea {
@@ -1137,11 +1143,11 @@ export component DashboardWidget inherits Window {
                                             alignment: space-between;
                                             HorizontalLayout {
                                                 spacing: 8px;
-                                                Text { text: card.name; font-size: 13px; font-weight: 700; color: #F0F6FC; vertical-alignment: center; }
+                                                Text { text: card.name; font-size: 13px; font-weight: 700; color: #FFFFFF; vertical-alignment: center; }
                                                 if card.badge != "": Rectangle {
                                                     width: 96px; height: 22px; border-radius: 11px;
-                                                    background: card.badge == "Legacy" ? #30363D : #F778BA;
-                                                    Text { text: card.badge; font-size: 11px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                                    background: card.badge == "Legacy" ? #262626 : #FFFFFF;
+                                                    Text { text: card.badge; font-size: 11px; font-weight: 700; color: #000000; horizontal-alignment: center; vertical-alignment: center; }
                                                 }
                                             }
                                             HorizontalLayout {
@@ -1149,40 +1155,40 @@ export component DashboardWidget inherits Window {
                                                 VerticalLayout {
                                                     spacing: 2px;
                                                     alignment: center;
-                                                    Text { text: "accuracy"; font-size: 10px; color: #8B949E; }
+                                                    Text { text: "accuracy"; font-size: 10px; color: #9A9A9A; }
                                                     Rectangle {
-                                                        width: 90px; height: 6px; border-radius: 3px; background: #30363D;
-                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.accuracy / 100; border-radius: 3px; background: #F778BA; }
+                                                        width: 90px; height: 6px; border-radius: 3px; background: #262626;
+                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.accuracy / 100; border-radius: 3px; background: #FFFFFF; }
                                                     }
                                                 }
                                                 VerticalLayout {
                                                     spacing: 2px;
                                                     alignment: center;
-                                                    Text { text: "speed"; font-size: 10px; color: #8B949E; }
+                                                    Text { text: "speed"; font-size: 10px; color: #9A9A9A; }
                                                     Rectangle {
-                                                        width: 90px; height: 6px; border-radius: 3px; background: #30363D;
-                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.speed / 100; border-radius: 3px; background: #F778BA; }
+                                                        width: 90px; height: 6px; border-radius: 3px; background: #262626;
+                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.speed / 100; border-radius: 3px; background: #FFFFFF; }
                                                     }
                                                 }
                                             }
                                         }
-                                        Text { text: card.blurb; font-size: 12px; color: #C9D1D9; }
+                                        Text { text: card.blurb; font-size: 12px; color: #C9C9C9; }
                                         HorizontalLayout {
                                             alignment: space-between;
-                                            Text { text: card.langs; font-size: 11px; color: #8B949E; vertical-alignment: center; }
+                                            Text { text: card.langs; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
                                             // Explicit-size delete button: guaranteed hit area.
                                             Rectangle {
                                                 width: 150px;
                                                 height: 26px;
                                                 border-radius: 6px;
-                                                background: del_hover.has-hover ? #2A1F33 : transparent;
+                                                background: del_hover.has-hover ? #1A1A1A : transparent;
                                                 HorizontalLayout {
                                                     padding-left: 8px;
                                                     padding-right: 8px;
                                                     spacing: 10px;
                                                     alignment: end;
-                                                    Text { text: card.size; font-size: 11px; color: #8B949E; vertical-alignment: center; }
-                                                    Text { text: "Delete"; font-size: 11px; font-weight: 700; color: #F778BA; vertical-alignment: center; }
+                                                    Text { text: card.size; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
+                                                    Text { text: "Delete"; font-size: 11px; font-weight: 700; color: #FFFFFF; vertical-alignment: center; }
                                                 }
                                                 del_hover := TouchArea {
                                                     x: 0px;
@@ -1196,14 +1202,14 @@ export component DashboardWidget inherits Window {
                                         }
                                     }
                                 }
-                                Text { text: "Available to Download"; font-size: 13px; font-weight: 700; color: #F0F6FC; }
+                                Text { text: "Available to Download"; font-size: 13px; font-weight: 700; color: #FFFFFF; }
                                 for card in root.catalog: Rectangle {
                                     height: !card.installed ? 96px : 0px;
                                     visible: !card.installed;
                                     border-radius: 10px;
-                                    background: #21262D;
+                                    background: #1A1A1A;
                                     border-width: 1px;
-                                    border-color: #30363D;
+                                    border-color: #262626;
                                     VerticalLayout {
                                         padding: 12px;
                                         spacing: 4px;
@@ -1212,10 +1218,10 @@ export component DashboardWidget inherits Window {
                                             alignment: space-between;
                                             HorizontalLayout {
                                                 spacing: 8px;
-                                                Text { text: card.name; font-size: 13px; font-weight: 700; color: #F0F6FC; vertical-alignment: center; }
+                                                Text { text: card.name; font-size: 13px; font-weight: 700; color: #FFFFFF; vertical-alignment: center; }
                                                 if card.badge != "": Rectangle {
-                                                    width: 110px; height: 22px; border-radius: 11px; background: #F778BA;
-                                                    Text { text: card.badge; font-size: 11px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                                    width: 110px; height: 22px; border-radius: 11px; background: #FFFFFF;
+                                                    Text { text: card.badge; font-size: 11px; font-weight: 700; color: #000000; horizontal-alignment: center; vertical-alignment: center; }
                                                 }
                                             }
                                             HorizontalLayout {
@@ -1223,46 +1229,46 @@ export component DashboardWidget inherits Window {
                                                 VerticalLayout {
                                                     spacing: 2px;
                                                     alignment: center;
-                                                    Text { text: "accuracy"; font-size: 10px; color: #8B949E; }
+                                                    Text { text: "accuracy"; font-size: 10px; color: #9A9A9A; }
                                                     Rectangle {
-                                                        width: 90px; height: 6px; border-radius: 3px; background: #30363D;
-                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.accuracy / 100; border-radius: 3px; background: #F778BA; }
+                                                        width: 90px; height: 6px; border-radius: 3px; background: #262626;
+                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.accuracy / 100; border-radius: 3px; background: #FFFFFF; }
                                                     }
                                                 }
                                                 VerticalLayout {
                                                     spacing: 2px;
                                                     alignment: center;
-                                                    Text { text: "speed"; font-size: 10px; color: #8B949E; }
+                                                    Text { text: "speed"; font-size: 10px; color: #9A9A9A; }
                                                     Rectangle {
-                                                        width: 90px; height: 6px; border-radius: 3px; background: #30363D;
-                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.speed / 100; border-radius: 3px; background: #F778BA; }
+                                                        width: 90px; height: 6px; border-radius: 3px; background: #262626;
+                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.speed / 100; border-radius: 3px; background: #FFFFFF; }
                                                     }
                                                 }
                                             }
                                         }
-                                        Text { text: card.blurb; font-size: 12px; color: #C9D1D9; }
+                                        Text { text: card.blurb; font-size: 12px; color: #C9C9C9; }
                                         HorizontalLayout {
                                             alignment: space-between;
-                                            Text { text: card.langs; font-size: 11px; color: #8B949E; vertical-alignment: center; }
+                                            Text { text: card.langs; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
                                             // Explicit-size download button: guaranteed hit area
                                             // (bare TouchAreas in layouts can collapse to 0×0).
                                             dl_btn := Rectangle {
                                                 width: 170px;
                                                 height: 26px;
                                                 border-radius: 6px;
-                                                background: dl_hover.has-hover ? #2A2E35 : transparent;
+                                                background: dl_hover.has-hover ? #222222 : transparent;
                                                 HorizontalLayout {
                                                     padding-left: 8px;
                                                     padding-right: 8px;
                                                     spacing: 6px;
                                                     alignment: end;
-                                                    Text { text: "⬇"; font-size: 11px; color: #8B949E; vertical-alignment: center; }
-                                                    Text { text: card.size; font-size: 11px; color: #8B949E; vertical-alignment: center; }
+                                                    Text { text: "⬇"; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
+                                                    Text { text: card.size; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
                                                     if card.downloading: Text {
                                                         text: root.download-progress + "%";
                                                         font-size: 11px;
                                                         font-weight: 700;
-                                                        color: #58A6FF;
+                                                        color: #FFFFFF;
                                                         vertical-alignment: center;
                                                     }
                                                 }
@@ -1294,30 +1300,30 @@ export component DashboardWidget inherits Window {
                             text: "Widget Styling & Customization";
                             font-size: 18px;
                             font-weight: 700;
-                            color: #F0F6FC;
+                            color: #FFFFFF;
                         }
                         Text {
                             text: "Customize the appearance of the floating mini pill widget. Sliders apply immediately with live preview.";
                             font-size: 12px;
-                            color: #8B949E;
+                            color: #9A9A9A;
                         }
 
                         // Interactive Live Preview Box
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 12px;
 
-                                Text { text: "Live Mini Pill Preview"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                Text { text: "Live Mini Pill Preview"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 Rectangle {
                                     height: 90px;
-                                    background: #090D12;
+                                    background: #000000;
                                     border-radius: 8px;
 
                                     HorizontalLayout {
@@ -1328,9 +1334,9 @@ export component DashboardWidget inherits Window {
                                             width: 250px;
                                             height: 48px;
                                             border-radius: (root.ui-pill-radius * 48px / 50);
-                                            background: #1A1E24;
+                                            background: #111111;
                                             border-width: 1px;
-                                            border-color: #3898FF;
+                                            border-color: #FFFFFF;
                                             opacity: root.ui-opacity / 100.0;
                                             y: 21px;
 
@@ -1347,14 +1353,14 @@ export component DashboardWidget inherits Window {
                                                         width: 10px;
                                                         height: 10px;
                                                         border-radius: 5px;
-                                                        background: #3898FF;
+                                                        background: #FFFFFF;
                                                         y: 18px;
                                                     }
                                                     Text {
                                                         text: "QuickSTT";
                                                         font-size: 13px;
                                                         font-weight: 700;
-                                                        color: #F0F6FC;
+                                                        color: #FFFFFF;
                                                         vertical-alignment: center;
                                                     }
                                                 }
@@ -1362,7 +1368,7 @@ export component DashboardWidget inherits Window {
                                                 Text {
                                                     text: "Dictate Ctrl+Win";
                                                     font-size: 12px;
-                                                    color: #8B949E;
+                                                    color: #9A9A9A;
                                                     vertical-alignment: center;
                                                 }
                                             }
@@ -1374,51 +1380,51 @@ export component DashboardWidget inherits Window {
 
                         // Sliders & Adjustments Card
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 14px;
 
-                                Text { text: "Dimensions & Opacity"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                Text { text: "Dimensions & Opacity"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    Text { text: "Widget Opacity:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 160px; }
+                                    Text { text: "Widget Opacity:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 160px; }
                                     Slider {
                                         minimum: 20;
                                         maximum: 100;
                                         value: root.ui-opacity;
                                         changed(val) => { root.set-ui-opacity(val); }
                                     }
-                                    Text { text: root.ui-opacity + "%"; font-size: 13px; color: #58A6FF; font-weight: 600; vertical-alignment: center; min-width: 50px; }
+                                    Text { text: root.ui-opacity + "%"; font-size: 13px; color: #FFFFFF; font-weight: 600; vertical-alignment: center; min-width: 50px; }
                                 }
 
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    Text { text: "Corner Roundness:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 160px; }
+                                    Text { text: "Corner Roundness:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 160px; }
                                     Slider {
                                         minimum: 0;
                                         maximum: 25;
                                         value: root.ui-pill-radius;
                                         changed(val) => { root.set-ui-pill-radius(val); }
                                     }
-                                    Text { text: root.ui-pill-radius + " px"; font-size: 13px; color: #58A6FF; font-weight: 600; vertical-alignment: center; min-width: 50px; }
+                                    Text { text: root.ui-pill-radius + " px"; font-size: 13px; color: #FFFFFF; font-weight: 600; vertical-alignment: center; min-width: 50px; }
                                 }
 
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    Text { text: "System Tray Icon Size:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 160px; }
+                                    Text { text: "System Tray Icon Size:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 160px; }
                                     Slider {
                                         minimum: 16;
                                         maximum: 64;
                                         value: root.tray-icon-size;
                                         changed(val) => { root.set-tray-icon-size(val); }
                                     }
-                                    Text { text: root.tray-icon-size + " px"; font-size: 13px; color: #58A6FF; font-weight: 600; vertical-alignment: center; min-width: 50px; }
+                                    Text { text: root.tray-icon-size + " px"; font-size: 13px; color: #FFFFFF; font-weight: 600; vertical-alignment: center; min-width: 50px; }
                                 }
 
                                 CheckBox {
@@ -1429,7 +1435,7 @@ export component DashboardWidget inherits Window {
 
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    Text { text: "Waveform Sensitivity:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 160px; }
+                                    Text { text: "Waveform Sensitivity:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 160px; }
                                     Slider {
                                         minimum: 1;
                                         maximum: 15;
@@ -1437,7 +1443,7 @@ export component DashboardWidget inherits Window {
                                         enabled: root.show-waveform;
                                         changed(val) => { root.set-waveform-sensitivity(val); }
                                     }
-                                    Text { text: root.waveform-sensitivity + ""; font-size: 13px; color: #58A6FF; font-weight: 600; vertical-alignment: center; min-width: 50px; }
+                                    Text { text: root.waveform-sensitivity + ""; font-size: 13px; color: #FFFFFF; font-weight: 600; vertical-alignment: center; min-width: 50px; }
                                 }
                             }
                         }
@@ -1454,20 +1460,20 @@ export component DashboardWidget inherits Window {
                             text: "Wakewords & Voice Activity Detection";
                             font-size: 18px;
                             font-weight: 700;
-                            color: #F0F6FC;
+                            color: #FFFFFF;
                         }
                         Text {
                             text: "Hands-free voice triggers. Calibrated sensitivity and strict noise gates prevent false activations from room noise and TV audio.";
                             font-size: 12px;
-                            color: #8B949E;
+                            color: #9A9A9A;
                         }
 
                         // Master Activation Switch
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
@@ -1476,8 +1482,8 @@ export component DashboardWidget inherits Window {
                                 HorizontalLayout {
                                     alignment: space-between;
                                     VerticalLayout {
-                                        Text { text: "Hands-Free Wakeword Detection"; font-size: 14px; font-weight: 600; color: #58A6FF; }
-                                        Text { text: "When enabled, QuickSTT listens for wake phrases in the background (< 1 MB RAM)."; font-size: 11px; color: #8B949E; }
+                                        Text { text: "Hands-Free Wakeword Detection"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
+                                        Text { text: "When enabled, QuickSTT listens for wake phrases in the background (< 1 MB RAM)."; font-size: 11px; color: #9A9A9A; }
                                     }
                                     CheckBox {
                                         text: "Active";
@@ -1490,22 +1496,22 @@ export component DashboardWidget inherits Window {
 
                         // Calibrated Sensitivity Sliders
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 14px;
 
-                                Text { text: "Sensitivity & Noise Gate Tuning"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                Text { text: "Sensitivity & Noise Gate Tuning"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
-                                Text { text: root.wakeword-threshold-text; font-size: 11px; color: #8B949E; wrap: word-wrap; }
+                                Text { text: root.wakeword-threshold-text; font-size: 11px; color: #9A9A9A; wrap: word-wrap; }
 
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    Text { text: "Wakeword Sensitivity:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 170px; }
+                                    Text { text: "Wakeword Sensitivity:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 170px; }
                                     Slider {
                                         minimum: 0;
                                         maximum: 100;
@@ -1515,7 +1521,7 @@ export component DashboardWidget inherits Window {
                                     Text {
                                         text: root.wakeword-sensitivity <= 30 ? (root.wakeword-sensitivity + "% (Strict)") : (root.wakeword-sensitivity >= 70 ? (root.wakeword-sensitivity + "% (Hot)") : (root.wakeword-sensitivity + "% (Balanced)"));
                                         font-size: 12px;
-                                        color: #58A6FF;
+                                        color: #FFFFFF;
                                         font-weight: 600;
                                         vertical-alignment: center;
                                         min-width: 95px;
@@ -1524,13 +1530,13 @@ export component DashboardWidget inherits Window {
                                 Text {
                                     text: "Score bar for the phrases above — HIGHER (right) = triggers on quieter speech, LOWER (left) = needs louder, clearer speech. Too high answers TV and chatter; too low needs shouting. 50 is balanced.";
                                     font-size: 11px;
-                                    color: #8B949E;
+                                    color: #9A9A9A;
                                     wrap: word-wrap;
                                 }
 
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    Text { text: "VAD Speech Gate:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 170px; }
+                                    Text { text: "VAD Speech Gate:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 170px; }
                                     Slider {
                                         minimum: 0;
                                         maximum: 100;
@@ -1540,7 +1546,7 @@ export component DashboardWidget inherits Window {
                                     Text {
                                         text: root.vad-sensitivity <= 30 ? (root.vad-sensitivity + "% (Strict)") : (root.vad-sensitivity >= 70 ? (root.vad-sensitivity + "% (Open)") : (root.vad-sensitivity + "% (Balanced)"));
                                         font-size: 12px;
-                                        color: #58A6FF;
+                                        color: #FFFFFF;
                                         font-weight: 600;
                                         vertical-alignment: center;
                                         min-width: 95px;
@@ -1549,31 +1555,31 @@ export component DashboardWidget inherits Window {
                                 Text {
                                     text: "Voice gate in front of the detector — HIGHER (right) = soft speech gets through, but so does more room noise. LOWER (left) = stricter; set too low, quiet phrases never reach the detector at all. Same direction as above: right = more sensitive. 50 is balanced.";
                                     font-size: 11px;
-                                    color: #8B949E;
+                                    color: #9A9A9A;
                                     wrap: word-wrap;
                                 }
 
                                 // Live Microphone Input Level Visualizer
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    Text { text: "Microphone Audio Level:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; min-width: 170px; }
+                                    Text { text: "Microphone Audio Level:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 170px; }
                                     Rectangle {
                                         height: 10px;
                                         border-radius: 5px;
-                                        background: #21262D;
+                                        background: #1A1A1A;
                                         Rectangle {
                                             x: 0px;
                                             y: 0px;
                                             height: 10px;
                                             width: (parent.width * root.live-audio-level / 100);
                                             border-radius: 5px;
-                                            background: root.live-audio-level > 60 ? #DA3633 : (root.live-audio-level > 20 ? #2EA043 : #3898FF);
+                                            background: root.live-audio-level > 60 ? #DA3633 : (root.live-audio-level > 20 ? #FFFFFF : #FFFFFF);
                                         }
                                     }
                                     Text {
                                         text: root.live-audio-level + "%";
                                         font-size: 12px;
-                                        color: #8B949E;
+                                        color: #9A9A9A;
                                         vertical-alignment: center;
                                         min-width: 45px;
                                     }
@@ -1583,16 +1589,16 @@ export component DashboardWidget inherits Window {
 
                         // Enabled Wakewords List
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 10px;
 
-                                Text { text: "Active Wakewords (community openWakeWord heads)"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                Text { text: "Active Wakewords (community openWakeWord heads)"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 HorizontalLayout {
                                     spacing: 20px;
@@ -1611,7 +1617,7 @@ export component DashboardWidget inherits Window {
                                 Text {
                                     text: "Custom phrases (jarvis, agent, hem) are retired: their models answered ~0.5 to pure silence, so no threshold could ever separate them from nothing. They may return via retrained heads.";
                                     font-size: 11px;
-                                    color: #8B949E;
+                                    color: #9A9A9A;
                                     wrap: word-wrap;
                                 }
                             }
@@ -1619,20 +1625,20 @@ export component DashboardWidget inherits Window {
 
                         // Acoustic Sound Trigger (clap only — snap retired)
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 12px;
 
-                                Text { text: "Acoustic Transient Trigger"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                Text { text: "Acoustic Transient Trigger"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 HorizontalLayout {
                                     spacing: 8px;
-                                    Text { text: "Clap Action:"; font-size: 13px; color: #F0F6FC; vertical-alignment: center; }
+                                    Text { text: "Clap Action:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; }
                                     ComboBox {
                                         model: ["Start Dictation", "Stop Dictation", "Disabled"];
                                         current-index: root.transient-action;
@@ -1643,7 +1649,7 @@ export component DashboardWidget inherits Window {
                                 Text {
                                     text: "One sharp hand clap triggers the action above. Isolated impulses only — speech and sustained noise are vetoed. Wakewords work independently.";
                                     font-size: 11px;
-                                    color: #8B949E;
+                                    color: #9A9A9A;
                                     wrap: word-wrap;
                                 }
                             }
@@ -1661,85 +1667,85 @@ export component DashboardWidget inherits Window {
                             text: "System Information & Updates";
                             font-size: 18px;
                             font-weight: 700;
-                            color: #F0F6FC;
+                            color: #FFFFFF;
                         }
                         Text {
                             text: "Inspect active ML inference runtimes, build versions, and software update status.";
                             font-size: 12px;
-                            color: #8B949E;
+                            color: #9A9A9A;
                         }
 
                         // System Runtime Status Card
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 10px;
 
-                                Text { text: "Runtime Diagnostic Status"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                Text { text: "Runtime Diagnostic Status"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 HorizontalLayout {
                                     alignment: space-between;
-                                    Text { text: "Core Architecture:"; font-size: 13px; color: #8B949E; }
-                                    Text { text: "Rust 64-bit (Tokio + Slint)"; font-size: 13px; font-weight: 600; color: #F0F6FC; }
+                                    Text { text: "Core Architecture:"; font-size: 13px; color: #9A9A9A; }
+                                    Text { text: "Rust 64-bit (Tokio + Slint)"; font-size: 13px; font-weight: 600; color: #FFFFFF; }
                                 }
                                 HorizontalLayout {
                                     alignment: space-between;
-                                    Text { text: "Audio Driver:"; font-size: 13px; color: #8B949E; }
-                                    Text { text: "WASAPI shared (cpal)"; font-size: 13px; font-weight: 600; color: #F0F6FC; }
+                                    Text { text: "Audio Driver:"; font-size: 13px; color: #9A9A9A; }
+                                    Text { text: "WASAPI shared (cpal)"; font-size: 13px; font-weight: 600; color: #FFFFFF; }
                                 }
                                 HorizontalLayout {
                                     alignment: space-between;
-                                    Text { text: "Wakeword Engine:"; font-size: 13px; color: #8B949E; }
-                                    Text { text: "ONNX Tract (2 heads)"; font-size: 13px; font-weight: 600; color: #2EA043; }
+                                    Text { text: "Wakeword Engine:"; font-size: 13px; color: #9A9A9A; }
+                                    Text { text: "ONNX Tract (2 heads)"; font-size: 13px; font-weight: 600; color: #FFFFFF; }
                                 }
                                 HorizontalLayout {
                                     alignment: space-between;
-                                    Text { text: "Speech Recognition:"; font-size: 13px; color: #8B949E; }
-                                    Text { text: "Vosk Native & ONNX"; font-size: 13px; font-weight: 600; color: #2EA043; }
+                                    Text { text: "Speech Recognition:"; font-size: 13px; color: #9A9A9A; }
+                                    Text { text: "Vosk Native & ONNX"; font-size: 13px; font-weight: 600; color: #FFFFFF; }
                                 }
                                 HorizontalLayout {
                                     alignment: space-between;
-                                    Text { text: "Idle Memory Usage:"; font-size: 13px; color: #8B949E; }
-                                    Text { text: "< 5 MB idle (auto-offload)"; font-size: 13px; font-weight: 600; color: #3898FF; }
+                                    Text { text: "Idle Memory Usage:"; font-size: 13px; color: #9A9A9A; }
+                                    Text { text: "< 5 MB idle (auto-offload)"; font-size: 13px; font-weight: 600; color: #FFFFFF; }
                                 }
                             }
                         }
 
                         // Version & Updates Card
                         Rectangle {
-                            background: #161B22;
+                            background: #0E0E0E;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: #30363D;
+                            border-color: #262626;
 
                             VerticalLayout {
                                 padding: 16px;
                                 spacing: 12px;
 
-                                Text { text: "Version & Software Updates"; font-size: 14px; font-weight: 600; color: #58A6FF; }
+                                Text { text: "Version & Software Updates"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 HorizontalLayout {
                                     alignment: space-between;
                                     VerticalLayout {
-                                        Text { text: "QuickSTT Release:"; font-size: 13px; color: #F0F6FC; font-weight: 600; }
-                                        Text { text: root.app-version; font-size: 12px; color: #8B949E; }
+                                        Text { text: "QuickSTT Release:"; font-size: 13px; color: #FFFFFF; font-weight: 600; }
+                                        Text { text: root.app-version; font-size: 12px; color: #9A9A9A; }
                                     }
                                     Rectangle {
                                         width: 140px;
                                         height: 32px;
                                         border-radius: 6px;
-                                        background: #1F6FEB;
+                                        background: #FFFFFF;
                                         y: 4px;
                                         Text {
                                             text: "Check Updates";
                                             font-size: 12px;
                                             font-weight: 700;
-                                            color: white;
+                                            color: #000000;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
                                         }

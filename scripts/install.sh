@@ -92,14 +92,22 @@ log "installing Photon STT runtime (pip moondream, one-time ~700MB)"
 python3 -m pip install --user --break-system-packages "moondream>=2.4" 2>&1 | tail -2 || \
     log "Photon runtime install failed — Parakeet Ultra/Redux will show setup steps instead"
 
-# 5b. Transcript-cleanup runtime: two optional backends for the final
-# post-processing pass — the 66M FDT tagger (onnxruntime + tokenizers, ~15ms)
-# and "S1-mini" by Superwhisper (onnxruntime-genai, 0.6B INT4: also resolves
-# self-corrections and writes spoken numbers/dates; weights fetched on demand).
-# Best-effort like Photon — turns pass through uncleaned until installed.
-log "installing transcript-cleanup runtime (pip onnxruntime, tokenizers, onnxruntime-genai)"
+# 5b. Transcript-cleanup runtime: four optional backends for the final
+# post-processing pass — the 66M FDT tagger (onnxruntime + tokenizers, ~15ms),
+# "S1-mini" by Superwhisper (onnxruntime-genai, 0.6B INT4), and SmolLM2 360M +
+# Gemma 3 270M Q4 GGUF via llama.cpp (llama-cpp-python): the normalizers also
+# resolve self-corrections and write spoken numbers/dates; weights fetched on
+# demand. Best-effort like Photon — turns pass through uncleaned until
+# installed.
+log "installing transcript-cleanup runtime (pip onnxruntime, tokenizers, onnxruntime-genai, llama-cpp-python)"
 python3 -m pip install --user --break-system-packages onnxruntime tokenizers onnxruntime-genai 2>&1 | tail -2 || \
     log "Cleanup runtime install failed — transcripts will skip cleanup until installed"
+# llama-cpp-python: prefer the prebuilt CPU wheels, fall back to a source
+# build (needs cmake/gcc, hence the || true — never fail the installer).
+python3 -m pip install --user --break-system-packages llama-cpp-python \
+    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu 2>&1 | tail -2 || \
+    python3 -m pip install --user --break-system-packages llama-cpp-python 2>&1 | tail -2 || \
+    log "llama-cpp-python install failed — SmolLM2/Gemma 3 cleanup will fall back to FDT"
 
 # 6. Install the package ------------------------------------------------------
 log "installing ${DEB_NAME} (sudo required)"

@@ -398,7 +398,7 @@ impl Settings {
         settings.clean_disfluencies =
             read_bool(key, "cleanDisfluencies").unwrap_or(true);
         settings.disfluency_engine =
-            read_dword(key, "disfluencyEngine").unwrap_or(0).min(1);
+            read_dword(key, "disfluencyEngine").unwrap_or(0).min(3);
         settings.dash_sidebar_collapsed =
             read_bool(key, "dashSidebarCollapsed").unwrap_or(false);
         settings.dash_sidebar_width = read_dword(key, "dashSidebarWidth")
@@ -785,7 +785,7 @@ impl Settings {
             let _ = write_str("autoStopSilence", if self.auto_stop_silence { "true" } else { "false" });
             let _ = write_dword("silenceDuration", self.silence_duration);
             let _ = write_str("cleanDisfluencies", if self.clean_disfluencies { "true" } else { "false" });
-            let _ = write_dword("disfluencyEngine", self.disfluency_engine);
+            let _ = write_dword("disfluencyEngine", self.disfluency_engine.min(3));
             let _ = write_str("dashSidebarCollapsed", if self.dash_sidebar_collapsed { "true" } else { "false" });
             let _ = write_dword("dashSidebarWidth", self.dash_sidebar_width.clamp(150, 280));
             let _ = write_str("lrcEnabled", if self.lrc_enabled { "true" } else { "false" });

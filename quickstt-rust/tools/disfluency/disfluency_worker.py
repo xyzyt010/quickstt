@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Persistent transcript-cleanup worker for QuickSTT.
 
-Two interchangeable backends, one JSON-lines protocol:
+Four interchangeable backends, one JSON-lines protocol:
 
 1. "fdt" — stillerman/fdt-disfluency-distilbert-66m-v5 (int8 ONNX, 66M).
    A deletion-only word tagger (KEEP / DELETE / KEEP_STRIP_COMMA /
@@ -19,6 +19,15 @@ Two interchangeable backends, one JSON-lines protocol:
    License: Apache-2.0 + naming clause — the name "S1-mini" by "Superwhisper"
    must be preserved wherever it is used (see the dashboard card / NOTICE).
 
+3. "smollm2" — HuggingFaceTB SmolLM2-360M-Instruct Q4_K_M GGUF via llama.cpp
+   (bartowski/SmolLM2-360M-Instruct-GGUF, Apache-2.0). Same job family as
+   S1-mini with ~60% of its size: fillers + self-corrections + digit
+   normalization, greedy/temperature-0 so output is repeatable.
+
+4. "gemma3" — Google Gemma-3-270m-it Q4_K_M GGUF via llama.cpp
+   (bartowski/google_gemma-3-270m-it-GGUF). Smallest instruction-tuned
+   Gemma 3; same cleanup prompt. Gemma terms of use (not Apache).
+
 Protocol (same shape as photon_worker.py):
 
     {"action": "load", "backend": "fdt", "model_dir": "<dir>"}
@@ -33,8 +42,9 @@ MEMORY POLICY: the caller sends `unload` right after every `clean` — the
 model is loaded, used for one turn, then dropped, so a cleanup model never
 sits resident in RAM between turns. Only this interpreter stays alive.
 
-Requires: pip install onnxruntime tokenizers      (fdt backend)
-          pip install onnxruntime-genai           (s1mini backend)
+Requires: pip install onnxruntime tokenizers           (fdt backend)
+          pip install onnxruntime-genai                (s1mini backend)
+          pip install llama-cpp-python                 (smollm2/gemma3)
 
 Model files (NOT bundled — the app's downloader fetches them on first use):
     <models>/disfluency/fdt-disfluency-distilbert-66m-v5/
@@ -42,6 +52,10 @@ Model files (NOT bundled — the app's downloader fetches them on first use):
     <models>/disfluency/s1-mini-int4/
         model.onnx  model.onnx.data  genai_config.json
         tokenizer.json  tokenizer_config.json  chat_template.jinja
+    <models>/disfluency/smollm2-360m-instruct-q4km/
+        SmolLM2-360M-Instruct-Q4_K_M.gguf
+    <models>/disfluency/gemma-3-270m-it-q4km/
+        google_gemma-3-270m-it-Q4_K_M.gguf
 """
 import argparse
 import gc
@@ -64,6 +78,32 @@ S1_CONTROL = "[Styling: {styling}] [Structure: {structure}] [Context: {context}]
 # The literal chat template the model was trained with, thinking disabled:
 # an EMPTY think block must open the assistant turn or Qwen3 emits nothing.
 S1_ASSISTANT_PREFIX = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+# Shared instruction for the llama.cpp backends (SmolLM2 / Gemma 3). At 270M-
+# 360M parameters instruction-following is shallow: one narrow task, few-shot
+# examples as REAL chat turns (inline "in:/out:" examples leak their prefix),
+# explicit "only the cleaned transcript" — nothing else.
+LLAMA_SYSTEM = (
+    "You clean speech-to-text transcripts. Remove filler words (um, uh, er), "
+    "repeated words and false starts. When the speaker corrects themselves, keep "
+    "only the final version. Write spoken numbers, times and dates in digits. "
+    "Never add, remove or rephrase anything else. Reply with only the cleaned "
+    "transcript."
+)
+LLAMA_EXAMPLES = [
+    (
+        "so um I think we should uh meet at nine no sorry ten thirty tomorrow",
+        "So I think we should meet at 10:30 tomorrow.",
+    ),
+    (
+        "I I mean the the file that I uh sent you yesterday",
+        "I mean the file that I sent you yesterday.",
+    ),
+    (
+        "call me at five no wait six thirty pm please",
+        "Call me at 6:30 pm please.",
+    ),
+]
 
 
 def log(msg: str) -> None:
@@ -146,6 +186,7 @@ class Backend:
         self.tokenizer = None    # fdt (HF tokenizers)
         self.model = None        # s1mini (ORT-genai)
         self.s1_tok = None       # s1mini
+        self.llm = None          # smollm2 / gemma3 (llama.cpp)
         self.load()
 
     def load(self) -> None:
@@ -153,6 +194,8 @@ class Backend:
             self._load_fdt()
         elif self.kind == "s1mini":
             self._load_s1()
+        elif self.kind in ("smollm2", "gemma3"):
+            self._load_llama()
         else:
             raise ValueError(f"unknown cleanup backend {self.kind!r}")
 
@@ -176,11 +219,33 @@ class Backend:
         self.s1_tok = og.Tokenizer(self.model)
         log("S1-mini INT4 loaded")
 
+    def _load_llama(self) -> None:
+        from llama_cpp import Llama
+
+        gguf = next(
+            (f for f in os.listdir(self.dir) if f.lower().endswith(".gguf")), None
+        )
+        if gguf is None:
+            raise FileNotFoundError(f"no .gguf in {self.dir}")
+        path = os.path.join(self.dir, gguf)
+        threads = max(2, min(8, (os.cpu_count() or 4)))
+        log(f"loading {self.kind} GGUF from {path} ({threads} threads) ...")
+        self.llm = Llama(
+            model_path=path,
+            n_ctx=2048,
+            n_batch=256,
+            n_threads=threads,
+            verbose=False,
+            use_mmap=True,
+        )
+        log(f"{self.kind} GGUF loaded")
+
     def unload(self) -> None:
         self.session = None
         self.tokenizer = None
         self.s1_tok = None
         self.model = None
+        self.llm = None
         gc.collect()
         log(f"{self.kind} model dropped (RAM released)")
 
@@ -188,7 +253,12 @@ class Backend:
         norm = " ".join(text.split())
         if not norm:
             return text
-        out = self._clean_fdt(norm) if self.kind == "fdt" else self._clean_s1(norm, styling, structure, context)
+        if self.kind == "fdt":
+            out = self._clean_fdt(norm)
+        elif self.kind == "s1mini":
+            out = self._clean_s1(norm, styling, structure, context)
+        else:
+            out = self._clean_llama(norm)
         out = apply_repairs(out)
         # Never blank a real turn: an all-filler input legitimately normalizes
         # to "", but so does a broken decode — keep the words if nothing is left.
@@ -262,6 +332,104 @@ class Backend:
         seq = gen.get_sequence(0)
         generated = self.s1_tok.decode(seq[len(tokens):])
         return generated.strip()
+
+    def _clean_llama(self, norm_text: str) -> str:
+        """SmolLM2 / Gemma 3 via llama.cpp — greedy, exact chat templates.
+
+        Examples are REAL turns (user->assistant) — inline "in:/out:" text was
+        echoed as output. Prompt shapes were tuned per model (see the probe):
+        SmolLM2 does best with the two core examples and a bare user turn;
+        Gemma 3 needs the third example plus a "Clean this transcript:" anchor
+        on the final turn. The prompt is tokenized here (special=True) so the
+        chat markers become their real special tokens and BOS handling is
+        explicit per model.
+        """
+        llm = self.llm
+        if self.kind == "smollm2":
+            parts = [f"<|im_start|>system\n{LLAMA_SYSTEM}<|im_end|>\n"]
+            for ex_in, ex_out in LLAMA_EXAMPLES[:2]:
+                parts.append(
+                    f"<|im_start|>user\n{ex_in}<|im_end|>\n"
+                    f"<|im_start|>assistant\n{ex_out}<|im_end|>\n"
+                )
+            parts.append(
+                f"<|im_start|>user\n{norm_text}<|im_end|>\n"
+                "<|im_start|>assistant\n"
+            )
+            prompt = "".join(parts)
+            stops = ["<|im_end|>", "<|im_start|>"]
+            add_bos = False
+        else:  # gemma3
+            parts = []
+            for i, (ex_in, ex_out) in enumerate(LLAMA_EXAMPLES):
+                user = f"{LLAMA_SYSTEM}\n\n{ex_in}" if i == 0 else ex_in
+                parts.append(
+                    f"<start_of_turn>user\n{user}<end_of_turn>\n"
+                    f"<start_of_turn>model\n{ex_out}<end_of_turn>\n"
+                )
+            parts.append(
+                f"<start_of_turn>user\nClean this transcript:\n"
+                f"{norm_text}<end_of_turn>\n<start_of_turn>model\n"
+            )
+            prompt = "".join(parts)
+            stops = ["<end_of_turn>"]
+            add_bos = True
+        tokens = llm.tokenize(prompt.encode("utf-8"), add_bos=add_bos, special=True)
+        budget = min(512, max(64, len(norm_text) // 2 + 64))
+        out = llm.create_completion(
+            prompt=tokens,
+            max_tokens=budget,
+            temperature=0.0,
+            top_k=1,
+            seed=0,
+            stop=stops,
+            echo=False,
+        )
+        text = (out["choices"][0].get("text") or "").strip()
+        # Belt and braces: some quants dribble the literal end marker through,
+        # and a confused tiny model may echo an "out:" style prefix.
+        for marker in ("<|im_end|>", "<|im_start|>", "<end_of_turn>", "<start_of_turn>"):
+            if marker in text:
+                text = text.split(marker, 1)[0]
+        text = text.strip().strip('"').strip()
+        for prefix in ("out:", "Out:", "OUT:", "output:", "Output:", "cleaned:"):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+        return self._sanitize_llama(norm_text, text)
+
+    @staticmethod
+    def _sanitize_llama(src: str, out: str) -> str:
+        """Reject chatbot garbage from the tiny llama backends.
+
+        270M–360M instruct models occasionally answer like a chatbot ("I'm
+        sorry…", "Okay, I understand") or pirate a previous example's answer.
+        An implausible answer must NEVER reach the paste: return "" and the
+        caller falls back to the raw transcript (same guarantee as a missing
+        model). Cleanup may delete fillers — never 45%+ of the words — and
+        may not inflate the text.
+        """
+        text = out.strip()
+        low = text.lower()
+        # Strip a boilerplate preamble line ("Okay, I've reviewed … here's …").
+        for boiler in ("okay, i've reviewed", "okay, i have reviewed", "here's the cleaned"):
+            if boiler in low:
+                parts = text.split("\n\n", 1)
+                if len(parts) == 2:
+                    text = parts[1].strip()
+                    low = text.lower()
+                break
+        refusals = (
+            "i'm sorry", "i am sorry", "i cannot", "i can't", "unable to",
+            "okay, i understand", "i understand,", "as an ai", "sorry, i",
+        )
+        if any(r in low for r in refusals):
+            return ""
+        if not text:
+            return ""
+        sw, ow = len(src.split()), len(text.split())
+        if sw and (ow < max(2, int(sw * 0.55)) or ow > int(sw * 1.6) + 8):
+            return ""
+        return text
 
 
 def main() -> int:
@@ -337,8 +505,18 @@ def main() -> int:
             else:
                 respond({"status": "error", "error": f"unknown action: {action!r}"})
         except ModuleNotFoundError as e:
-            # e.g. onnxruntime-genai missing: report the pip line, stay alive.
-            respond({"status": "error", "error": f"missing module {e} (pip install onnxruntime-genai)"})
+            # e.g. onnxruntime-genai or llama-cpp-python missing: report the
+            # right pip line, stay alive.
+            mod = str(getattr(e, "name", "") or e)
+            if "llama_cpp" in mod:
+                hint = "pip install llama-cpp-python"
+            elif "onnxruntime_genai" in mod:
+                hint = "pip install onnxruntime-genai"
+            elif "tokenizers" in mod:
+                hint = "pip install tokenizers"
+            else:
+                hint = "pip install onnxruntime"
+            respond({"status": "error", "error": f"missing module {e} ({hint})"})
         except Exception:  # noqa: BLE001
             respond({"status": "error", "error": traceback.format_exc(limit=3)})
     log("stdin closed, exiting")
