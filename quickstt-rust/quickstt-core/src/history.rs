@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Maximum retained turns (oldest pruned first, audio deleted with them).
-pub const HISTORY_CAP: usize = 100;
+/// 500 turns ≈ a few months of dictation (~40 MB of wavs): the cap only
+/// guards against unbounded growth, it is not a "recent turns" window.
+pub const HISTORY_CAP: usize = 500;
 
 const HISTORY_FILE: &str = "history.json";
 
@@ -22,14 +24,19 @@ const HISTORY_FILE: &str = "history.json";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryItem {
     /// Unique id (`"<epoch_ms>"`, suffixed on collision).
+    #[serde(default)]
     pub id: String,
     /// Creation time (UTC epoch millis).
+    #[serde(default)]
     pub created_ms: u64,
     /// Transcript text (trimmed).
+    #[serde(default)]
     pub text: String,
     /// Wav filename inside the history dir (`""` when no audio survived).
+    #[serde(default)]
     pub audio_file: String,
     /// Audio length in millis (0 when unknown / no audio).
+    #[serde(default)]
     pub duration_ms: u64,
 }
 
@@ -53,14 +60,29 @@ fn index_path() -> PathBuf {
     history_dir().join(HISTORY_FILE)
 }
 
-/// Load persisted history (newest first). Corrupt/missing index → empty.
+/// Load persisted history (newest first). Missing index → empty. An
+/// unreadable index (corruption or a future schema) is moved aside to
+/// `history.json.bad` instead of being silently replaced by the next
+/// push — silently skipping a file once cost every previous turn.
 pub fn load() -> Vec<HistoryItem> {
     let path = index_path();
     let data = match std::fs::read(&path) {
         Ok(d) => d,
         Err(_) => return Vec::new(),
     };
-    serde_json::from_slice(&data).unwrap_or_default()
+    match serde_json::from_slice(&data) {
+        Ok(items) => items,
+        Err(e) => {
+            let bak = path.with_extension("json.bad");
+            let _ = std::fs::rename(&path, &bak);
+            tracing::warn!(
+                "History index unreadable ({}); moved aside to {:?}",
+                e,
+                bak
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Persist the index (audio files are managed by push/delete).

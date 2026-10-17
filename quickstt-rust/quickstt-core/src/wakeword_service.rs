@@ -357,7 +357,13 @@ fn process_audio_chunk(
                 return true;
             } else if *transient_action == TRANSIENT_STOP {
                 // Parked background has no session to stop; the foreground
-                // detector covers STOP while recording.
+                // detector covers STOP while recording. Still log the
+                // detection so an idle clap under the Stop action is not
+                // invisible in the log.
+                info!(
+                    "Background acoustic {} detected — action is Stop (idle: nothing to stop)",
+                    kind.as_str()
+                );
             }
         }
     }

@@ -73,8 +73,16 @@ pub fn is_voiced(peak: f64, zcr: f64, spectral: f64) -> bool {
 #[derive(Default)]
 pub struct TransientArbiter {
     pending: Option<(TransientKind, f64, usize)>,
-    /// First confirmation chunk held while awaiting the second.
-    confirm1: Option<(TransientKind, f64)>,
+    /// First confirmation chunk held while awaiting the second. Carries the
+    /// onset width too, so a second hit at leg 2 can be told apart from a
+    /// widening tail.
+    confirm1: Option<(TransientKind, f64, usize)>,
+    /// Quick double-clap hold: the follow-up (or +160 ms) chunk stayed hot
+    /// but compact and unvoiced — the shape of a second hand hit, which the
+    /// 300 ms onset debounce makes invisible to the detector itself. The
+    /// chunk after the pair must collapse: it then fires; a sustained sound
+    /// keeps roaring and is vetoed.
+    pair: Option<(TransientKind, f64)>,
 }
 
 impl TransientArbiter {
@@ -82,12 +90,14 @@ impl TransientArbiter {
         Self {
             pending: None,
             confirm1: None,
+            pair: None,
         }
     }
 
     pub fn reset(&mut self) {
         self.pending = None;
         self.confirm1 = None;
+        self.pair = None;
     }
 
     /// Feed this chunk's detector result + peak + burst width + voicing.
@@ -95,6 +105,12 @@ impl TransientArbiter {
     /// `voiced` should come from [`is_voiced`] on the CURRENT chunk: a loud
     /// vowel frame at either leg vetoes (spoken syllables never confirm),
     /// while quiet tails skip the veto via the energy gate inside.
+    ///
+    /// Quick double-claps: a second hand hit lands 40–160 ms after the
+    /// first — inside the detector's 300 ms debounce, so it never shows up
+    /// as a new `detected`. The arbiter sees it as a hot-but-compact,
+    /// unvoiced follow-up chunk; that holds a `pair` and the next chunk
+    /// decides — collapse fires the pair, sustained energy vetoes it.
     pub fn update(
         &mut self,
         detected: Option<TransientKind>,
@@ -103,15 +119,46 @@ impl TransientArbiter {
         voiced: bool,
     ) -> Option<TransientKind> {
         let mut fire = None;
+        let mut pair_owned = false;
+        // Pair tail: the chunk after a held pair must collapse — two
+        // impulsive hits then silence is a deliberate gesture; a sustained
+        // sound keeps roaring and is vetoed. A voiced tail is speech.
+        if let Some((kind, pair_peak)) = self.pair.take() {
+            if voiced {
+                tracing::info!(
+                    "Clap pair vetoed (voiced tail — speech, not a gesture)"
+                );
+            } else if chunk_peak < pair_peak * 0.35 {
+                fire = Some(kind);
+            } else {
+                tracing::info!(
+                    "Clap pair vetoed (tail peak={:.0} vs pair peak={:.0})",
+                    chunk_peak,
+                    pair_peak,
+                );
+            }
+        }
         // Leg 2: the chunk after a passed leg 1 must have collapsed — and
         // must not be voiced (a vowel at +160ms is speech, not reverb).
-        if let Some((kind, onset_peak)) = self.confirm1.take() {
+        if let Some((kind, onset_peak, onset_width)) = self.confirm1.take() {
             if voiced {
                 tracing::info!(
                     "Clap onset vetoed at leg 2 (voiced tail — speech, not reverb)"
                 );
             } else if chunk_peak < onset_peak * 0.25 {
-                fire = Some(kind);
+                if fire.is_none() {
+                    fire = Some(kind);
+                }
+            } else if chunk_width <= onset_width.saturating_mul(3).max(1) {
+                // Compact and unvoiced but hot at +160 ms: the second hit
+                // of a slower double-clap (80–200 ms apart). Hold it; the
+                // next chunk's collapse decides.
+                self.pair = Some((kind, onset_peak.max(chunk_peak).max(1.0)));
+                pair_owned = true;
+                tracing::info!(
+                    "Clap pair held (second hit at leg 2, peak={:.0})",
+                    chunk_peak
+                );
             } else {
                 // Vetoed: energy sustained into +160ms (vowel after a voice
                 // onset) — not an isolated clap.
@@ -139,7 +186,18 @@ impl TransientArbiter {
                 };
                 let decayed_shape = chunk_width <= onset_width.saturating_mul(3).max(1);
                 if quiet_level && decayed_shape {
-                    self.confirm1 = Some((kind, onset_peak));
+                    self.confirm1 = Some((kind, onset_peak, onset_width));
+                } else if decayed_shape {
+                    // Still hot but compact and unvoiced: the second hand
+                    // hit of a quick double-clap (or a live-room reflection
+                    // of the first). Hold; the next chunk decides.
+                    self.pair = Some((kind, onset_peak.max(chunk_peak).max(1.0)));
+                    pair_owned = true;
+                    tracing::info!(
+                        "Clap pair held (hot compact follow-up, peak={:.0} vs onset={:.0})",
+                        chunk_peak,
+                        onset_peak
+                    );
                 } else {
                     // Vetoed: sustained sound — not an isolated clap.
                     tracing::info!(
@@ -153,7 +211,11 @@ impl TransientArbiter {
             }
         }
         if let Some(kind) = detected {
-            self.pending = Some((kind, chunk_peak.max(1.0), chunk_width));
+            // The detection that just became a held pair is that pair's
+            // second hit — re-arming it here would fire the gesture twice.
+            if !pair_owned {
+                self.pending = Some((kind, chunk_peak.max(1.0), chunk_width));
+            }
         }
         fire
     }
@@ -550,7 +612,9 @@ mod tests {
             Some(TransientKind::Clap),
             "isolated impulse must confirm"
         );
-        // Sustained: onset then still loud → vetoed at leg 1.
+        // Sustained: onset then still loud across BOTH follow-up chunks →
+        // held as a possible double-clap, then vetoed when the tail refuses
+        // to collapse (a gesture collapses; a sustained sound does not).
         assert_eq!(
             a.update(Some(TransientKind::Clap), 5000.0, 300, false),
             None
@@ -558,7 +622,12 @@ mod tests {
         assert_eq!(
             a.update(None, 4000.0, 250, false),
             None,
-            "sustained sound must veto the onset"
+            "hot compact follow-up must hold (possible second hit)"
+        );
+        assert_eq!(
+            a.update(None, 4200.0, 280, false),
+            None,
+            "sustained sound must veto the held pair"
         );
         // After a veto the arbiter is empty, not stuck.
         assert_eq!(a.update(None, 100.0, 10, false), None);
@@ -582,7 +651,7 @@ mod tests {
         assert_eq!(
             a.update(None, 8000.0, 500, false),
             None,
-            "sustained vowel at +160ms must veto"
+            "hot vowel at +160ms must not confirm"
         );
         // Real clap: wide burst, decayed narrow tail → fires.
         assert_eq!(
@@ -670,6 +739,66 @@ mod tests {
         assert!(
             !is_voiced(6000.0, 0.4, 12.0),
             "broadband burst must not count voiced"
+        );
+    }
+
+    #[test]
+    fn arbiter_confirms_quick_double_clap_at_leg1() {
+        // Live-log shape: the second hit of a quick double-clap lands in
+        // the follow-up chunk (peak ≈ first hit, compact, unvoiced) and is
+        // invisible to the detector (300 ms debounce) — the arbiter sees
+        // it, holds the pair, and the collapse fires it.
+        let mut a = TransientArbiter::new();
+        assert_eq!(
+            a.update(Some(TransientKind::Clap), 5264.0, 312, false),
+            None
+        );
+        assert_eq!(
+            a.update(None, 4916.0, 338, false),
+            None,
+            "hot compact follow-up must hold, not veto"
+        );
+        assert_eq!(
+            a.update(None, 400.0, 60, false),
+            Some(TransientKind::Clap),
+            "collapsed pair tail must confirm"
+        );
+        // Same pair shape but the tail keeps roaring — vetoed.
+        assert_eq!(
+            a.update(Some(TransientKind::Clap), 5264.0, 312, false),
+            None
+        );
+        assert_eq!(a.update(None, 4916.0, 338, false), None);
+        assert_eq!(
+            a.update(None, 4500.0, 300, false),
+            None,
+            "sustained pair tail must veto"
+        );
+    }
+
+    #[test]
+    fn arbiter_confirms_quick_double_clap_at_leg2() {
+        // Second hit 80–200 ms out: the gap chunk passes leg 1, the hit
+        // itself lands on leg 2. Held as a pair, fired on collapse.
+        let mut a = TransientArbiter::new();
+        assert_eq!(
+            a.update(Some(TransientKind::Clap), 3882.0, 300, false),
+            None
+        );
+        assert_eq!(
+            a.update(None, 1200.0, 200, false),
+            None,
+            "gap chunk passes leg 1"
+        );
+        assert_eq!(
+            a.update(None, 3651.0, 320, false),
+            None,
+            "second hit at leg 2 must hold, not veto"
+        );
+        assert_eq!(
+            a.update(None, 300.0, 40, false),
+            Some(TransientKind::Clap),
+            "collapsed pair tail must confirm"
         );
     }
 }

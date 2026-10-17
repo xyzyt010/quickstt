@@ -952,6 +952,14 @@ impl AppOrchestrator {
     pub fn new() -> QuickSttResult<(Self, mpsc::Receiver<OrchestratorCommand>)> {
         let settings = Settings::load()?;
         let mut app_state = AppState::new(settings);
+        // Restore the persisted dictation history. Without this the app
+        // started empty every session and the first new turn overwrote the
+        // whole index with just the new row set (all previous turns lost,
+        // their wavs orphaned in the history dir).
+        app_state.history = crate::history::load();
+        if !app_state.history.is_empty() {
+            app_state.history_seq = app_state.history_seq.saturating_add(1);
+        }
 
         let models_dir = wakeword_loader::default_models_dir();
         // Community heads only (customs quarantined — see discover_oww_heads).
