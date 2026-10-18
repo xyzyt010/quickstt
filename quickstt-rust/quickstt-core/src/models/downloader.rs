@@ -161,6 +161,7 @@ fn install_model(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<
         EngineFamily::SherpaOnnx => install_moonshine(desc, state),
         EngineFamily::Vosk => install_vosk(desc, state),
         EngineFamily::ParakeetRust => install_parakeet(desc, state),
+        EngineFamily::Phonon2 => install_phonon2(desc, state),
         EngineFamily::Nemotron => install_nemotron(desc, state),
         EngineFamily::Canary => install_canary(desc, state),
         EngineFamily::Photon => install_photon(desc, state),
@@ -533,6 +534,99 @@ fn install_parakeet(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Resu
                 count: PARAKEET_FILES.len(),
             },
         )?;
+    }
+    Ok(())
+}
+
+// ── Phonon-2 0.6B (Fermion Research, CC-BY-4.0) ──
+// Fermion's 164MB artifact is a custom five-value container only their
+// Python/torch runtime decodes; the ONNX route (bit-verified conversion,
+// byte-identical tokenizer) runs on the ONNX Runtime stack this app already
+// ships for Parakeet. Files follow the onnx-asr nemo-conformer-tdt layout
+// parakeet_engine/transcribe-rs consumes — identical artifacts on every OS
+// (CPU engine on Windows/Linux/macOS). Attribution chain per CC-BY-4.0:
+// NVIDIA Parakeet TDT 0.6B v3 → Fermion Research Phonon-2 → ONNX conversion
+// by Tiyuvta; NOTICE + license text are fetched alongside the weights.
+const PHONON2_ONNX_REV: &str = "12c9688bbc4fc52d23c1a66ca873fd3ac6ed4408";
+const PHONON2_ONNX_BASE: &str = "https://huggingface.co/tiyuvta/Phonon-2-ONNX/resolve";
+const PHONON2_UPSTREAM_REV: &str = "7e153e4054c0a10db6d47d6fff5c062d4c77c154";
+const PHONON2_UPSTREAM_BASE: &str =
+    "https://huggingface.co/FermionResearch/Phonon-2/resolve";
+/// (remote file, local file name, "complete" floor in bytes)
+const PHONON2_FILES: &[(&str, &str, u64)] = &[
+    ("encoder-model.int8.onnx", "encoder-model.int8.onnx", 500_000_000),
+    ("decoder_joint-model.int8.onnx", "decoder_joint-model.int8.onnx", 60_000_000),
+    // Upstream names the 128-bin mel front end `preprocessor-model.onnx`;
+    // the onnx-asr layout (and transcribe-rs) resolve it as `nemo128.onnx`.
+    ("preprocessor-model.onnx", "nemo128.onnx", 1_000_000),
+    ("vocab.txt", "vocab.txt", 80_000),
+];
+/// CC-BY-4.0 attribution ride-alongs (best-effort; the model is fully
+/// usable without them, so a fetch hiccup must not fail the install).
+const PHONON2_ATTRIBUTION: &[(&str, &str, u64)] = &[
+    ("NOTICE", "NOTICE-Phonon-2.txt", 2_000),
+    ("LICENSE-WEIGHTS-CC-BY-4.0.txt", "LICENSE-WEIGHTS-CC-BY-4.0.txt", 10_000),
+];
+
+fn install_phonon2(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<()> {
+    let models_root = catalog::models_root();
+    let model_dir = models_root.join(&desc.model_dir);
+    std::fs::create_dir_all(&model_dir)?;
+
+    // Same ONNX Runtime provisioning as the Parakeet installer on Linux
+    // (shared runtimes/parakeet/libonnxruntime.so, loaded via ORT_DYLIB_PATH).
+    #[cfg(target_os = "linux")]
+    install_onnxruntime_linux(state)?;
+
+    set_status(
+        state,
+        "Downloading Phonon-2 0.6B INT8 (Fermion Research, ~656MB)…".into(),
+    );
+    let total = PHONON2_FILES.len() + PHONON2_ATTRIBUTION.len();
+    for (i, &(remote, local, min_bytes)) in PHONON2_FILES.iter().enumerate() {
+        let dest = model_dir.join(local);
+        if dest
+            .metadata()
+            .map(|m| m.len() >= min_bytes)
+            .unwrap_or(false)
+        {
+            continue; // already complete
+        }
+        let url = format!("{}/{}/{}", PHONON2_ONNX_BASE, PHONON2_ONNX_REV, remote);
+        download_file(
+            &url,
+            &dest,
+            state,
+            &FileDl {
+                label: local,
+                index: i,
+                count: total,
+            },
+        )?;
+    }
+    for (j, &(remote, local, min_bytes)) in PHONON2_ATTRIBUTION.iter().enumerate() {
+        let dest = model_dir.join(local);
+        if dest
+            .metadata()
+            .map(|m| m.len() >= min_bytes)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let url = format!(
+            "{}/{}/{}",
+            PHONON2_UPSTREAM_BASE, PHONON2_UPSTREAM_REV, remote
+        );
+        let _ = download_file(
+            &url,
+            &dest,
+            state,
+            &FileDl {
+                label: local,
+                index: PHONON2_FILES.len() + j,
+                count: total,
+            },
+        );
     }
     Ok(())
 }

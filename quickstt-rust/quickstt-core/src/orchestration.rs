@@ -198,7 +198,9 @@ pub struct AppOrchestrator {
 /// started, so calling all four unconditionally is cheap and cannot strand
 /// a worker after a family change.
 fn unload_all_workers_except(active_family: &str) {
-    if active_family != "parakeet-rust" {
+    // Phonon-2 shares the parakeet_engine worker: keep it loaded when either
+    // family is the active one.
+    if active_family != "parakeet-rust" && active_family != "phonon2" {
         crate::models::engine::parakeet_unload();
     }
     if active_family != "nemotron" {

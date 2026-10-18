@@ -249,6 +249,9 @@ pub fn transcribe_with_language(
             transcribe_whisper_cpp(config, &model_dir, wav_path, descriptor, language)
         }
         EngineFamily::ParakeetRust => transcribe_parakeet_rust(config, &model_dir, wav_path),
+        // Phonon-2 rides the exact same ONNX transducer worker (the engine
+        // reloads whenever the model dir changes, so switching is seamless).
+        EngineFamily::Phonon2 => transcribe_parakeet_rust(config, &model_dir, wav_path),
         EngineFamily::Vosk => transcribe_vosk(config, &model_dir, wav_path),
         EngineFamily::Nemotron => transcribe_nemotron(config, &model_dir, wav_path, language),
         EngineFamily::Canary => transcribe_canary(config, &model_dir, wav_path, language),

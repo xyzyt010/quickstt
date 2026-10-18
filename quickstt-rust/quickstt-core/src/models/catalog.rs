@@ -37,6 +37,12 @@ pub enum EngineFamily {
     NemoTransducer,
     NemoCTC,
     ParakeetRust,
+    /// Fermion Research Phonon-2 0.6B (weights CC-BY-4.0; NVIDIA Parakeet
+    /// TDT 0.6B v3 lineage). English-only, CPU — runs on the same ONNX
+    /// transducer runtime (parakeet_engine/transcribe-rs) as ParakeetRust,
+    /// fed by the community ONNX export (pinned revision) in the onnx-asr
+    /// nemo-conformer-tdt layout.
+    Phonon2,
     Vosk,
     Nemotron,
     /// Handy transcribe.cpp GGUF worker (same JSON protocol as Nemotron):
@@ -63,6 +69,7 @@ impl EngineFamily {
             EngineFamily::NemoTransducer => "nemo-transducer",
             EngineFamily::NemoCTC => "nemo-ctc",
             EngineFamily::ParakeetRust => "parakeet-rust",
+            EngineFamily::Phonon2 => "phonon2",
             EngineFamily::Vosk => "vosk",
             EngineFamily::Nemotron => "nemotron",
             EngineFamily::Canary => "canary",
@@ -111,6 +118,23 @@ pub fn all_descriptors() -> Vec<ModelDescriptor> {
             accuracy: 90,
             speed: 75,
             blurb: "Fast, accurate live English transcription".into(),
+            gpu_only: false,
+        },
+        // Phonon-2 — Fermion Research (weights CC-BY-4.0; attribution chain:
+        // NVIDIA Parakeet TDT 0.6B v3 → Fermion Research Phonon-2 → community
+        // ONNX conversion by Tiyuvta). 0.6B, 5.21% WER on seven public test
+        // sets; the ONNX int8 export runs on the SAME parakeet_engine
+        // runtime as the Parakeet card above (Windows/Linux CPU, identical
+        // files on every OS). NOT downloaded by default — user-initiated.
+        ModelDescriptor {
+            name: "Phonon-2 0.6B INT8 (ONNX/Rust)".into(),
+            engine_family: EngineFamily::Phonon2,
+            model_dir: "phonon2/phonon-2-0.6b-int8".into(),
+            size_mb: 688,
+            widget_selectable: true,
+            accuracy: 92,
+            speed: 74,
+            blurb: "Fermion Research Phonon-2 — 5.21% WER, CC-BY-4.0".into(),
             gpu_only: false,
         },
         ModelDescriptor {
@@ -345,6 +369,21 @@ pub fn is_model_installed(desc: &ModelDescriptor) -> bool {
             }
             false
         }
+        EngineFamily::Phonon2 => {
+            // Full quartet, non-truncated: a partial download must show
+            // "[Not Installed]" so the card offers a clean re-download.
+            let complete = |name: &str, min: u64| {
+                model_path
+                    .join(name)
+                    .metadata()
+                    .map(|m| m.len() >= min)
+                    .unwrap_or(false)
+            };
+            complete("encoder-model.int8.onnx", 500_000_000)
+                && complete("decoder_joint-model.int8.onnx", 60_000_000)
+                && complete("nemo128.onnx", 1_000_000)
+                && complete("vocab.txt", 80_000)
+        }
         EngineFamily::Canary => {
             // Handy GGUF, CPU Q5_K_M default (spec). Any canary GGUF counts.
             if model_path.is_dir() {
@@ -462,6 +501,7 @@ pub fn supported_languages(desc: &ModelDescriptor) -> Vec<String> {
     if matches!(
         desc.engine_family,
         EngineFamily::ParakeetRust
+            | EngineFamily::Phonon2
             | EngineFamily::Vosk
             | EngineFamily::SherpaOnnx
             | EngineFamily::NemoCTC
@@ -487,9 +527,10 @@ pub fn supported_languages(desc: &ModelDescriptor) -> Vec<String> {
 }
 
 /// Hardware-aware model list: discrete-GPU machines see the two Whisper GPU
-/// models (Tiny + Large Turbo) plus Canary-Qwen 2.5B (NeMo, NVIDIA-only);
-/// CPU/iGPU machines see every non-gpu_only model. GPU-only models are
-/// hidden on CPU machines so nobody downloads gigabytes they cannot run.
+/// models (Tiny + Large Turbo) plus Canary-Qwen 2.5B (NeMo, NVIDIA-only)
+/// and Phonon-2 (CPU engine, but still selectable on GPU boxes); CPU/iGPU
+/// machines see every non-gpu_only model. GPU-only models are hidden on CPU
+/// machines so nobody downloads gigabytes they cannot run.
 pub fn models_for_hardware(
     has_discrete_gpu: bool,
 ) -> Vec<ModelDescriptor> {
@@ -497,10 +538,13 @@ pub fn models_for_hardware(
         .into_iter()
         .filter(|d| {
             if has_discrete_gpu {
-                // GPU path: Whisper Tiny + Large Turbo + Canary-Qwen only.
+                // GPU path: Whisper Tiny + Large Turbo + Canary-Qwen, plus
+                // Phonon-2 (CPU engine; most accurate compact English model
+                // and stays selectable on GPU boxes).
                 d.name.contains("Whisper Tiny EN Q5_1")
                     || d.name.contains("Whisper Large v3 Turbo")
                     || d.name.contains("Canary-Qwen")
+                    || d.name.contains("Phonon-2")
             } else {
                 !d.gpu_only
             }
@@ -682,5 +726,20 @@ mod tests {
             .collect();
         assert!(!cpu.iter().any(|n| n.contains("Canary-Qwen")));
         assert!(!cpu.iter().any(|n| n.contains("Large v3 Turbo")));
+    }
+
+    #[test]
+    fn phonon2_registered_and_visible_everywhere() {
+        let p = all_descriptors()
+            .into_iter()
+            .find(|d| matches!(d.engine_family, EngineFamily::Phonon2))
+            .expect("Phonon2 descriptor registered");
+        assert!(!p.gpu_only, "Phonon-2 runs on CPU");
+        assert_eq!(supported_languages(&p), vec!["English".to_string()]);
+        assert_eq!(p.engine_family.display_name(), "phonon2");
+        // Selectable on CPU boxes AND on discrete-GPU boxes (the machine
+        // class this model was primarily added for).
+        assert!(models_for_hardware(false).iter().any(|d| d.name == p.name));
+        assert!(models_for_hardware(true).iter().any(|d| d.name == p.name));
     }
 }

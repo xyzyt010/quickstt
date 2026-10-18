@@ -7,7 +7,12 @@ edition = "2024"
 transcribe-rs = { version = "0.3.3", features = ["onnx"] }
 # Load onnxruntime at runtime (ORT_DYLIB_PATH) instead of linking ort's
 # prebuilt static lib, which requires a newer glibc than Mint 21 / Ubuntu 22.04.
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+#
+# Pin EXACTLY 2.0.0-rc.12: transcribe-rs 0.3.12 calls the no-argument
+# `Session::builder()`, and ort 2.0.0-rc.13+ changed it to
+# `Session::builder(&Environment)`. A caret range lets Cargo resolve rc.14,
+# which breaks the build (E0061) — this is what failed CI for alpha.13/alpha.14.
+ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -250,10 +250,11 @@ jobs:
           ## QuickSTT ${VER} — Ubuntu/Debian amd64 (Mint 21/22)
 
           Floating offline voice typing pill — wakeword, VAD, tray, global hotkeys.
-          Models download in-app: Vosk small EN 50M · Parakeet TDT 0.6B v3 INT8 · Nemotron 3.5 ASR Streaming 0.6B Q8_0 (716MB, transcribe.cpp).
+          Models download in-app: Vosk small EN 50M · Parakeet TDT 0.6B v3 INT8 · Phonon-2 0.6B INT8 (Fermion Research, CC-BY-4.0) · Nemotron 3.5 ASR Streaming 0.6B Q8_0 (716MB, transcribe.cpp).
           Full C++ Qt widget app included — run \`quickstt-app\` for the classic Dashboard + Pill UI.
 
           ### What's new in this release (widget app)
+          - New model: **Phonon-2 0.6B INT8** (Fermion Research, CC-BY-4.0) — 5.21% WER compact English model running on the same ONNX Runtime stack as Parakeet (Windows/Linux), with NOTICE + license shipped into the model dir.
           - Fixed backend crash-loop on Linux: libvosk.so now auto-provisioned with Vosk models; missing runtime no longer kills stt_service.
           - Models install to ~/.local/share/QuickSTT/models (shared with the Rust app + native service) — no more read-only /usr/lib failures.
           - Real SVG mic/app icons everywhere (pill, tray at all DPI sizes) — no more blue-dot fallback.

@@ -1023,6 +1023,29 @@ fn spawn_ipc_listener(
                             log_line("ipc: stop listening");
                         }
                     }
+                    // Remote model download (headless install / scripting):
+                    // "DOWNLOAD <substring>" matches a catalog entry by name.
+                    c if c.starts_with("DOWNLOAD ") => {
+                        let want = c["DOWNLOAD ".len()..].trim().to_lowercase();
+                        let found = state.lock().ok().and_then(|s| {
+                            s.model_entries
+                                .iter()
+                                .position(|e| {
+                                    !want.is_empty() && e.name.to_lowercase().contains(&want)
+                                })
+                                .map(|i| (i, s.model_entries[i].name.clone()))
+                        });
+                        match found {
+                            Some((i, name)) => {
+                                let _ =
+                                    tx_cmd.try_send(OrchestratorCommand::DownloadModel(i));
+                                log_line(&format!("ipc: download model #{i} ({name})"));
+                            }
+                            None => log_line(&format!(
+                                "ipc: DOWNLOAD — no catalog model matches {want:?}"
+                            )),
+                        }
+                    }
                     c if c.starts_with("PRESS")
                         || c.starts_with("MOVE")
                         || c.starts_with("RELEASE")
@@ -2285,8 +2308,17 @@ fn main() -> QuickSttResult<()> {
     // Dashboard history playback bookkeeping: which row is playing, whose ⋮
     // menu is open, and whether the row model must be rebuilt this tick.
     let history_play_idx: Arc<Mutex<i32>> = Arc::new(Mutex::new(-1));
-    let history_menu_idx: Arc<Mutex<i32>> = Arc::new(Mutex::new(-1));
+    let history_menu_idx: Arc<Mutex<i32>> = Arc::new(Mutex::new(
+        // Regression-test hook (mirrors the MENUROW IPC used for the pill's
+        // row menu): with QUICKSTT_DEMO_HISTORY_MENU set, the first history
+        // row's ⋮ menu opens at startup so UI capture tools can see it.
+        if std::env::var_os("QUICKSTT_DEMO_HISTORY_MENU").is_some() { 0 } else { -1 },
+    ));
     let history_dirty: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    // Row whose copy button is flashing its green ✓ (row index) and when the
+    // copy happened; the tick clears it ~1.2s later so the row falls back.
+    let history_copied: Arc<Mutex<(i32, std::time::Instant)>> =
+        Arc::new(Mutex::new((-1, std::time::Instant::now())));
     // Last finished turn (trimmed): "Paste last transcript" types this.
     let last_turn: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     // Smooth footprint morph: window size+pos lerp over ~240ms so expand /
@@ -3874,9 +3906,16 @@ fn dock_hop(
     let cleanup_result_timer = cleanup_result.clone();
     // Dashboard history row sync: rebuilt on demand (new turn / user action)
     // and at 10Hz while audio is playing so the seek bar and clock advance.
+    // The rows live in ONE persistent VecModel: changed rows are patched with
+    // set_row_data, so the 10Hz playback tick never recreates the list —
+    // scroll position, hover state and the open ⋮ menu all survive.
     let hist_play_idx = history_play_idx.clone();
     let hist_menu_idx = history_menu_idx.clone();
+    let hist_copied = history_copied.clone();
     let hist_dirty = history_dirty.clone();
+    let hist_vec_model: std::rc::Rc<VecModel<HistRow>> = std::rc::Rc::new(VecModel::default());
+    dashboard.set_history_items(ModelRc::from(hist_vec_model.clone()));
+    let hist_vec_tick = hist_vec_model.clone();
     let mut hist_model: Vec<HistRow> = Vec::new();
     let mut hist_last_seq: u64 = u64::MAX;
     let mut hist_last_push: std::time::Instant = std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -6532,6 +6571,8 @@ fn dock_hop(
     }
     {
         let state = state.clone();
+        let copied = history_copied.clone();
+        let dirty = history_dirty.clone();
         dashboard.on_history_copy(move |i| {
             if let Ok(s) = state.lock() {
                 if let Some(item) = s.history.get(i as usize) {
@@ -6542,6 +6583,11 @@ fn dock_hop(
                         i,
                         text.len()
                     ));
+                    if ok {
+                        // Flash the row's copy button green ✓ for a beat.
+                        *mlock(&copied) = (i, std::time::Instant::now());
+                        *mlock(&dirty) = true;
+                    }
                 }
             }
         });
@@ -6899,6 +6945,14 @@ fn dock_hop(
                 *mlock(&hist_play_idx) = -1;
                 *mlock(&hist_dirty) = true;
             }
+            // The green ✓ flash on a row's copy button expires after ~1.2s.
+            {
+                let mut cg = mlock(&hist_copied);
+                if cg.0 >= 0 && cg.1.elapsed() >= std::time::Duration::from_millis(1200) {
+                    *cg = (-1, std::time::Instant::now());
+                    *mlock(&hist_dirty) = true;
+                }
+            }
             let since_push = hist_last_push.elapsed();
             let need_hist = *mlock(&hist_dirty)
                 || s.history_seq != hist_last_seq
@@ -6909,6 +6963,11 @@ fn dock_hop(
                 *mlock(&hist_dirty) = false;
                 let play_i = *mlock(&hist_play_idx);
                 let menu_i = *mlock(&hist_menu_idx);
+                let copied_i = mlock(&hist_copied).0;
+                // The menu overlay in the UI is driven by this property: the
+                // row mirrors it for instant open/close, and Rust closes it
+                // (e.g. after download/delete) through the same channel.
+                dashboard.set_history_menu_idx(menu_i);
                 let pos_s = if playing_now {
                     history_player::position_s()
                 } else {
@@ -6940,6 +6999,7 @@ fn dock_hop(
                             has_audio: !it.audio_file.is_empty(),
                             menu_open: menu_i == i as i32,
                             playing: is_playing,
+                            copied: copied_i == i as i32,
                             progress: if dur_s > 0.0 {
                                 (shown / dur_s).clamp(0.0, 1.0)
                             } else {
@@ -6948,19 +7008,31 @@ fn dock_hop(
                         }
                     })
                     .collect();
-                if rows.len() != hist_model.len()
-                    || rows.iter().zip(hist_model.iter()).any(|(a, b)| {
-                        a.text != b.text
-                            || a.playing != b.playing
-                            || a.menu_open != b.menu_open
-                            || (a.progress - b.progress).abs() > 0.004
-                            || a.pos != b.pos
-                    })
-                {
+                // Patch only the rows that actually changed: the persistent
+                // VecModel keeps scroll position, hover state and the open ⋮
+                // menu alive while a clip plays at 10Hz (a full model swap
+                // would recreate all rows and flicker every hover).
+                fn hist_row_changed(a: &HistRow, b: &HistRow) -> bool {
+                    a.when != b.when
+                        || a.dur != b.dur
+                        || a.pos != b.pos
+                        || a.text != b.text
+                        || a.has_audio != b.has_audio
+                        || a.menu_open != b.menu_open
+                        || a.playing != b.playing
+                        || a.copied != b.copied
+                        || (a.progress - b.progress).abs() > 0.004
+                }
+                if rows.len() != hist_model.len() {
                     hist_model = rows;
-                    dashboard.set_history_items(ModelRc::new(VecModel::from_slice(
-                        hist_model.as_slice(),
-                    )));
+                    hist_vec_tick.set_vec(hist_model.clone());
+                } else {
+                    for (i, r) in rows.iter().enumerate() {
+                        if hist_row_changed(&hist_model[i], r) {
+                            hist_vec_tick.set_row_data(i, r.clone());
+                            hist_model[i] = r.clone();
+                        }
+                    }
                 }
             }
             dashboard.set_show_waveform(s.settings.show_waveform);
