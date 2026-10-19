@@ -4,18 +4,34 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-transcribe-rs = { version = "0.3.3", features = ["onnx"] }
-# Load onnxruntime at runtime (ORT_DYLIB_PATH) instead of linking ort's
-# prebuilt static lib, which requires a newer glibc than Mint 21 / Ubuntu 22.04.
-#
-# Pin EXACTLY 2.0.0-rc.12: transcribe-rs 0.3.12 calls the no-argument
-# `Session::builder()`, and ort 2.0.0-rc.13+ changed it to
-# `Session::builder(&Environment)`. A caret range lets Cargo resolve rc.14,
-# which breaks the build (E0061) — this is what failed CI for alpha.13/alpha.14.
-ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
 hound = "3.5"
 base64 = "0.22"
+
+# Pin EXACTLY 2.0.0-rc.12: transcribe-rs 0.3.12 calls the no-argument
+# `Session::builder()`, and ort 2.0.0-rc.13+ changed it to
+# `Session::builder(&Environment)`. A caret range lets Cargo resolve rc.14,
+# which breaks the build (E0061) — this is what failed CI for alpha.13/alpha.14.
+#
+# Windows: statically link the ort prebuilt runtime with the DirectML EP —
+# this is what the alpha.13 worker shipped (21.8 MB exe, no onnxruntime.dll
+# needed at runtime, DirectML.dll loaded from the worker's own directory).
+# Do NOT use `load-dynamic` on Windows: it makes the worker load whatever
+# onnxruntime.dll it finds first (on this machine: the Windows inbox ORT
+# 1.17 in System32), and ort 2.0.0-rc.12 hangs during session creation
+# against that older runtime. See main.rs for the explicit DirectML
+# accelerator selection.
+[target.'cfg(windows)'.dependencies]
+transcribe-rs = { version = "0.3.3", features = ["onnx", "ort-directml"] }
+ort = { version = "=2.0.0-rc.12" }
+
+# Linux: load onnxruntime at runtime (ORT_DYLIB_PATH) instead of linking
+# ort's prebuilt static lib, which requires a newer glibc than Mint 21 /
+# Ubuntu 22.04. The app provisions the official onnxruntime shared object
+# (see quickstt-core downloader) and points us at it via ORT_DYLIB_PATH.
+[target.'cfg(not(windows))'.dependencies]
+transcribe-rs = { version = "0.3.3", features = ["onnx"] }
+ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }

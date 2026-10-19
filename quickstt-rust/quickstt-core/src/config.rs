@@ -73,7 +73,7 @@ pub const DEFAULT_SHOW_WAVEFORM: bool = true;
 pub const DEFAULT_WAVEFORM_SENSITIVITY: u32 = 50;
 
 /// Default boolean settings
-pub const DEFAULT_AUTO_OFFLOAD: bool = false;
+pub const DEFAULT_AUTO_OFFLOAD: bool = true;
 pub const DEFAULT_AUTO_MODEL_LOAD: bool = true;
 pub const DEFAULT_STARTUP_ENABLED: bool = false;
 pub const DEFAULT_STARTUP_BACKGROUND: bool = false;

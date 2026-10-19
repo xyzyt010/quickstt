@@ -162,6 +162,7 @@ fn install_model(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<
         EngineFamily::Vosk => install_vosk(desc, state),
         EngineFamily::ParakeetRust => install_parakeet(desc, state),
         EngineFamily::Phonon2 => install_phonon2(desc, state),
+        EngineFamily::SenseVoice => install_sensevoice(desc, state),
         EngineFamily::Nemotron => install_nemotron(desc, state),
         EngineFamily::Canary => install_canary(desc, state),
         EngineFamily::Photon => install_photon(desc, state),
@@ -194,7 +195,275 @@ pub struct FileDl<'a> {
 /// Stream a URL to a file with byte-accurate progress + live MB/s.
 /// State writes are throttled (≈5Hz, every percent step, and completion).
 /// `pub(crate)`: reused by the disfluency tagger fetch.
+///
+/// Large files use N parallel ranged connections — this source (the
+/// HuggingFace CDN) throttles per connection (measured ~0.3 MB/s single vs
+/// ~7 MB/s over four on the same link) — anything else falls back to a plain
+/// single stream.
 pub(crate) fn download_file(url: &str, dest: &Path, state: &SharedState, file: &FileDl) -> anyhow::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(total) = probe_content_total(url) {
+        let workers: usize = if total >= 64 * 1_048_576 {
+            6
+        } else if total >= 8 * 1_048_576 {
+            4
+        } else {
+            1
+        };
+        if workers > 1 {
+            match download_file_parallel(url, dest, state, file, total, workers) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    warn!("parallel download failed ({}), falling back to single stream", e);
+                }
+            }
+        }
+    }
+    download_file_single(url, dest, state, file)
+}
+
+/// Total size when the source honors ranged requests (`Range: bytes=0-0` →
+/// 206 + `Content-Range: bytes 0-0/TOTAL`). `None` → single stream only.
+fn probe_content_total(url: &str) -> Option<u64> {
+    let resp = ureq::get(url)
+        .set("Range", "bytes=0-0")
+        .timeout(std::time::Duration::from_secs(60))
+        .call()
+        .ok()?;
+    if resp.status() != 206 {
+        return None;
+    }
+    let total = resp
+        .header("Content-Range")?
+        .rsplit('/')
+        .next()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    (total > 0).then_some(total)
+}
+
+/// One ranged-chunk fetch with retries, writing at `start` through a file
+/// handle owned by the calling worker; bumps `received` per read so the
+/// monitor shows live speed. (A retried chunk re-counts its partial bytes —
+/// rare, and the display clamps.)
+fn fetch_range(
+    url: &str,
+    start: u64,
+    end_incl: u64,
+    out: &mut std::fs::File,
+    received: &std::sync::atomic::AtomicU64,
+) -> anyhow::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..3u64 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(700 * attempt));
+        }
+        let resp = match ureq::get(url)
+            .set("Range", &format!("bytes={start}-{end_incl}"))
+            .timeout(Duration::from_secs(600))
+            .call()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some(anyhow::Error::new(e).context("range request"));
+                continue;
+            }
+        };
+        if resp.status() != 206 {
+            anyhow::bail!("range request rejected (HTTP {})", resp.status());
+        }
+        out.seek(SeekFrom::Start(start))?;
+        let mut reader = resp.into_reader();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n])?;
+            received.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        return Ok(());
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("range request failed")))
+}
+
+/// N work-stealing chunk workers → one preallocated file; this thread is the
+/// progress monitor (aggregate MB/s + percent). The file is preallocated to
+/// its final size so every worker writes straight at its offset — no
+/// assembly pass, and a crash leaves an obvious oversized-but-partial file.
+fn download_file_parallel(
+    url: &str,
+    dest: &Path,
+    state: &SharedState,
+    file: &FileDl,
+    total: u64,
+    workers: usize,
+) -> anyhow::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    let model = state
+        .lock()
+        .map(|s| s.download_name.clone())
+        .unwrap_or_default();
+    {
+        let f = std::fs::File::create(dest)?;
+        f.set_len(total)?;
+    }
+    // Pre-seed totals so the dashboard shows "0.0 / N MB" immediately.
+    set_dl_progress(
+        state,
+        ((file.index as f64 / file.count.max(1) as f64) * 100.0) as u8,
+        format!("Downloading {} — {}…", model, file.label),
+        0,
+        total,
+        0.0,
+        file.label,
+    );
+
+    let received = Arc::new(AtomicU64::new(0));
+    let next = Arc::new(AtomicU64::new(0));
+    let fail: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
+    // ~file/4 per worker, clamped 4-24 MB: a slow connection never strands
+    // the tail, a fast one amortizes request overhead.
+    let chunk = ((total / (workers as u64 * 4)).clamp(4 * 1_048_576, 24 * 1_048_576)).min(total);
+
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let url = url.to_string();
+        let dest = dest.to_path_buf();
+        let received = received.clone();
+        let next = next.clone();
+        let fail = fail.clone();
+        handles.push(
+            std::thread::Builder::new()
+                .name("dl-chunk".into())
+                .spawn(move || {
+                    let mut out = match std::fs::OpenOptions::new().write(true).open(&dest) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            if let Ok(mut g) = fail.lock() {
+                                if g.is_none() {
+                                    *g = Some(anyhow::Error::new(e).context("open dest"));
+                                }
+                            }
+                            return;
+                        }
+                    };
+                    loop {
+                        if fail.lock().map(|g| g.is_some()).unwrap_or(true) {
+                            return; // Another worker failed: stop early.
+                        }
+                        let start = next.fetch_add(chunk, Ordering::Relaxed);
+                        if start >= total {
+                            return;
+                        }
+                        let end = (start + chunk - 1).min(total - 1);
+                        if let Err(e) = fetch_range(&url, start, end, &mut out, &received) {
+                            if let Ok(mut g) = fail.lock() {
+                                if g.is_none() {
+                                    *g = Some(e);
+                                }
+                            }
+                            return;
+                        }
+                    }
+                })
+                .expect("spawn dl chunk"),
+        );
+    }
+
+    // Progress monitor: aggregate MB/s + percent while workers run.
+    let t0 = Instant::now();
+    let mut last_emit = Instant::now() - Duration::from_secs(10);
+    let mut last_bytes = 0u64;
+    let mut last_pct = 255u8;
+    let mut ema_bps = 0.0f64;
+    loop {
+        let done = handles.iter().all(|h| h.is_finished());
+        let now = Instant::now();
+        let got = received.load(Ordering::Relaxed);
+        let file_frac = (got as f64 / total as f64).min(1.0);
+        let overall =
+            (((file.index as f64 + file_frac) / file.count.max(1) as f64) * 100.0) as u8;
+        if now.duration_since(last_emit) >= Duration::from_millis(200)
+            || overall != last_pct
+            || done
+        {
+            let dt = now.duration_since(last_emit).as_secs_f64().max(1e-3);
+            let inst = got.saturating_sub(last_bytes) as f64 / dt;
+            ema_bps = if ema_bps <= 0.0 {
+                inst
+            } else {
+                0.35 * inst + 0.65 * ema_bps
+            };
+            let avg = got as f64 / t0.elapsed().as_secs_f64().max(1e-3);
+            let bps = (0.7 * ema_bps + 0.3 * avg).max(0.0);
+            set_dl_progress(
+                state,
+                overall.min(100),
+                format!(
+                    "Downloading {} — {} • {} / {} • {}",
+                    model,
+                    file.label,
+                    fmt_mb(got),
+                    fmt_mb(total),
+                    fmt_speed(bps)
+                ),
+                got,
+                total,
+                bps,
+                file.label,
+            );
+            last_emit = now;
+            last_bytes = got;
+            last_pct = overall;
+        }
+        if done {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    if let Some(e) = fail.lock().ok().and_then(|mut g| g.take()) {
+        return Err(e);
+    }
+    let got = received.load(Ordering::Relaxed);
+    if got < total {
+        anyhow::bail!("incomplete download: {got} of {total} bytes");
+    }
+    // Final exact 100% of this file's share.
+    let overall = (((file.index as f64 + 1.0) / file.count.max(1) as f64) * 100.0) as u8;
+    let avg = got as f64 / t0.elapsed().as_secs_f64().max(1e-3);
+    set_dl_progress(
+        state,
+        overall.min(100),
+        format!(
+            "Downloading {} — {} • {} • {}",
+            model,
+            file.label,
+            fmt_mb(got),
+            fmt_speed(avg)
+        ),
+        got,
+        total.max(got),
+        avg,
+        file.label,
+    );
+    Ok(())
+}
+
+/// Plain single-connection stream (the pre-parallel path; also the fallback).
+fn download_file_single(url: &str, dest: &Path, state: &SharedState, file: &FileDl) -> anyhow::Result<()> {
     use std::time::{Duration, Instant};
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -627,6 +896,65 @@ fn install_phonon2(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Resul
                 count: total,
             },
         );
+    }
+    Ok(())
+}
+
+// SenseVoice Small int8 ONNX — sherpa-onnx export of FunAudioLLM/SenseVoice
+// (pinned revision; byte-for-byte identical to the reference install already
+// used for validation: model.int8.onnx 239,233,841 B, tokens.txt 315,894 B).
+const SENSEVOICE_REPO: &str =
+    "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17";
+const SENSEVOICE_REV: &str = "2365baeacb507f821a0c8120fcee3d484dba7a07";
+const SENSEVOICE_FILES: &[(&str, u64)] = &[
+    ("model.int8.onnx", 230_000_000),
+    ("tokens.txt", 300_000),
+    ("LICENSE", 40),
+];
+
+fn install_sensevoice(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<()> {
+    let models_root = catalog::models_root();
+    let model_dir = models_root.join(&desc.model_dir);
+    std::fs::create_dir_all(&model_dir)?;
+
+    // Same ONNX Runtime provisioning as Parakeet/Phonon on Linux (shared
+    // runtimes/parakeet/libonnxruntime.so via ORT_DYLIB_PATH). Windows and
+    // Android resolve their onnxruntime without this.
+    #[cfg(target_os = "linux")]
+    install_onnxruntime_linux(state)?;
+
+    set_status(
+        state,
+        "Downloading SenseVoice Small Multilingual INT8 (~229MB)…".into(),
+    );
+    for (i, &(remote, min_bytes)) in SENSEVOICE_FILES.iter().enumerate() {
+        let dest = model_dir.join(remote);
+        if dest
+            .metadata()
+            .map(|m| m.len() >= min_bytes)
+            .unwrap_or(false)
+        {
+            continue; // already complete
+        }
+        let url = format!(
+            "https://huggingface.co/{}/resolve/{}/{}",
+            SENSEVOICE_REPO, SENSEVOICE_REV, remote
+        );
+        // Weights + token table are required; the license stub is
+        // attribution-only (best-effort, like Phonon's).
+        let result = download_file(
+            &url,
+            &dest,
+            state,
+            &FileDl {
+                label: remote,
+                index: i,
+                count: SENSEVOICE_FILES.len(),
+            },
+        );
+        if remote != "LICENSE" {
+            result?;
+        }
     }
     Ok(())
 }

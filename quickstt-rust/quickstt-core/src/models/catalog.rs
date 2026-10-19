@@ -43,6 +43,12 @@ pub enum EngineFamily {
     /// fed by the community ONNX export (pinned revision) in the onnx-asr
     /// nemo-conformer-tdt layout.
     Phonon2,
+    /// FunAudioLLM SenseVoice Small (INT8 CTC; zh/en/ja/ko/yue with auto
+    /// language detect). Rides the same persistent `parakeet_engine` worker
+    /// as Parakeet/Phonon (the load request's `engine` field picks the
+    /// transcribe-rs loader) — OS-identical files: Windows/Linux today,
+    /// Android when the worker ports.
+    SenseVoice,
     Vosk,
     Nemotron,
     /// Handy transcribe.cpp GGUF worker (same JSON protocol as Nemotron):
@@ -70,6 +76,7 @@ impl EngineFamily {
             EngineFamily::NemoCTC => "nemo-ctc",
             EngineFamily::ParakeetRust => "parakeet-rust",
             EngineFamily::Phonon2 => "phonon2",
+            EngineFamily::SenseVoice => "sensevoice",
             EngineFamily::Vosk => "vosk",
             EngineFamily::Nemotron => "nemotron",
             EngineFamily::Canary => "canary",
@@ -135,6 +142,21 @@ pub fn all_descriptors() -> Vec<ModelDescriptor> {
             accuracy: 92,
             speed: 74,
             blurb: "Fermion Research Phonon-2 — 5.21% WER, CC-BY-4.0".into(),
+            gpu_only: false,
+        },
+        // SenseVoice Small — FunAudioLLM/Xiaomi via the sherpa-onnx int8 ONNX
+        // export (Apache-2.0 chain via FunASR). 5 languages with in-model
+        // auto language detect; a single CTC forward pass makes it the fastest
+        // multilingual option here. NOT downloaded by default — user-initiated.
+        ModelDescriptor {
+            name: "SenseVoice Small Multilingual INT8 (ONNX/Rust)".into(),
+            engine_family: EngineFamily::SenseVoice,
+            model_dir: "sensevoice/small_multilingual".into(),
+            size_mb: 229,
+            widget_selectable: true,
+            accuracy: 84,
+            speed: 90,
+            blurb: "5-language CTC (zh/en/ja/ko/yue) with auto language detect".into(),
             gpu_only: false,
         },
         ModelDescriptor {
@@ -384,6 +406,27 @@ pub fn is_model_installed(desc: &ModelDescriptor) -> bool {
                 && complete("nemo128.onnx", 1_000_000)
                 && complete("vocab.txt", 80_000)
         }
+        EngineFamily::SenseVoice => {
+            // The int8 export (239MB) or the fp32 fallback (937MB) plus the
+            // token table — either weight file loads (resolve_model_path
+            // prefers .int8.onnx), but tokens.txt is mandatory.
+            let weights = model_path
+                .join("model.int8.onnx")
+                .metadata()
+                .map(|m| m.len() >= 230_000_000)
+                .unwrap_or(false)
+                || model_path
+                    .join("model.onnx")
+                    .metadata()
+                    .map(|m| m.len() >= 900_000_000)
+                    .unwrap_or(false);
+            weights
+                && model_path
+                    .join("tokens.txt")
+                    .metadata()
+                    .map(|m| m.len() >= 200_000)
+                    .unwrap_or(false)
+        }
         EngineFamily::Canary => {
             // Handy GGUF, CPU Q5_K_M default (spec). Any canary GGUF counts.
             if model_path.is_dir() {
@@ -488,6 +531,14 @@ pub fn display_name(desc: &ModelDescriptor) -> String {
 pub fn supported_languages(desc: &ModelDescriptor) -> Vec<String> {
     if desc.name.contains("German") {
         return vec!["German".to_string()];
+    }
+    // SenseVoice: exactly the model's own language tokens — Auto first so
+    // the in-model detector gets a chance to pick the right one per segment.
+    if matches!(desc.engine_family, EngineFamily::SenseVoice) {
+        return ["Auto", "English", "Chinese", "Japanese", "Korean", "Cantonese"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
     }
     // Canary 180M Flash: EN/DE/FR/ES (+ translation). First entry is default.
     if matches!(desc.engine_family, EngineFamily::Canary) {
@@ -741,5 +792,34 @@ mod tests {
         // class this model was primarily added for).
         assert!(models_for_hardware(false).iter().any(|d| d.name == p.name));
         assert!(models_for_hardware(true).iter().any(|d| d.name == p.name));
+    }
+
+    #[test]
+    fn sensevoice_registered_multilingual_and_cpu_visible() {
+        let s = all_descriptors()
+            .into_iter()
+            .find(|d| matches!(d.engine_family, EngineFamily::SenseVoice))
+            .expect("SenseVoice descriptor registered");
+        assert!(!s.gpu_only, "SenseVoice runs on CPU");
+        assert_eq!(s.engine_family.display_name(), "sensevoice");
+        // Its own language tokens (Auto first), not the English-only list.
+        assert_eq!(
+            supported_languages(&s),
+            vec![
+                "Auto".to_string(),
+                "English".to_string(),
+                "Chinese".to_string(),
+                "Japanese".to_string(),
+                "Korean".to_string(),
+                "Cantonese".to_string(),
+            ]
+        );
+        // Listed on CPU/iGPU boxes like every other CPU engine (Parakeet,
+        // Moonshine, Nemotron…). Discrete-GPU boxes use the curated
+        // allow-list in models_for_hardware(true); this model joins it only
+        // if explicitly requested there — never by accident.
+        assert!(models_for_hardware(false).iter().any(|d| d.name == s.name));
+        // Per-utterance CTC — never treated as a streaming/paste-after model.
+        assert!(!is_streaming_model(&s.name));
     }
 }

@@ -198,11 +198,14 @@ pub struct AppOrchestrator {
 /// started, so calling all four unconditionally is cheap and cannot strand
 /// a worker after a family change.
 fn unload_all_workers_except(active_family: &str) {
-    // Phonon-2 shares the parakeet_engine worker: keep it loaded when either
-    // family is the active one.
-    if active_family != "parakeet-rust" && active_family != "phonon2" {
-        crate::models::engine::parakeet_unload();
-    }
+    // Phonon-2 shares the parakeet_engine worker. Previously we kept that
+    // worker loaded whenever parakeet/phonon was the active family so the next
+    // turn wouldn't pay a reload — but that left ~700 MB resident even after
+    // auto-offload, which is exactly the "doesn't turn off after use" the
+    // user reports. Unload it unconditionally so idle offload actually frees
+    // the RAM (the next turn reloads on demand via loaded_model_dir).
+    let _ = active_family;
+    crate::models::engine::parakeet_unload();
     if active_family != "nemotron" {
         crate::models::engine::nemotron_unload();
     }

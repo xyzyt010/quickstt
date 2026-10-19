@@ -252,6 +252,10 @@ pub fn transcribe_with_language(
         // Phonon-2 rides the exact same ONNX transducer worker (the engine
         // reloads whenever the model dir changes, so switching is seamless).
         EngineFamily::Phonon2 => transcribe_parakeet_rust(config, &model_dir, wav_path),
+        // SenseVoice rides the same ONNX worker (engine field selects loader).
+        EngineFamily::SenseVoice => {
+            transcribe_sense_voice(config, &model_dir, wav_path, language)
+        }
         EngineFamily::Vosk => transcribe_vosk(config, &model_dir, wav_path),
         EngineFamily::Nemotron => transcribe_nemotron(config, &model_dir, wav_path, language),
         EngineFamily::Canary => transcribe_canary(config, &model_dir, wav_path, language),
@@ -523,10 +527,58 @@ pub fn parakeet_unload() {
     }
 }
 
+/// SenseVoice Small (FunAudioLLM; zh/en/ja/ko/yue with auto language detect,
+/// CTC). Rides the exact same persistent `parakeet_engine` worker as
+/// Parakeet/Phonon — the load request's `engine` field selects the
+/// transcribe-rs loader — so session spawn/respawn, the hang watchdog and
+/// idle unload are all shared with zero extra machinery.
+fn transcribe_sense_voice(
+    config: &SttEngineConfig,
+    model_dir: &Path,
+    wav_path: &Path,
+    language: &str,
+) -> Result<String> {
+    parakeet_family_transcribe(
+        config,
+        model_dir,
+        wav_path,
+        "sensevoice",
+        Some(sensevoice_lang_code(language)),
+    )
+}
+
+/// Map a UI language name ("Auto", "English", …) to a SenseVoice language
+/// token (the model's `lang_*` metadata keys). Unknown → auto-detect.
+fn sensevoice_lang_code(language: &str) -> &'static str {
+    match language.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" => "auto",
+        "english" | "en" => "en",
+        "chinese" | "mandarin" | "zh" => "zh",
+        "japanese" | "ja" => "ja",
+        "korean" | "ko" => "ko",
+        "cantonese" | "yue" => "yue",
+        _ => "auto",
+    }
+}
+
 fn transcribe_parakeet_rust(
     config: &SttEngineConfig,
     model_dir: &Path,
     wav_path: &Path,
+) -> Result<String> {
+    parakeet_family_transcribe(config, model_dir, wav_path, "parakeet", None)
+}
+
+/// Shared body for the transcribe-rs ONNX families (Parakeet, Phonon-2,
+/// SenseVoice): one session, one load, one transcribe. `engine_label` picks
+/// the loader inside the worker; `language` carries SenseVoice-only extras
+/// (English-only loaders ignore them).
+fn parakeet_family_transcribe(
+    config: &SttEngineConfig,
+    model_dir: &Path,
+    wav_path: &Path,
+    engine_label: &str,
+    language: Option<&str>,
 ) -> Result<String> {
     let exe = config
         .parakeet_engine_path
@@ -563,6 +615,7 @@ fn transcribe_parakeet_rust(
             session,
             json!({
                 "action": "load",
+                "engine": engine_label,
                 "model_path": model_dir.to_string_lossy(),
             }),
         )?;
@@ -570,13 +623,17 @@ fn transcribe_parakeet_rust(
         session.loaded_model_dir = Some(model_dir.to_path_buf());
     }
 
-    let response = parakeet_request(
-        session,
-        json!({
-            "action": "transcribe",
-            "audio_path": wav_path.to_string_lossy(),
-        }),
-    )?;
+    let mut request = json!({
+        "action": "transcribe",
+        "audio_path": wav_path.to_string_lossy(),
+    });
+    if let Some(lang) = language {
+        // SenseVoice-only extras (harmless for Parakeet/Phonon: unknown
+        // fields are simply ignored by the worker's serde struct).
+        request["language"] = json!(lang);
+        request["itn"] = json!(true);
+    }
+    let response = parakeet_request(session, request)?;
     let text = ensure_parakeet_ok(response, "transcribe")?;
     Ok(text.unwrap_or_default())
 }
