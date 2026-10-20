@@ -25,7 +25,7 @@ use crate::wakeword_loader;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use tokio::sync::mpsc as tmpsc;
@@ -43,6 +43,9 @@ pub enum WakewordServiceCommand {
     SetPhraseEnabled(String, bool),
     /// Shared clap action (0 = Start, 1 = Stop, 2 = Disabled).
     SetTransientAction(u32),
+    /// Switch the microphone ("" = system default) and reopen the stream
+    /// with it, so the dashboard's pick takes effect immediately.
+    SetMicrophone(String),
     Suppress(f32),
 }
 
@@ -74,6 +77,11 @@ impl WakewordHandle {
     pub fn set_transient_action(&self, action: u32) {
         let _ = self.cmd_tx.send(WakewordServiceCommand::SetTransientAction(action));
     }
+    pub fn set_microphone(&self, name: &str) {
+        let _ = self
+            .cmd_tx
+            .send(WakewordServiceCommand::SetMicrophone(name.to_string()));
+    }
     pub fn suppress(&self, duration_secs: f32) {
         let _ = self.cmd_tx.send(WakewordServiceCommand::Suppress(duration_secs));
     }
@@ -91,6 +99,7 @@ struct LiveStream(#[allow(dead_code)] Stream);
 pub fn spawn_background_service(
     models_dir: &Path,
     orchestrator_tx: tmpsc::Sender<OrchestratorCommand>,
+    preferred_mic: &str,
 ) -> Option<WakewordHandle> {
     // Community openWakeWord heads only. The legacy custom heads are
     // quarantined (proven non-discriminating) — see discover_oww_heads.
@@ -124,11 +133,13 @@ pub fn spawn_background_service(
     let (cmd_tx, cmd_rx) = mpsc::channel::<WakewordServiceCommand>();
     let running = Arc::new(AtomicBool::new(false));
     let running_for_thread = Arc::clone(&running);
+    // The microphone the user picked in the dashboard ("" = system default).
+    let mic = preferred_mic.to_string();
 
     if std::thread::Builder::new()
         .name("wakeword-bg".to_string())
         .spawn(move || {
-            run_service_thread(engine, cmd_rx, running_for_thread, orchestrator_tx);
+            run_service_thread(engine, cmd_rx, running_for_thread, orchestrator_tx, mic);
         })
         .is_err()
     {
@@ -146,8 +157,9 @@ fn run_service_thread(
     cmd_rx: mpsc::Receiver<WakewordServiceCommand>,
     running: Arc<AtomicBool>,
     orchestrator_tx: tmpsc::Sender<OrchestratorCommand>,
+    mut preferred_mic: String,
 ) {
-    let mut live: Option<(LiveStream, mpsc::Receiver<Vec<i16>>)> = None;
+    let mut live: Option<(LiveStream, mpsc::Receiver<Vec<i16>>, Arc<AtomicU8>)> = None;
     let mut vad = EnergyVad::with_default_threshold();
     // Clap detector + shared action. Defaults Disabled until
     // the UI syncs the persisted value at startup.
@@ -161,9 +173,9 @@ fn run_service_thread(
             match cmd {
                 WakewordServiceCommand::Start => {
                     if live.is_none() {
-                        match try_open_stream() {
-                            Ok((stream, rx)) => {
-                                live = Some((stream, rx));
+                        match try_open_stream(&preferred_mic) {
+                            Ok((stream, rx, sat)) => {
+                                live = Some((stream, rx, sat));
                                 vad.reset();
                                 transient.reset();
                                 arbiter.reset();
@@ -200,6 +212,27 @@ fn run_service_thread(
                     transient_action = action.min(2);
                     info!("Transient action → {}", transient_action);
                 }
+                WakewordServiceCommand::SetMicrophone(name) => {
+                    if name != preferred_mic {
+                        preferred_mic = name.clone();
+                        info!("Wakeword microphone → {:?}", name);
+                        // Reopen the live stream so the new device is used
+                        // right away (the old one stays open otherwise).
+                        let _ = live.take();
+                        match try_open_stream(&preferred_mic) {
+                            Ok((stream, rx, sat)) => {
+                                live = Some((stream, rx, sat));
+                                vad.reset();
+                                transient.reset();
+                                arbiter.reset();
+                                engine.reset();
+                            }
+                            Err(e) => {
+                                warn!("Wakeword background failed to reopen stream: {e}");
+                            }
+                        }
+                    }
+                }
                 WakewordServiceCommand::Suppress(secs) => {
                     engine.suppress(secs);
                 }
@@ -207,7 +240,7 @@ fn run_service_thread(
         }
 
         // 2. If streaming, process up to one audio chunk.
-        if let Some((_, rx_chunks)) = live.as_ref() {
+        if let Some((_, rx_chunks, health)) = live.as_ref() {
             match rx_chunks.try_recv() {
                 Ok(chunk) => {
                     if process_audio_chunk(
@@ -217,6 +250,7 @@ fn run_service_thread(
                         &mut arbiter,
                         &mut transient_action,
                         &chunk,
+                        health.load(Ordering::Relaxed),
                         &orchestrator_tx,
                         &running,
                     ) {
@@ -234,9 +268,9 @@ fn run_service_thread(
         } else {
             // Idle: block waiting for a command so we don't burn CPU when idle.
             match cmd_rx.recv() {
-                Ok(WakewordServiceCommand::Start) => match try_open_stream() {
-                    Ok((stream, rx)) => {
-                        live = Some((stream, rx));
+                Ok(WakewordServiceCommand::Start) => match try_open_stream(&preferred_mic) {
+                    Ok((stream, rx, sat)) => {
+                        live = Some((stream, rx, sat));
                         vad.reset();
                         transient.reset();
                         arbiter.reset();
@@ -262,6 +296,29 @@ fn run_service_thread(
                     transient_action = action.min(2);
                     info!("Transient action → {}", transient_action);
                 }
+                Ok(WakewordServiceCommand::SetMicrophone(name)) => {
+                    if name != preferred_mic {
+                        preferred_mic = name.clone();
+                        info!("Wakeword microphone → {:?}", name);
+                        // Reopen the live stream so the new device is used
+                        // right away (the old one stays open otherwise).
+                        if live.is_some() {
+                            let _ = live.take();
+                            match try_open_stream(&preferred_mic) {
+                                Ok((stream, rx, sat)) => {
+                                    live = Some((stream, rx, sat));
+                                    vad.reset();
+                                    transient.reset();
+                                    arbiter.reset();
+                                    engine.reset();
+                                }
+                                Err(e) => {
+                                    warn!("Wakeword background failed to reopen stream: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(WakewordServiceCommand::Suppress(secs)) => {
                     engine.suppress(secs);
                 }
@@ -281,9 +338,24 @@ fn process_audio_chunk(
     arbiter: &mut TransientArbiter,
     transient_action: &mut u32,
     chunk: &[i16],
+    health: u8,
     orchestrator_tx: &tmpsc::Sender<OrchestratorCommand>,
     running: &Arc<AtomicBool>,
 ) -> bool {
+    // Broken input: a railed mic (a wall of ±32767) or a dead one (pure
+    // zeros). Neither is speech — the VAD reads the first as continuous
+    // speech, the wakeword head scores ~0 on it and the transient
+    // detector sees random onsets, which is how the app started dictating
+    // on nothing. Refuse to trigger and say what to fix.
+    match health {
+        crate::audio::conditioner::HEALTH_SATURATED
+        | crate::audio::conditioner::HEALTH_DEAD => {
+            crate::audio::conditioner::warn_unhealthy(health);
+            return false;
+        }
+        _ => {}
+    }
+
     // Clap first: detections go through the two-chunk arbiter: only
     // ISOLATED impulses act, while sustained sounds (speech syllables,
     // laughter, coughing fits) are vetoed on the follow-up chunks (level,
@@ -445,10 +517,15 @@ impl std::fmt::Display for OpenError {
     }
 }
 
-fn try_open_stream() -> Result<(LiveStream, mpsc::Receiver<Vec<i16>>), OpenError> {
+fn try_open_stream(
+    preferred_mic: &str,
+) -> Result<(LiveStream, mpsc::Receiver<Vec<i16>>, Arc<AtomicU8>), OpenError> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
+    // Honor the dashboard's microphone selection — the background listener
+    // used to open the OS default unconditionally, so picking another mic
+    // changed nothing for the wake word (and nothing for the engine
+    // stream either).
+    let device = crate::audio::capture::resolve_input_device(&host, preferred_mic)
         .ok_or(OpenError::NoInputDevice)?;
     let dev_name = device.name().unwrap_or_else(|_| "<unknown>".into());
 
@@ -461,15 +538,20 @@ fn try_open_stream() -> Result<(LiveStream, mpsc::Receiver<Vec<i16>>), OpenError
     let sample_rate = config.sample_rate.0;
 
     let (tx_chunks, rx_chunks) = mpsc::sync_channel::<Vec<i16>>(32);
+    // Shared "the input is railed" flag — set by the capture callback,
+    // read by the service loop.
+    let health: Arc<AtomicU8> = Arc::new(AtomicU8::new(0));
     let stream = match sample_format {
         SampleFormat::F32 => {
             let mut normalizer = InputNormalizer::new(channels, sample_rate);
+            let sat = Arc::clone(&health);
             device.build_input_stream(
                 &config,
                 move |data: &[f32], _: &_| {
                     normalizer.process_f32(data, |chunk| {
                         let _ = tx_chunks.try_send(chunk);
                     });
+                    sat.store(normalizer.health(), Ordering::Relaxed);
                 },
                 |err| tracing::error!("Wakeword bg stream error: {err}"),
                 None,
@@ -477,12 +559,14 @@ fn try_open_stream() -> Result<(LiveStream, mpsc::Receiver<Vec<i16>>), OpenError
         }
         SampleFormat::I16 => {
             let mut normalizer = InputNormalizer::new(channels, sample_rate);
+            let sat = Arc::clone(&health);
             device.build_input_stream(
                 &config,
                 move |data: &[i16], _: &_| {
                     normalizer.process_i16(data, |chunk| {
                         let _ = tx_chunks.try_send(chunk);
                     });
+                    sat.store(normalizer.health(), Ordering::Relaxed);
                 },
                 |err| tracing::error!("Wakeword bg stream error: {err}"),
                 None,
@@ -497,5 +581,5 @@ fn try_open_stream() -> Result<(LiveStream, mpsc::Receiver<Vec<i16>>), OpenError
         "Wakeword mic open: '{}' {}Hz {}ch {:?}",
         dev_name, sample_rate, channels, sample_format
     );
-    Ok((LiveStream(stream), rx_chunks))
+    Ok((LiveStream(stream), rx_chunks, health))
 }

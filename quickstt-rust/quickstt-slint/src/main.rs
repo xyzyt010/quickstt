@@ -2176,7 +2176,17 @@ fn main() -> QuickSttResult<()> {
 
     let wakeword_handle: Option<quickstt_core::wakeword_service::WakewordHandle> = {
         let models_dir = quickstt_core::wakeword_loader::default_models_dir();
-        match quickstt_core::wakeword_service::spawn_background_service(&models_dir, tx_cmd.clone()) {
+        // The background listener must use the same microphone the user
+        // picked — it used to open the OS default unconditionally.
+        let preferred_mic = state
+            .lock()
+            .map(|s| s.settings.selected_microphone.clone())
+            .unwrap_or_default();
+        match quickstt_core::wakeword_service::spawn_background_service(
+            &models_dir,
+            tx_cmd.clone(),
+            &preferred_mic,
+        ) {
             Some(h) => {
                 log_line(&format!("wakeword service spawned from {:?}", models_dir));
                 Some(h)
@@ -2687,6 +2697,12 @@ fn dock_hop(
         let fg_ptt = last_external_fg.clone();
         let hide_until_ptt = hide_until.clone();
         let snooze_ptt_show_ptt = snooze_ptt_show.clone();
+        // The background listener owns the same ALSA PCM the foreground
+        // session needs. Hand the device over cleanly: stop the
+        // background stream FIRST and wait for the release, otherwise the
+        // PCM is torn down under the foreground stream and the session
+        // records pure silence ("nothing heard" on Linux).
+        let wh_for_ptt = wakeword_handle.clone();
         std::thread::Builder::new()
             .name("ptt-hotkey".into())
             .spawn(move || {
@@ -2769,10 +2785,23 @@ fn dock_hop(
                                         s.status_message = "Listening...".into();
                                     }
                                 }
+                                // Release the background mic BEFORE the
+                                // foreground opens it (Linux shares one
+                                // ALSA PCM: tearing the background stream
+                                // down under the foreground stream
+                                // silences the whole session).
+                                if let Some(ref wh) = wh_for_ptt {
+                                    wh.stop();
+                                    for _ in 0..80 {
+                                        if !wh.is_active() {
+                                            break;
+                                        }
+                                        std::thread::sleep(std::time::Duration::from_millis(5));
+                                    }
+                                }
                                 if tx.try_send(OrchestratorCommand::StartListening).is_err() {
                                     log_line("PTT send FAILED (command loop dead?)");
-                                }
-                            } else if ev.state == HotKeyState::Released {
+                                }                            } else if ev.state == HotKeyState::Released {
                                 log_line("PTT release");
                                 *mlock(&ph) = false;
                                 if tx.try_send(OrchestratorCommand::StopListening).is_err() {
@@ -3848,6 +3877,8 @@ fn dock_hop(
     let mut tick: u32 = 0;
     let mut prev_transcribing = false;
     let mut was_live = false;
+    // Microphone the background wakeword listener is currently bound to.
+    let mut last_wakeword_mic = String::new();
     let mut done_until = std::time::Instant::now();
     let mut last_hover = std::time::Instant::now();
     // Overlay paint insurance throttle (see watchdog block below).
@@ -5130,7 +5161,10 @@ fn dock_hop(
                     || (!s.settings.wake_word_mode.eq_ignore_ascii_case("Off")
                         && !s.settings.wake_word_mode.trim().is_empty());
                 let transient_armed = s.settings.transient_action != 2;
-                let bg_wanted = (ww_on || transient_armed) && !live_session;
+                // While the PTT is held the foreground owns the mic — the
+                // background must stay off, or it re-opens the device and
+                // steals the session's audio (Linux shares one ALSA PCM).
+                let bg_wanted = (ww_on || transient_armed) && !live_session && !ptt;
                 if let Some(ref wh) = wakeword_handle_timer {
                     if bg_wanted {
                         if !wh.is_active() {
@@ -5138,6 +5172,14 @@ fn dock_hop(
                         }
                     } else if wh.is_active() {
                         wh.stop();
+                    }
+                    // Keep the background listener on the microphone the
+                    // user picked (it holds the device open, so a change
+                    // has to be pushed to it).
+                    let mic = s.settings.selected_microphone.clone();
+                    if mic != last_wakeword_mic {
+                        last_wakeword_mic = mic.clone();
+                        wh.set_microphone(&mic);
                     }
                 }
                 if transcribing {

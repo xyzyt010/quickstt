@@ -49,6 +49,10 @@ pub struct Recorder {
     pub peak: f32,
     /// RMS of the last read chunk (0..1).
     pub rms: f32,
+    /// Input conditioning: DC removal, soft limiting, health watch.
+    cond: crate::conditioner::Conditioner,
+    /// Last known input health (see `conditioner::HEALTH_*`).
+    health: u8,
 }
 
 impl Recorder {
@@ -57,7 +61,24 @@ impl Recorder {
             active: false,
             peak: 0.0,
             rms: 0.0,
+            cond: crate::conditioner::Conditioner::new(SAMPLE_RATE as u32),
+            health: crate::conditioner::HEALTH_OK,
         }
+    }
+
+    /// Input health: 0 = usable, 1 = clipped, 2 = no audio at all.
+    pub fn health(&self) -> u8 {
+        self.health
+    }
+
+    /// True while the microphone input is clipped (hot gain).
+    pub fn clipped(&self) -> bool {
+        self.health == crate::conditioner::HEALTH_SATURATED
+    }
+
+    /// True when the microphone delivers nothing (muted / broken).
+    pub fn dead(&self) -> bool {
+        self.health == crate::conditioner::HEALTH_DEAD
     }
 
     pub fn is_active(&self) -> bool {
@@ -84,6 +105,9 @@ impl Recorder {
         self.active = true;
         self.peak = 0.0;
         self.rms = 0.0;
+        // Fresh stream: fresh conditioning state.
+        self.cond = crate::conditioner::Conditioner::new(SAMPLE_RATE as u32);
+        self.health = crate::conditioner::HEALTH_OK;
         Ok(())
     }
 
@@ -112,7 +136,15 @@ impl Recorder {
                 out[f] = acc / channels as f32;
             }
         }
-        // Level stats for the UI meter.
+        // Condition the samples: DC removal + soft limiting. A hot mic
+        // delivers a railed signal; without this the level meter reads
+        // "speech" forever and whisper transcribes noise.
+        for v in out[..frames].iter_mut() {
+            *v = self.cond.condition(*v * 32767.0) / 32767.0;
+        }
+        self.cond.end_chunk(frames);
+        self.health = self.cond.health();
+        // Level stats for the UI meter (measured on the conditioned signal).
         let mut peak = 0f32;
         let mut sum = 0f32;
         for v in &out[..frames] {

@@ -1,3 +1,5 @@
+use crate::audio::conditioner::InputConditioner;
+
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 pub const TARGET_CHUNK_FRAMES: usize = 1_280;
 
@@ -6,6 +8,8 @@ pub struct InputNormalizer {
     source_rate: u32,
     phase: u32,
     out: Vec<i16>,
+    /// DC removal + soft limiting + saturation watch (see `conditioner`).
+    cond: InputConditioner,
 }
 
 impl InputNormalizer {
@@ -15,7 +19,24 @@ impl InputNormalizer {
             source_rate: source_rate.max(1),
             phase: 0,
             out: Vec::with_capacity(TARGET_CHUNK_FRAMES * 2),
+            cond: InputConditioner::new(source_rate),
         }
+    }
+
+    /// True while the raw input is saturated (a railed / over-driven mic).
+    /// Callers must not start a dictation on such a signal.
+    pub fn saturated(&self) -> bool {
+        self.cond.saturated()
+    }
+
+    /// Overall input health (see `conditioner::HEALTH_*`).
+    pub fn health(&self) -> u8 {
+        self.cond.health()
+    }
+
+    /// Fraction of the recent input that sat at the digital rail (0..1).
+    pub fn rail_fraction(&self) -> f32 {
+        self.cond.rail_fraction()
     }
 
     pub fn process_f32<F>(&mut self, input: &[f32], emit: F)
@@ -76,13 +97,18 @@ impl InputNormalizer {
                 (sum / frame.len() as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16
             };
 
+            // Condition the sample: DC removal + soft limiting (a railed
+            // mic must not look like a continuous loud signal).
+            let conditioned = self.cond.condition(mono as f32) as i16;
+
             self.phase = self.phase.saturating_add(TARGET_SAMPLE_RATE);
             while self.phase >= self.source_rate {
                 self.phase -= self.source_rate;
-                self.out.push(mono);
+                self.out.push(conditioned);
                 if self.out.len() >= TARGET_CHUNK_FRAMES {
                     let rest = self.out.split_off(TARGET_CHUNK_FRAMES);
                     let chunk = std::mem::replace(&mut self.out, rest);
+                    self.cond.end_chunk(chunk.len());
                     emit(chunk);
                 }
             }

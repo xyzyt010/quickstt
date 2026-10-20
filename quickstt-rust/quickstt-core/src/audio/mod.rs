@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod conditioner;
 pub mod normalize;
 pub mod pipeline;
 pub mod transient;

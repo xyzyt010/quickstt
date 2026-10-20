@@ -182,6 +182,9 @@ export component AppWindow inherits Window {
     in-out property <float> model-progress: 0.0;
     in-out property <bool> overlay-ok: false;
     in-out property <bool> busy: false;
+    // Live microphone health: empty = healthy, otherwise the reason the
+    // input cannot be used ("clipped" / "no signal").
+    in-out property <string> mic-health: "";
     in property <[string]> tabs: ["Listen", "History", "Models", "Settings"];
 
     in-out property <[Turn]> turns: [
@@ -200,6 +203,9 @@ export component AppWindow inherits Window {
     callback toggle-record();
     callback pick-model(int);
     callback nav(int);
+    // Microphone self-test: opens the mic for a second and reports the
+    // level and the input health (clipped / no signal).
+    callback test-mic();
     // Setup actions (wired in Rust).
     callback grant-mic();
     callback download-model();
@@ -487,6 +493,10 @@ export component AppWindow inherits Window {
                                     text: root.mic-ok ? "Granted — the orb can listen." : "Required for dictation.";
                                     font-size: 12px; color: #7A7A7A; wrap: word-wrap;
                                 }
+                                if root.mic-health != "" : Text {
+                                    text: root.mic-health;
+                                    font-size: 11px; color: #FFB27A; wrap: word-wrap;
+                                }
                             }
 
                             if !root.mic-ok : Rectangle {
@@ -494,6 +504,15 @@ export component AppWindow inherits Window {
                                 background: #4ADE80;
                                 Text { text: "Allow"; font-size: 13px; font-weight: 600; color: #06120B; horizontal-alignment: center; vertical-alignment: center; }
                                 TouchArea { clicked => { root.grant-mic(); } }
+                            }
+
+                            if root.mic-ok : Rectangle {
+                                width: 74px; height: 34px; border-radius: 17px;
+                                background: #141414;
+                                border-width: 1px;
+                                border-color: #2A2A2A;
+                                Text { text: "Test mic"; font-size: 12px; font-weight: 600; color: #EDEDED; horizontal-alignment: center; vertical-alignment: center; }
+                                TouchArea { clicked => { root.test-mic(); } }
                             }
                         }
 

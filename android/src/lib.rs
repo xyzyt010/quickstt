@@ -20,6 +20,7 @@
 //!   * `cargo run --bin quickstt-android-preview` → desktop preview window
 
 mod audio;
+mod conditioner;
 mod platform;
 mod stt;
 
@@ -206,6 +207,10 @@ pub fn run() {
             std::thread::spawn(move || {
                 let mut session = session;
                 let mut chunk = vec![0f32; 1600]; // 100 ms
+                // Last input-health complaint shown to the user (throttled
+                // so a broken mic does not spam the status line).
+                let mut last_health: u8 = conditioner::HEALTH_OK;
+                let mut health_since = std::time::Instant::now();
                 loop {
                     let n = session.recorder.read(&mut chunk);
                     if n == 0 {
@@ -220,6 +225,37 @@ pub fn run() {
                     if rms > 0.012 {
                         session.spoke = true;
                         session.last_voice = std::time::Instant::now();
+                    }
+                    // Input health: a clipped or dead microphone must say
+                    // so instead of pretending to listen to silence.
+                    let health = session.recorder.health();
+                    if health != last_health
+                        && health_since.elapsed() > std::time::Duration::from_secs(2)
+                    {
+                        last_health = health;
+                        health_since = std::time::Instant::now();
+                        let msg = match health {
+                            conditioner::HEALTH_SATURATED => {
+                                "Microphone input is clipped — lower the input gain"
+                            }
+                            conditioner::HEALTH_DEAD => {
+                                "No audio is arriving from the microphone"
+                            }
+                            _ => "Listening… speak now.",
+                        };
+                        let card_msg = match health {
+                            conditioner::HEALTH_SATURATED => "Input clipped — lower the mic gain",
+                            conditioner::HEALTH_DEAD => "No signal from the microphone",
+                            _ => "",
+                        };
+                        let hweak = weak.clone();
+                        let card = card_msg.to_string();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = hweak.upgrade() {
+                                ui.set_status_text(msg.into());
+                                ui.set_mic_health(card.into());
+                            }
+                        });
                     }
                     // Auto-stop after 1.4 s of silence (only if we heard
                     // something) or after 60 s of recording.
@@ -243,7 +279,8 @@ pub fn run() {
                 }
                 session.recorder.stop();
                 let samples = std::mem::take(&mut session.samples);
-                transcribe(samples, &pending);
+                let health = session.recorder.health();
+                transcribe(samples, health, &pending);
             });
         });
     }
@@ -255,6 +292,93 @@ pub fn run() {
             if let Some(ui) = weak.upgrade() {
                 ui.set_tab(tab.clamp(0, 3));
             }
+        });
+    }
+
+    // ── Microphone self-test ────────────────────────────────────────────────
+    // Opens the mic for ~1 s and reports the level and the input health.
+    // The user can verify the microphone without recording a take.
+    {
+        let weak = ui.as_weak();
+        ui.on_test_mic(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if !platform::has_mic_permission() {
+                platform::request_mic_permission();
+                ui.set_status_text("Microphone permission needed".into());
+                return;
+            }
+            ui.set_status_text("Testing the microphone…".into());
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                let mut rec = audio::Recorder::new();
+                let result = match rec.start() {
+                    Ok(()) => {
+                        let mut buf = vec![0f32; 1600];
+                        let mut peak = 0.0f32;
+                        let mut sum = 0f32;
+                        let mut count = 0usize;
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1200);
+                        while std::time::Instant::now() < deadline {
+                            let n = rec.read(&mut buf);
+                            if n > 0 {
+                                for v in &buf[..n] {
+                                    let a = v.abs();
+                                    if a > peak {
+                                        peak = a;
+                                    }
+                                    sum += v * v;
+                                }
+                                count += n;
+                            } else {
+                                std::thread::sleep(std::time::Duration::from_millis(20));
+                            }
+                        }
+                        let rms = if count > 0 {
+                            (sum / count as f32).sqrt()
+                        } else {
+                            0.0
+                        };
+                        rec.stop();
+                        Some((peak, rms, rec.health()))
+                    }
+                    Err(e) => {
+                        rec.stop();
+                        let _ = e;
+                        None
+                    }
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    match result {
+                        None => {
+                            ui.set_status_text("Could not open the microphone".into());
+                            ui.set_mic_health("Could not open the microphone".into());
+                        }
+                        Some((peak, rms, health)) => {
+                            let (status, card) = match health {
+                                conditioner::HEALTH_SATURATED => (
+                                    "The microphone input is clipped — lower the input gain".to_string(),
+                                    "Input clipped — lower the mic gain".to_string(),
+                                ),
+                                conditioner::HEALTH_DEAD => (
+                                    "No audio is arriving from the microphone".to_string(),
+                                    "No signal from the microphone".to_string(),
+                                ),
+                                _ => (
+                                    format!(
+                                        "Microphone OK — level {:.0}%, peak {:.0}%",
+                                        rms * 100.0,
+                                        peak * 100.0
+                                    ),
+                                    String::new(),
+                                ),
+                            };
+                            ui.set_status_text(status.into());
+                            ui.set_mic_health(card.into());
+                        }
+                    }
+                });
+            });
         });
     }
 
@@ -339,17 +463,42 @@ pub fn run() {
 
 /// Transcribe the recorded audio (worker thread) and hand the result to the
 /// UI thread.
-fn transcribe(samples: Vec<f32>, pending: &Arc<Mutex<Option<PendingTurn>>>) {
+///
+/// `health` is the recorder's input health: a clipped or dead microphone
+/// is reported as such instead of producing a bogus transcript.
+fn transcribe(samples: Vec<f32>, health: u8, pending: &Arc<Mutex<Option<PendingTurn>>>) {
     let seconds = (samples.len() as f32 / audio::SAMPLE_RATE as f32).ceil() as i32;
-    if samples.is_empty() {
+    let fail = |status: String| {
         if let Ok(mut slot) = pending.lock() {
             *slot = Some(PendingTurn {
                 text: String::new(),
                 seconds: 0,
-                status: "Nothing was recorded".into(),
+                status,
                 ok: false,
             });
         }
+    };
+    if samples.is_empty() {
+        fail("Nothing was recorded".into());
+        return;
+    }
+    // A broken microphone is a setup problem, not a transcription problem:
+    // say exactly that instead of shipping noise to the engine.
+    if health == conditioner::HEALTH_SATURATED {
+        fail("Microphone input is clipped — lower the input gain".into());
+        return;
+    }
+    if health == conditioner::HEALTH_DEAD {
+        fail("No audio is arriving from the microphone".into());
+        return;
+    }
+    // Silence gate: never hand a silent take to whisper — it hallucinates
+    // short words ("you", "yeah") on noise-only audio.
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    let sum: f32 = samples.iter().map(|s| s * s).sum();
+    let rms = (sum / samples.len().max(1) as f32).sqrt();
+    if peak < 0.01 || rms < 0.004 {
+        fail("No speech detected".into());
         return;
     }
     let wav = std::env::temp_dir().join("quickstt-turn.wav");

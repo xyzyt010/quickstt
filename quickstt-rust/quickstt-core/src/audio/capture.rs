@@ -1,5 +1,8 @@
+use crate::audio::conditioner::InputConditioner;
 use crate::audio::normalize::InputNormalizer;
 use anyhow::{Context, Result};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 use tokio::sync::mpsc;
@@ -32,7 +35,7 @@ pub fn list_input_devices() -> Vec<String> {
 
 /// Resolve a preferred microphone: "" / "System default" (or unknown names)
 /// fall back to the OS default input.
-fn resolve_input_device(host: &cpal::Host, preferred: &str) -> Option<cpal::Device> {
+pub fn resolve_input_device(host: &cpal::Host, preferred: &str) -> Option<cpal::Device> {
     let preferred = preferred.trim();
     if !preferred.is_empty() && !preferred.eq_ignore_ascii_case("System default") {
         if let Ok(devices) = host.input_devices() {
@@ -49,6 +52,35 @@ fn resolve_input_device(host: &cpal::Host, preferred: &str) -> Option<cpal::Devi
     }
     host.default_input_device()
 }
+/// Rolling diagnostic for the foreground capture: how many chunks arrived
+/// and how loud they were. A session that records nothing shows up here
+/// as "0 chunks" instead of a silent mystery.
+#[derive(Default)]
+struct CaptureDiag {
+    chunks: u64,
+    peak: i16,
+}
+
+impl CaptureDiag {
+    fn note(&mut self, chunk: &[i16]) {
+        self.chunks += 1;
+        for s in chunk {
+            let a = s.abs();
+            if a > self.peak {
+                self.peak = a;
+            }
+        }
+        if self.chunks % 50 == 0 {
+            tracing::info!(
+                "Foreground capture: {} chunks, peak={}",
+                self.chunks,
+                self.peak
+            );
+            self.peak = 0;
+        }
+    }
+}
+
 pub struct AudioCaptureManager {
     wakeword_stream: Option<Stream>,
     transcription_stream: Option<Stream>,
@@ -88,15 +120,26 @@ impl AudioCaptureManager {
         let sample_rate = config.sample_rate.0;
 
         let err_fn = |err| tracing::error!("Wakeword audio stream error: {}", err);
+        // Input health of the foreground stream: a railed or dead mic must
+        // be reported instead of silently producing an empty transcript.
+        let health: Arc<AtomicU8> = Arc::new(AtomicU8::new(crate::audio::conditioner::HEALTH_OK));
         let stream = match sample_format {
             SampleFormat::F32 => {
                 let mut normalizer = InputNormalizer::new(channels, sample_rate);
+                let h = Arc::clone(&health);
+                let mut diag = CaptureDiag::default();
                 device.build_input_stream(
                     &config,
                     move |data: &[f32], _: &_| {
                         normalizer.process_f32(data, |chunk| {
+                            diag.note(&chunk);
                             let _ = wakeword_tx.try_send(chunk);
-                        })
+                        });
+                        let state = normalizer.health();
+                        if state != h.load(Ordering::Relaxed) {
+                            h.store(state, Ordering::Relaxed);
+                            crate::audio::conditioner::warn_unhealthy(state);
+                        }
                     },
                     err_fn,
                     None,
@@ -104,12 +147,20 @@ impl AudioCaptureManager {
             }
             SampleFormat::I16 => {
                 let mut normalizer = InputNormalizer::new(channels, sample_rate);
+                let h = Arc::clone(&health);
+                let mut diag = CaptureDiag::default();
                 device.build_input_stream(
                     &config,
                     move |data: &[i16], _: &_| {
                         normalizer.process_i16(data, |chunk| {
+                            diag.note(&chunk);
                             let _ = wakeword_tx.try_send(chunk);
-                        })
+                        });
+                        let state = normalizer.health();
+                        if state != h.load(Ordering::Relaxed) {
+                            h.store(state, Ordering::Relaxed);
+                            crate::audio::conditioner::warn_unhealthy(state);
+                        }
                     },
                     err_fn,
                     None,
@@ -117,12 +168,20 @@ impl AudioCaptureManager {
             }
             SampleFormat::U16 => {
                 let mut normalizer = InputNormalizer::new(channels, sample_rate);
+                let h = Arc::clone(&health);
+                let mut diag = CaptureDiag::default();
                 device.build_input_stream(
                     &config,
                     move |data: &[u16], _: &_| {
                         normalizer.process_u16(data, |chunk| {
+                            diag.note(&chunk);
                             let _ = wakeword_tx.try_send(chunk);
-                        })
+                        });
+                        let state = normalizer.health();
+                        if state != h.load(Ordering::Relaxed) {
+                            h.store(state, Ordering::Relaxed);
+                            crate::audio::conditioner::warn_unhealthy(state);
+                        }
                     },
                     err_fn,
                     None,
@@ -130,12 +189,20 @@ impl AudioCaptureManager {
             }
             SampleFormat::I32 => {
                 let mut normalizer = InputNormalizer::new(channels, sample_rate);
+                let h = Arc::clone(&health);
+                let mut diag = CaptureDiag::default();
                 device.build_input_stream(
                     &config,
                     move |data: &[i32], _: &_| {
                         normalizer.process_i32(data, |chunk| {
+                            diag.note(&chunk);
                             let _ = wakeword_tx.try_send(chunk);
-                        })
+                        });
+                        let state = normalizer.health();
+                        if state != h.load(Ordering::Relaxed) {
+                            h.store(state, Ordering::Relaxed);
+                            crate::audio::conditioner::warn_unhealthy(state);
+                        }
                     },
                     err_fn,
                     None,
@@ -168,11 +235,18 @@ impl AudioCaptureManager {
     pub fn start_transcription_stream(
         &mut self,
         transcription_tx: mpsc::Sender<Vec<f32>>,
+        preferred: &str,
     ) -> Result<()> {
-        let device = self
-            .host
-            .default_input_device()
+        // Honor the microphone the user picked in the dashboard — the
+        // whisper path used to open the OS default regardless, so the
+        // selection only half-worked (the foreground stream used it, the
+        // engine stream did not).
+        let device = resolve_input_device(&self.host, preferred)
             .context("No input device available")?;
+        tracing::info!(
+            "Transcription capture device: {:?}",
+            device.name().unwrap_or_else(|_| "<unnamed>".into())
+        );
 
         let config = StreamConfig {
             channels: 1,
@@ -181,15 +255,79 @@ impl AudioCaptureManager {
         };
 
         // Here dasp ring buffers accumulate exactly 2-4 seconds of audio to prevent RAM ballooning.
-        let stream = device.build_input_stream(
+        // The samples are conditioned first (DC removal + soft limiting): a
+        // railed mic otherwise hands whisper a wall of ±32767 and the
+        // transcript is noise.
+        //
+        // Some devices refuse 16 kHz mono (a USB headset locked at 48 kHz
+        // stereo, for example) — then fall back to the device's native
+        // format and resample on the way in.
+        let mut cond = InputConditioner::new(16_000);
+        let tx = transcription_tx.clone();
+        let stream = match device.build_input_stream(
             &config,
             move |data: &[f32], _: &_| {
+                let conditioned: Vec<f32> = data
+                    .iter()
+                    .map(|s| cond.condition(s * i16::MAX as f32) / i16::MAX as f32)
+                    .collect();
+                cond.end_chunk(data.len());
                 // Send chunks to transcription task
-                let _ = transcription_tx.try_send(data.to_vec());
+                let _ = tx.try_send(conditioned);
             },
             |err| tracing::error!("Transcription audio stream error: {}", err),
             None,
-        )?;
+        ) {
+            Ok(stream) => stream,
+            Err(first_err) => {
+                tracing::warn!(
+                    "16 kHz mono capture refused by the device ({first_err}) — using its native format"
+                );
+                let native = device
+                    .default_input_config()
+                    .context("No default input config available")?;
+                let sample_format = native.sample_format();
+                let config: cpal::StreamConfig = native.into();
+                let channels = config.channels;
+                let rate = config.sample_rate.0;
+                let mut normalizer = InputNormalizer::new(channels, rate);
+                let mut cond = InputConditioner::new(16_000);
+                let tx = transcription_tx.clone();
+                match sample_format {
+                    SampleFormat::F32 => device.build_input_stream(
+                        &config,
+                        move |data: &[f32], _: &_| {
+                            let mut out: Vec<f32> = Vec::new();
+                            normalizer.process_f32(data, |chunk| {
+                                for s in chunk {
+                                    out.push(s as f32 / i16::MAX as f32);
+                                }
+                            });
+                            cond.end_chunk(out.len());
+                            let _ = tx.try_send(out);
+                        },
+                        |err| tracing::error!("Transcription audio stream error: {}", err),
+                        None,
+                    )?,
+                    SampleFormat::I16 => device.build_input_stream(
+                        &config,
+                        move |data: &[i16], _: &_| {
+                            let mut out: Vec<f32> = Vec::new();
+                            normalizer.process_i16(data, |chunk| {
+                                for s in chunk {
+                                    out.push(s as f32 / i16::MAX as f32);
+                                }
+                            });
+                            cond.end_chunk(out.len());
+                            let _ = tx.try_send(out);
+                        },
+                        |err| tracing::error!("Transcription audio stream error: {}", err),
+                        None,
+                    )?,
+                    other => anyhow::bail!("Unsupported input sample format: {other}"),
+                }
+            }
+        };
 
         stream.play()?;
         self.transcription_stream = Some(stream);

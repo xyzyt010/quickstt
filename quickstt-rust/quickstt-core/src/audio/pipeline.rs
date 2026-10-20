@@ -131,25 +131,30 @@ impl SpeechSegmenter {
                 || level >= 1 && vad_result.probability > 0.30;
             if start_qualifies {
                 if self.start_armed {
+                    // SECOND consecutive qualifying chunk — the sustain
+                    // rule. The first one only armed below.
                     self.start_armed = false;
                     self.in_utterance = true;
-                for pr in self.preroll.drain(..) {
-                    self.utterance.extend_from_slice(&pr);
+                    for pr in self.preroll.drain(..) {
+                        self.utterance.extend_from_slice(&pr);
+                    }
+                    self.utterance.extend_from_slice(chunk);
+                    self.silence_frames = 0;
+                    self.hard_silence_frames = 0;
+                    tracing::info!(
+                        "Segmenter: speech started (level={}, vad_prob={:.2})",
+                        level,
+                        vad_result.probability
+                    );
+                    return Some(SegmenterEvent::SpeechStarted);
                 }
-                self.utterance.extend_from_slice(chunk);
-                self.silence_frames = 0;
-                self.hard_silence_frames = 0;
-                tracing::info!(
-                    "Segmenter: speech started (level={}, vad_prob={:.2})",
-                    level,
-                    vad_result.probability
-                );
-                return Some(SegmenterEvent::SpeechStarted);
-                }
-            } else {
-                // First qualifying chunk only arms — a lone click disarms
-                // on the very next chunk.
+                // FIRST qualifying chunk: arm only. A lone click must not
+                // open a turn on its own.
                 self.start_armed = true;
+            } else {
+                // Not speech: drop the arm (a lone click disarms on the
+                // very next chunk).
+                self.start_armed = false;
             }
             return None;
         }

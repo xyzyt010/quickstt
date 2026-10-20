@@ -36,6 +36,29 @@ pub const TRANSIENT_DISABLED: u32 = 2;
 /// claps (20ms+ of palm burst + room body) clear it with margin.
 pub const MIN_BURST_WIDTH: usize = 120;
 
+/// Rail level (i16) — samples at/beyond this are digitally clipped.
+pub const RAIL: f64 = 32_000.0;
+
+/// Fraction of a chunk that must sit at the digital rail before the chunk
+/// counts as SATURATED. A railed mic (gain cranked up, unterminated input)
+/// delivers a solid wall of ±32767: the noise around it produces random
+/// onsets, so the app used to start dictating on nothing. A real clap
+/// clips a handful of samples (<1 %).
+pub const SATURATION_FRACTION: f64 = 0.05;
+
+/// True when the chunk is mostly clipped samples — the input is broken,
+/// not a clap.
+pub fn is_saturated(samples: &[i16]) -> bool {
+    if samples.len() < 16 {
+        return false;
+    }
+    let clipped = samples
+        .iter()
+        .filter(|s| (**s as f64).abs() >= RAIL)
+        .count();
+    (clipped as f64 / samples.len() as f64) >= SATURATION_FRACTION
+}
+
 /// Peak absolute level of a chunk (for arbiter confirmation).
 pub fn chunk_peak(samples: &[i16]) -> f64 {
     samples
@@ -293,6 +316,17 @@ impl TransientDetector {
     /// pops and AGC settles never fire.
     pub fn process(&mut self, samples: &[i16]) -> Option<TransientKind> {
         if samples.len() < 16 {
+            return None;
+        }
+
+        // Saturated input (railed mic): the noise around the rail produces
+        // random onsets, which is how the app ended up starting dictation
+        // on nothing. A clipped chunk is never a clap — drop it and let the
+        // detector re-calibrate once the input is healthy again.
+        if is_saturated(samples) {
+            self.noise_floor = 15.0;
+            self.prev_rms = 0.0;
+            self.warmup_frames = 0;
             return None;
         }
 
