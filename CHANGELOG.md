@@ -1,5 +1,47 @@
 # Changelog
 
+## [2.0.0-alpha.17] — 2026-10-20
+
+### Fixed
+- **Linux: every transcription failed ("Transcribe failed", 0 characters).**
+  The engine resolver never looked in the app's *own* `lib/quickstt/tools`
+  directory, so it always fell through to the system-wide copy in
+  `/usr/lib/quickstt` — an older release whose `whisper-cli` and
+  `transcribe-cli` were compiled with `-march=native` and die with **SIGILL
+  ("Illegal instruction")** on other CPUs. The model was never loaded at all:
+  `whisper_model_load` stopped right after `n_langs = 99`. The app now
+  prefers its own bundled engines, falls back to the next candidate when one
+  dies, and states the real reason ("terminated by signal 4 — the engine
+  binary was built for a different CPU").
+- **Linux: the mini pill never appeared at all.** Slint reported the widget
+  window as visible while the X11 window stayed `IsUnMapped` (Xfwm4 race), so
+  nothing was on screen and Ctrl+Space looked completely dead. The window is
+  now mapped explicitly after `show()` and re-mapped (at most every 2 s) if
+  the WM unmaps it behind Slint's back.
+- **Pill visibility (Windows + Linux).** The collapsed widget was a 9×41
+  hairline sliver that disappeared over dark videos. It is now a 32×32 mic
+  circle (light glyph + 1px ring) on every dock — always findable, and the
+  hover morph grows out of it in place.
+- **CI: Linux engines are built for the portable x86-64 baseline**
+  (`GGML_NATIVE=OFF`, `-march=x86-64 -mtune=generic`) for whisper.cpp,
+  transcribe.cpp and the native backend, so a release can no longer ship a
+  binary that crashes with SIGILL on a user's CPU.
+
+### Added
+- **Android: real on-device dictation.** The touch app now captures the
+  microphone for real (NDK AAudio through a small C shim — cpal has no
+  Android backend), transcribes it on-device (whisper.cpp cross-compiled for
+  arm64-v8a with the NDK, shipped inside the APK and unpacked on first run),
+  copies the finished text to the clipboard and lists it in History. The
+  model (Whisper Tiny EN, 32 MB) is downloaded in-app, never bundled.
+- **Android: setup steps + floating bubble.** The Listen tab now walks
+  through the three setup steps (microphone permission → model download →
+  overlay permission) and explains how to use the app. A floating bubble is
+  drawn above other apps (WindowManager overlay) showing the mic state and
+  the latest transcript.
+- **Qwen3-ASR 0.6B (Q4_K_M)** and **Cactus Whistle 16M** are now real,
+  selectable catalog models on Windows and Linux (auto-detect language).
+
 ## [2.0.0-alpha.16] — 2026-10-20
 
 ### Fixed

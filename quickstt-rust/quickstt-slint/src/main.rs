@@ -6053,6 +6053,11 @@ fn dock_hop(
                 if want_pill {
                     if !p.window().is_visible() {
                         widget_platform::show_widget(p.window());
+                    } else {
+                        // Slint can think the window is visible while X has it
+                        // unmapped (Xfwm4 race). Re-map at most every 2s, so
+                        // the pill recovers without a restart.
+                        widget_platform::ensure_mapped_periodic(p.window());
                     }
                     // Morph drive lives in the 16ms anim ticker (60fps,
                     // content props only — the window never resizes); the

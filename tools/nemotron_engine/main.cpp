@@ -312,6 +312,7 @@ int main() {
 
   struct transcribe_session *session = nullptr;
   bool streaming = false;
+  bool supportsStreaming = false;
   int latencyMode = 6;
   std::string language = "en-US";
   std::string line;
@@ -322,15 +323,29 @@ int main() {
       session = nullptr;
     }
     streaming = false;
+    supportsStreaming = false;
 #ifdef _WIN32
     // Immediately release model weights from RAM back to Windows OS
     SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
 #endif
   };
 
+  // Qwen3-ASR's transcribe.cpp port accepts only auto-detect (NULL); every
+  // other family gets the selected locale string.
+  auto runLanguage = [&]() -> const char * {
+    if (language.empty() || language == "auto" || language == "Auto")
+      return nullptr;
+    return language.c_str();
+  };
+
   auto beginStream = [&]() -> bool {
     if (!session) {
       respondError("Model not loaded");
+      return false;
+    }
+    // Offline-only families (e.g. Qwen3-ASR) reject streaming explicitly.
+    if (!supportsStreaming) {
+      respondError("model does not support streaming");
       return false;
     }
     // ALWAYS reset stream session before beginning a new stream
@@ -340,7 +355,7 @@ int main() {
 
     struct transcribe_run_params run;
     transcribe_run_params_init(&run);
-    run.language = language.c_str();
+    run.language = runLanguage();
     run.timestamps = TRANSCRIBE_TIMESTAMPS_NONE;
 
     struct transcribe_stream_params sp;
@@ -433,16 +448,15 @@ int main() {
         continue;
       }
 
-      // Verify streaming capability (Handy Live requires it).
+      // Verify capabilities. Offline-only families (Qwen3-ASR) load fine and
+      // simply reject stream_* actions later; streaming families keep the
+      // existing guarantee that Live mode is usable.
       struct transcribe_capabilities caps;
       transcribe_capabilities_init(&caps);
+      supportsStreaming = false;
       if (transcribe_model_get_capabilities(transcribe_get_model(session),
                                             &caps) == TRANSCRIBE_OK) {
-        if (!caps.supports_streaming) {
-          freeSession();
-          respondError("model does not support streaming");
-          continue;
-        }
+        supportsStreaming = caps.supports_streaming != 0;
       }
       respondOk();
       continue;
@@ -554,7 +568,7 @@ int main() {
       }
       struct transcribe_run_params run;
       transcribe_run_params_init(&run);
-      run.language = language.c_str();
+      run.language = runLanguage();
       run.timestamps = TRANSCRIBE_TIMESTAMPS_NONE;
       transcribe_status st =
           transcribe_run(session, samples.data(), int(samples.size()), &run);
@@ -585,7 +599,7 @@ int main() {
       }
       struct transcribe_run_params run;
       transcribe_run_params_init(&run);
-      run.language = language.c_str();
+      run.language = runLanguage();
       run.timestamps = TRANSCRIBE_TIMESTAMPS_NONE;
       transcribe_status st =
           transcribe_run(session, samples.data(), int(samples.size()), &run);

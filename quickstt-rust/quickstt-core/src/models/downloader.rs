@@ -164,6 +164,8 @@ fn install_model(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<
         EngineFamily::Phonon2 => install_phonon2(desc, state),
         EngineFamily::SenseVoice => install_sensevoice(desc, state),
         EngineFamily::Nemotron => install_nemotron(desc, state),
+        EngineFamily::Qwen3Asr => install_qwen3_asr(desc, state),
+        EngineFamily::Whistle => install_whistle(desc, state),
         EngineFamily::Canary => install_canary(desc, state),
         EngineFamily::Photon => install_photon(desc, state),
         // Canary-Qwen weights (~5GB) arrive via NeMo itself on first GPU
@@ -1061,6 +1063,164 @@ fn install_nemotron(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Resu
     let q8 = model_dir.join("nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf");
     if q8.exists() && dest.exists() {
         let _ = std::fs::remove_file(&q8);
+    }
+    Ok(())
+}
+
+// ── Qwen3-ASR 0.6B (transcribe.cpp GGUF) ──
+// Alibaba Qwen3-ASR-0.6B (Apache-2.0), GGUF port by Handy. Offline
+// multilingual (30 languages, in-model auto detect). Q4_K_M is the CPU
+// default: 589,560,480 B (562 MiB), 2.26% WER on LibriSpeech test-clean.
+// Pinned revision keeps the bytes reproducible; the worker ships with the app.
+
+const QWEN3_ASR_REPO: &str = "handy-computer/Qwen3-ASR-0.6B-gguf";
+const QWEN3_ASR_REV: &str = "7e7c69a577fa2725dfedbe34b5e999336e30a19b";
+const QWEN3_ASR_Q4: &str = "Qwen3-ASR-0.6B-Q4_K_M.gguf";
+
+fn install_qwen3_asr(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<()> {
+    let models_root = catalog::models_root();
+    let model_dir = models_root.join(&desc.model_dir);
+    std::fs::create_dir_all(&model_dir)?;
+    let dest = model_dir.join(QWEN3_ASR_Q4);
+    if dest
+        .metadata()
+        .map(|m| m.len() >= 580_000_000)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    set_status(
+        state,
+        "Downloading Qwen3-ASR 0.6B Q4_K_M (562MB, 30-language offline)…".into(),
+    );
+    let url = format!(
+        "https://huggingface.co/{}/resolve/{}/{}",
+        QWEN3_ASR_REPO, QWEN3_ASR_REV, QWEN3_ASR_Q4
+    );
+    download_file(
+        &url,
+        &dest,
+        state,
+        &FileDl {
+            label: QWEN3_ASR_Q4,
+            index: 0,
+            count: 1,
+        },
+    )?;
+    Ok(())
+}
+
+// ── Cactus Whistle (`.cact` + Cactus `needle` runtime) ──
+// Apache-2.0, 16.9 MB single container, 7 languages, CPU-only. The runtime is
+// the Cactus `needle` CLI (~1.5 MB) from the needle3 repo, one binary per OS;
+// it is staged in models/runtimes/whistle so engine detection finds it even
+// for portable installs.
+
+const WHISTLE_REPO: &str = "Cactus-Compute/whistle";
+const WHISTLE_REV: &str = "main";
+const NEEDLE3_REPO: &str = "Cactus-Compute/needle3";
+
+fn install_whistle(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<()> {
+    let models_root = catalog::models_root();
+    let model_dir = models_root.join(&desc.model_dir);
+    std::fs::create_dir_all(&model_dir)?;
+
+    set_status(state, "Downloading Cactus Whistle 16M (17MB, 7 languages)…".into());
+
+    // 1. Model container.
+    let cact = model_dir.join("whistle.cact");
+    if !cact
+        .metadata()
+        .map(|m| m.len() >= 16_000_000)
+        .unwrap_or(false)
+    {
+        let url = format!(
+            "https://huggingface.co/{}/resolve/{}/{}",
+            WHISTLE_REPO, WHISTLE_REV, "whistle.cact"
+        );
+        download_file(
+            &url,
+            &cact,
+            state,
+            &FileDl {
+                label: "whistle.cact",
+                index: 0,
+                count: 2,
+            },
+        )?;
+    }
+
+    // 2. Model config (tiny, attribution/metadata; best-effort).
+    let cfg = model_dir.join("config.json");
+    if !cfg.exists() {
+        let url = format!(
+            "https://huggingface.co/{}/resolve/{}/{}",
+            WHISTLE_REPO, WHISTLE_REV, "config.json"
+        );
+        let _ = download_file(
+            &url,
+            &cfg,
+            state,
+            &FileDl {
+                label: "config.json",
+                index: 1,
+                count: 2,
+            },
+        );
+    }
+
+    // 3. Runtime binary for this OS.
+    install_needle_runtime(state)?;
+    Ok(())
+}
+
+fn install_needle_runtime(state: &SharedState) -> anyhow::Result<()> {
+    let rt_dir = catalog::models_root().join("runtimes/whistle");
+    std::fs::create_dir_all(&rt_dir)?;
+
+    let (dest_name, remote) = if cfg!(target_os = "windows") {
+        ("needle.exe", "windows-x86_64/needle.exe")
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+        ("needle", "linux-x86_64/needle")
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
+        ("needle", "linux-arm64/needle")
+    } else {
+        // No runnable CLI target on this platform; the model still installs
+        // and engine detection reports the missing runtime.
+        return Ok(());
+    };
+
+    let dest = rt_dir.join(dest_name);
+    if dest
+        .metadata()
+        .map(|m| m.len() >= 1_000_000)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    set_status(state, "Downloading Cactus needle runtime…".into());
+    let url = format!(
+        "https://huggingface.co/{}/resolve/main/{}",
+        NEEDLE3_REPO, remote
+    );
+    download_file(
+        &url,
+        &dest,
+        state,
+        &FileDl {
+            label: dest_name,
+            index: 0,
+            count: 1,
+        },
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&dest) {
+            let mut perm = meta.permissions();
+            perm.set_mode(perm.mode() | 0o755);
+            let _ = std::fs::set_permissions(&dest, perm);
+        }
     }
     Ok(())
 }

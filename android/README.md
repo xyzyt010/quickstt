@@ -3,7 +3,6 @@
 Touch-first port of QuickSTT. The dashboard is a **new** Slint scene
 (`ui/android.slint`) designed for phones — bottom navigation, a thumb-reachable
 record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window.
-It shares the desktop palette and the same model engines.
 
 ## Status
 
@@ -12,9 +11,34 @@ It shares the desktop palette and the same model engines.
 | Rust + Slint native Android app (`android_main`) | ✅ builds / installs |
 | Touch-first dashboard (Listen, History, Models, Settings) | ✅ implemented |
 | Desktop preview of the Android scene | ✅ `cargo run --example preview` |
-| Audio capture + transcription wiring | ⏳ next (port `quickstt-core` engine calls) |
-| Always-on floating pill (overlay + foreground service) | ⏳ next (Kotlin service + `WindowManager`) |
+| **Microphone capture** (NDK AAudio, 16 kHz mono) | ✅ implemented |
+| **On-device transcription** (whisper.cpp for arm64-v8a) | ✅ implemented |
+| **Model download in-app** (Whisper Tiny EN, 32 MB) | ✅ implemented |
+| **Clipboard copy** of the finished transcript | ✅ implemented |
+| **Floating bubble over other apps** (WindowManager overlay) | ✅ implemented (read-out bubble) |
+| Setup steps / how-to-use card in the Listen tab | ✅ implemented |
+| Tap-to-record on the floating bubble | ⏳ needs a Java service (cargo-apk cannot declare one) |
 | SenseVoice / Phonon-2 / Parakeet ONNX on device | ⏳ needs the ONNX Runtime AAR for each ABI |
+
+## How it works
+
+1. **Capture** — `src/aaudio.c` wraps the NDK's AAudio recording API (cpal has
+   no Android backend). It records 16 kHz mono float, which is exactly what
+   whisper.cpp wants, so no resampling is needed. `src/audio.rs` is the Rust
+   side (start / read / stop + level metering + WAV writing).
+2. **Transcribe** — whisper.cpp is cross-compiled for `arm64-v8a` with the
+   Android NDK (`cmake` + the NDK toolchain file, portable x86-64 baseline so
+   it never SIGILLs), stripped and shipped inside the APK
+   (`prebuilt/whisper-cli-arm64-v8a`). At first run it is written to the app's
+   private files directory and executed once per turn.
+3. **Model** — never bundled. The Listen tab's step 2 downloads
+   `ggml-tiny.en-q5_1.bin` (32 MB) from the same HuggingFace source the
+   desktop app uses, with a progress bar.
+4. **Result** — the transcript is shown in the app, pushed into History and
+   copied to the system clipboard, so it can be pasted into any app.
+5. **Floating bubble** — a `WindowManager` overlay (`TYPE_APPLICATION_OVERLAY`)
+   shows the mic state and the last transcript above other apps. The user
+   grants "Display over other apps" in step 3 of the setup card.
 
 ## Build
 
@@ -32,7 +56,7 @@ $env:ANDROID_HOME     = "$env:LOCALAPPDATA\Android\Sdk"
 $env:ANDROID_NDK_ROOT = "$env:LOCALAPPDATA\Android\Sdk\ndk\27.3.13750724"
 cd android
 cargo apk build --target aarch64-linux-android --lib
-# → target\debug\apk\quickstt-android.apk (debug-signed, ~166 MB)
+# → target\debug\apk\quickstt-android.apk (debug-signed)
 ```
 
 `--lib` is required: the GUI is the cdylib's `android_main`, and cargo-apk
@@ -65,6 +89,25 @@ cd android
 cargo run --example preview
 ```
 
+### Rebuilding the embedded engine
+
+The APK ships `prebuilt/whisper-cli-arm64-v8a`. To rebuild it from a fresh
+whisper.cpp checkout (portable baseline, no `-march=native` — a native build
+crashes with SIGILL on many phones):
+
+```powershell
+$ndk = "$env:LOCALAPPDATA\Android\Sdk\ndk\27.3.13750724"
+git clone --depth 1 https://github.com/ggerganov/whisper.cpp $env:TEMP\whisper.cpp
+cmake -S $env:TEMP\whisper.cpp -B $env:TEMP\whisper-android -G Ninja `
+  -DCMAKE_TOOLCHAIN_FILE="$($ndk -replace '\\','/')/build/cmake/android.toolchain.cmake" `
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release `
+  -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DBUILD_SHARED_LIBS=OFF `
+  -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF
+cmake --build $env:TEMP\whisper-android --target whisper-cli
+& "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe" --strip-all "$env:TEMP\whisper-android\bin\whisper-cli"
+Copy-Item "$env:TEMP\whisper-android\bin\whisper-cli" android\prebuilt\whisper-cli-arm64-v8a -Force
+```
+
 ## Why the UI differs from the desktop
 
 - **Bottom navigation** instead of a collapsible sidebar: one-handed reach.
@@ -76,18 +119,16 @@ cargo run --example preview
 
 ## Next steps (in order)
 
-1. **Runtime**: move `quickstt-core`'s engine dispatch behind a small Android
-   facade; request `RECORD_AUDIO` at runtime; stream 16 kHz mono into the
-   selected engine.
+1. **Tap-to-record on the floating bubble.** `cargo-apk` cannot declare a
+   `Service` (it only generates a single activity), so the bubble is currently
+   a read-out. Making it interactive needs a small Kotlin/Java service (or a
+   Gradle build instead of cargo-apk) that owns a `ForegroundService` and
+   forwards taps into the Rust cdylib.
 2. **ONNX Runtime for Android**: add `onnxruntime-android` (AAR) via Gradle, or
    link the prebuilt `libonnxruntime.so` per ABI; point `ORT_DYLIB_PATH` at it.
    SenseVoice and Parakeet/Phonon share this.
-3. **Model downloads**: reuse `quickstt-core::models::downloader` (it already
-   handles SenseVoice, Phonon-2 and Parakeet with pinned revisions); store under
-   the app's private `files/models/` (no external storage permission needed).
-4. **Floating pill**: a `ForegroundService` (type `microphone`) plus
-   `WindowManager.addView` with `TYPE_APPLICATION_OVERLAY`, gated on
-   `Settings.canDrawOverlays()`. Kotlin lives in a Gradle module; the Rust
-   cdylib stays untouched. The pill expands/collapses like the desktop one.
-5. **Offload**: mirror the desktop idle-unload (`auto_offload`, 60 s) by
-   dropping the engine session from the service when idle.
+3. **More models**: the engine layer is model-agnostic — adding the Qwen3-ASR
+   GGUF (via the Handy transcribe.cpp worker built for arm64) only needs a
+   second embedded binary and a catalog entry.
+4. **Offload**: mirror the desktop idle-unload (`auto_offload`, 60 s) by
+   dropping the engine session when idle.

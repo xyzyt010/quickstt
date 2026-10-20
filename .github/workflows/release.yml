@@ -90,7 +90,14 @@ jobs:
       - name: Build transcribe.cpp (Nemotron GGUF engine)
         run: |
           git clone --depth 1 https://github.com/handy-computer/transcribe.cpp /tmp/tcpp
-          cmake -S /tmp/tcpp -B /tmp/tcpp/build -DCMAKE_BUILD_TYPE=Release
+          # Portable baseline: ggml bakes -march=native in by default (GGML_NATIVE=ON),
+          # so a runner with AVX-512 produces a binary that dies with SIGILL
+          # ("Illegal instruction") on older CPUs — every transcription then fails
+          # while the model and the audio are fine. x86-64 baseline runs everywhere.
+          cmake -S /tmp/tcpp -B /tmp/tcpp/build -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DCMAKE_C_FLAGS="-march=x86-64 -mtune=generic" \
+            -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
           cmake --build /tmp/tcpp/build -j"$(nproc)"
           mkdir -p quickstt-rust/target/release/tools/nemotron
           cp -f /tmp/tcpp/build/bin/transcribe-cli quickstt-rust/target/release/tools/nemotron/
@@ -98,7 +105,10 @@ jobs:
           ldd quickstt-rust/target/release/tools/nemotron/transcribe-cli | head -20
       - name: CMake native backend + Qt widget GUI (stt_service + quickstt-app)
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DCMAKE_C_FLAGS="-march=x86-64 -mtune=generic" \
+            -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
           cmake --build build --target stt_service_native QuickSTT_App -j"$(nproc)"
           file build/stt_service build/quickstt-app
           ldd build/quickstt-app | grep -i "not found" && exit 1 || true

@@ -18,6 +18,11 @@ slint = { version = "1.17", default-features = false, features = [
     "backend-android-activity-06",
     "renderer-software",
 ] }
+# JNI: clipboard, microphone permission, and the floating overlay bubble.
+jni = "0.21"
+ndk-context = "0.1"
+# Model download (HTTPS, pure Rust — works on Android).
+ureq = "2.10"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 slint = { version = "1.17", default-features = false, features = [
@@ -29,6 +34,8 @@ slint = { version = "1.17", default-features = false, features = [
 
 [build-dependencies]
 slint-build = "1.17"
+# Compiles the AAudio capture shim for Android targets.
+cc = "1.2"
 
 [profile.release]
 opt-level = "s"
@@ -84,6 +91,12 @@ required = false
 [package.metadata.android.application]
 label = "QuickSTT"
 theme = "@android:style/Theme.Black.NoTitleBar.Fullscreen"
+
+# Local release signing (the keystore is NOT in the repo — see android/README.md).
+[package.metadata.android.signing.release]
+path = "quickstt-release.jks"
+keystore_password = "quickstt"
+key_password = "quickstt"
 
 [package.metadata.android.application.activity]
 config_changes = "orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"

@@ -51,6 +51,15 @@ pub enum EngineFamily {
     SenseVoice,
     Vosk,
     Nemotron,
+    /// Alibaba Qwen3-ASR 0.6B via the same Handy transcribe.cpp worker as
+    /// Nemotron (GGUF, offline). 30 languages with in-model auto language
+    /// detect; this port accepts NULL (auto) only — explicit hints are
+    /// rejected upstream, so the UI offers "Auto" alone.
+    Qwen3Asr,
+    /// Cactus Whistle (Apache-2.0): a single 16.9 MB `.cact` container run by
+    /// the Cactus `needle` CLI. Offline, CPU-only, 7 languages with language
+    /// detection. One-shot process per utterance (no idle RAM to release).
+    Whistle,
     /// Handy transcribe.cpp GGUF worker (same JSON protocol as Nemotron):
     /// Canary 180M Flash. CPU Q5_K_M per spec; GPU F16/Q8 via same worker.
     Canary,
@@ -79,6 +88,8 @@ impl EngineFamily {
             EngineFamily::SenseVoice => "sensevoice",
             EngineFamily::Vosk => "vosk",
             EngineFamily::Nemotron => "nemotron",
+            EngineFamily::Qwen3Asr => "qwen3-asr",
+            EngineFamily::Whistle => "cactus-whistle",
             EngineFamily::Canary => "canary",
             EngineFamily::Photon => "photon",
             EngineFamily::CanaryQwen => "canary-qwen",
@@ -157,6 +168,36 @@ pub fn all_descriptors() -> Vec<ModelDescriptor> {
             accuracy: 84,
             speed: 90,
             blurb: "5-language CTC (zh/en/ja/ko/yue) with auto language detect".into(),
+            gpu_only: false,
+        },
+        // Qwen3-ASR 0.6B — Alibaba (Apache-2.0), transcribe.cpp GGUF port by
+        // Handy. Offline multilingual (30 languages) with in-model language
+        // detection. Q4_K_M (562 MiB) is the CPU default; the port accepts
+        // auto-detect only, so the UI language list is just "Auto".
+        ModelDescriptor {
+            name: "Qwen3-ASR 0.6B Q4_K_M (GGUF)".into(),
+            engine_family: EngineFamily::Qwen3Asr,
+            model_dir: "qwen3_asr/qwen3-0.6b-q4km".into(),
+            size_mb: 562,
+            widget_selectable: true,
+            accuracy: 94,
+            speed: 80,
+            blurb: "30-language offline ASR with auto language detect (Qwen3-ASR)".into(),
+            gpu_only: false,
+        },
+        // Cactus Whistle — Cactus Compute (Apache-2.0). A single 16.9 MB
+        // `.cact` container on the Cactus `needle` CPU engine; 7 languages
+        // (en/de/fr/es/it/nl/pl) with detection. One-shot CLI per utterance,
+        // so it never holds RAM while idle.
+        ModelDescriptor {
+            name: "Cactus Whistle 16M (CACT)".into(),
+            engine_family: EngineFamily::Whistle,
+            model_dir: "whistle/whistle-16m".into(),
+            size_mb: 16,
+            widget_selectable: true,
+            accuracy: 82,
+            speed: 88,
+            blurb: "16.9 MB multilingual ASR — 7 languages, auto detect, CPU".into(),
             gpu_only: false,
         },
         ModelDescriptor {
@@ -356,6 +397,33 @@ pub fn is_model_installed(desc: &ModelDescriptor) -> bool {
             }
             false
         }
+        EngineFamily::Qwen3Asr => {
+            // Any complete Qwen3-ASR quant counts; Q4_K_M is the download
+            // default. Partial downloads must show "[Not Installed]".
+            let complete = |name: &str, min: u64| {
+                model_path
+                    .join(name)
+                    .metadata()
+                    .map(|m| m.len() >= min)
+                    .unwrap_or(false)
+            };
+            complete("Qwen3-ASR-0.6B-Q4_K_M.gguf", 580_000_000)
+                || complete("Qwen3-ASR-0.6B-Q5_K_M.gguf", 630_000_000)
+                || complete("Qwen3-ASR-0.6B-Q6_K.gguf", 680_000_000)
+                || complete("Qwen3-ASR-0.6B-Q8_0.gguf", 840_000_000)
+                || complete("Qwen3-ASR-0.6B-F16.gguf", 1_560_000_000)
+                || complete("Qwen3-ASR-0.6B-BF16.gguf", 1_550_000_000)
+        }
+        EngineFamily::Whistle => {
+            // Single-file container: 16,919,407 B for the shipped Whistle.
+            // A truncation must show "[Not Installed]" so the card offers a
+            // clean re-download.
+            model_path
+                .join("whistle.cact")
+                .metadata()
+                .map(|m| m.len() >= 16_000_000)
+                .unwrap_or(false)
+        }
         EngineFamily::Vosk => {
             // Acoustic model + native runtime (Windows needs the MinGW trio
             // alongside libvosk.dll or LoadLibrary fails).
@@ -540,6 +608,18 @@ pub fn supported_languages(desc: &ModelDescriptor) -> Vec<String> {
             .map(|s| s.to_string())
             .collect();
     }
+    // Qwen3-ASR auto-detects among 30 languages; this transcribe.cpp port
+    // rejects explicit hints (TRANSCRIBE_ERR_UNSUPPORTED_LANGUAGE), so "Auto"
+    // is the only valid selection.
+    if matches!(desc.engine_family, EngineFamily::Qwen3Asr) {
+        return vec!["Auto".to_string()];
+    }
+    if matches!(desc.engine_family, EngineFamily::Whistle) {
+        return ["Auto", "English", "German", "French", "Spanish", "Italian", "Dutch", "Polish"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+    }
     // Canary 180M Flash: EN/DE/FR/ES (+ translation). First entry is default.
     if matches!(desc.engine_family, EngineFamily::Canary) {
         return vec!["English", "German", "French", "Spanish"]
@@ -591,11 +671,14 @@ pub fn models_for_hardware(
             if has_discrete_gpu {
                 // GPU path: Whisper Tiny + Large Turbo + Canary-Qwen, plus
                 // Phonon-2 (CPU engine; most accurate compact English model
-                // and stays selectable on GPU boxes).
+                // and stays selectable on GPU boxes) and Qwen3-ASR (CPU
+                // offline multilingual).
                 d.name.contains("Whisper Tiny EN Q5_1")
                     || d.name.contains("Whisper Large v3 Turbo")
                     || d.name.contains("Canary-Qwen")
                     || d.name.contains("Phonon-2")
+                    || d.name.contains("Qwen3-ASR")
+                    || d.name.contains("Whistle")
             } else {
                 !d.gpu_only
             }
@@ -792,6 +875,49 @@ mod tests {
         // class this model was primarily added for).
         assert!(models_for_hardware(false).iter().any(|d| d.name == p.name));
         assert!(models_for_hardware(true).iter().any(|d| d.name == p.name));
+    }
+
+    #[test]
+    fn qwen3_asr_registered_offline_and_auto_only() {
+        let q = all_descriptors()
+            .into_iter()
+            .find(|d| matches!(d.engine_family, EngineFamily::Qwen3Asr))
+            .expect("Qwen3Asr descriptor registered");
+        assert!(!q.gpu_only, "Qwen3-ASR runs on CPU");
+        assert_eq!(q.engine_family.display_name(), "qwen3-asr");
+        // The transcribe.cpp port rejects explicit language hints, so the UI
+        // must expose Auto only (no unsupported-language failures).
+        assert_eq!(supported_languages(&q), vec!["Auto".to_string()]);
+        // Offline per-utterance model, never the streaming/paste-after path.
+        assert!(!is_streaming_model(&q.name));
+        assert!(models_for_hardware(false).iter().any(|d| d.name == q.name));
+        assert!(models_for_hardware(true).iter().any(|d| d.name == q.name));
+    }
+
+    #[test]
+    fn whistle_registered_multilingual_and_cpu_visible() {
+        let w = all_descriptors()
+            .into_iter()
+            .find(|d| matches!(d.engine_family, EngineFamily::Whistle))
+            .expect("Whistle descriptor registered");
+        assert!(!w.gpu_only, "Whistle runs on CPU");
+        assert_eq!(w.engine_family.display_name(), "cactus-whistle");
+        assert_eq!(
+            supported_languages(&w),
+            vec![
+                "Auto".to_string(),
+                "English".to_string(),
+                "German".to_string(),
+                "French".to_string(),
+                "Spanish".to_string(),
+                "Italian".to_string(),
+                "Dutch".to_string(),
+                "Polish".to_string(),
+            ]
+        );
+        assert!(!is_streaming_model(&w.name));
+        assert!(models_for_hardware(false).iter().any(|d| d.name == w.name));
+        assert!(models_for_hardware(true).iter().any(|d| d.name == w.name));
     }
 
     #[test]

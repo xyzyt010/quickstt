@@ -297,8 +297,54 @@ pub fn show_widget(window: &slint::Window) {
     // (no title bar, no taskbar entry, always-on-top). Post-show, like the
     // Windows path above — the X window only exists once shown.
     #[cfg(not(target_os = "windows"))]
-    strip_chrome(window);
+    {
+        strip_chrome(window);
+        // Slint/winit occasionally reports the window as visible while the
+        // X11 window is still IsUnMapped (observed on Xfwm4 at 115% scale:
+        // the pill had a valid 15x52 geometry but never appeared, so both
+        // the widget and Ctrl+Space looked dead). Map it explicitly after
+        // show(), the same way a click on the tray Show item would.
+        ensure_mapped(window);
+    }
 }
+
+/// Ensure the native X11 window is actually mapped. `window.is_visible()`
+/// can lag behind X on some WMs, and hiding/showing widgets then leaves a
+/// valid-sized but invisible window (the "pill has no UI" / "Ctrl+Space
+/// does nothing" report). Idempotent and cheap — one QueryTree-free
+/// GetWindowAttributes round trip.
+#[cfg(not(target_os = "windows"))]
+pub fn ensure_mapped(window: &slint::Window) {
+    if let Some(xid) = xid_of(window) {
+        x11q::ensure_mapped(xid);
+    }
+}
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+pub fn ensure_mapped(_window: &slint::Window) {}
+
+/// Throttled variant for the 50ms poll: recovers a pill that a WM or a
+/// race unmapped behind Slint's back, without opening an X connection on
+/// every tick. At most once every 2 seconds while the pill should be shown.
+#[cfg(not(target_os = "windows"))]
+pub fn ensure_mapped_periodic(window: &slint::Window) {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let due = LAST
+        .lock()
+        .map(|mut t| {
+            let go = t.map(|p| p.elapsed().as_millis() >= 2000).unwrap_or(true);
+            if go {
+                *t = Some(std::time::Instant::now());
+            }
+            go
+        })
+        .unwrap_or(true);
+    if due {
+        ensure_mapped(window);
+    }
+}
+#[cfg(target_os = "windows")]
+pub fn ensure_mapped_periodic(_window: &slint::Window) {}
 
 /// Show the docking overlay (same show-then-style ordering requirement).
 pub fn show_overlay(window: &slint::Window) {
@@ -318,7 +364,10 @@ pub fn show_overlay(window: &slint::Window) {
     }
     window.request_redraw();
     #[cfg(not(target_os = "windows"))]
-    strip_chrome(window);
+    {
+        strip_chrome(window);
+        ensure_mapped(window);
+    }
 }
 /// Click-through fullscreen docking overlay: never activates, never takes
 /// focus, never intercepts mouse — it is purely visual (dark shade + outlines).
@@ -1284,7 +1333,7 @@ pub fn strip_chrome(window: &slint::Window) {
 mod x11q {
     use x11rb::connection::Connection;
     use x11rb::protocol::randr::ConnectionExt as _;
-    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
+    use x11rb::protocol::xproto::{AtomEnum, ConfigureWindowAux, ConnectionExt as _, MapState, StackMode};
     use x11rb::rust_connection::RustConnection;
     // change_property32 et al live on the wrapper trait, not the protocol
     // traits above.
@@ -1298,6 +1347,38 @@ mod x11q {
 
     pub fn can_connect() -> bool {
         connect().is_some()
+    }
+
+    /// Map an already-created X11 window if the server says it is not
+    /// viewable, then raise it. Used after show(): winit can report success
+    /// while the window stays IsUnMapped on Xfwm4, which makes the pill
+    /// invisible even though Slint's `is_visible()` is true.
+    pub fn ensure_mapped(xid: u32) {
+        let Some((conn, _root)) = connect() else {
+            return;
+        };
+        let viewable = conn
+            .get_window_attributes(xid)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|a| a.map_state == MapState::VIEWABLE)
+            .unwrap_or(false);
+        if viewable {
+            return;
+        }
+        if conn
+            .map_window(xid)
+            .ok()
+            .and_then(|c| c.check().ok())
+            .is_none()
+        {
+            return;
+        }
+        let _ = conn
+            .configure_window(xid, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))
+            .ok()
+            .and_then(|c| c.check().ok());
+        let _ = conn.flush();
     }
 
     pub fn cursor_pos() -> Option<(i32, i32)> {

@@ -25,12 +25,21 @@ pub struct SttEngineConfig {
     pub parakeet_engine_path: Option<PathBuf>,
     pub vosk_path: Option<PathBuf>,
     pub nemotron_path: Option<PathBuf>,
+    /// Cactus `needle` CLI for Whistle `.cact` models (one-shot per turn).
+    pub whistle_path: Option<PathBuf>,
     /// Persistent Photon worker script (tools/photon/photon_worker.py).
     pub photon_worker_path: Option<PathBuf>,
     /// Python interpreter that has `moondream` installed (probed once).
     pub photon_python: Option<PathBuf>,
     /// Persistent Canary-Qwen worker script (tools/canary/canary_worker.py).
     pub canary_worker_path: Option<PathBuf>,
+    /// Extra engine binaries to try when the primary one fails. A stale
+    /// build (e.g. an old system-wide whisper-cli compiled with
+    /// -march=native) dies with SIGILL on other CPUs; the next candidate
+    /// usually works, so one broken binary must not break all STT.
+    pub whisper_cli_fallbacks: Vec<PathBuf>,
+    pub nemotron_fallbacks: Vec<PathBuf>,
+    pub whistle_fallbacks: Vec<PathBuf>,
 }
 
 /// Probe well-known Python launchers; returns the first that runs.
@@ -90,15 +99,27 @@ impl SttEngineConfig {
         let models_root = crate::models::catalog::models_root();
         
         let exe_ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+        // Engines bundled WITH the app always win over anything installed
+        // system-wide. The deb/AppImage layout is <prefix>/bin/quickstt +
+        // <prefix>/lib/quickstt/tools/...; the portable tree is <dir>/quickstt
+        // + <dir>/tools/.... A stale copy in /usr/lib/quickstt (older release,
+        // different build flags) must never shadow the app's own binaries:
+        // an old whisper-cli/transcribe-cli built with -march=native dies
+        // with SIGILL ("Illegal instruction") on other CPUs, and the app
+        // then reports "Transcribe failed" for every single utterance even
+        // though the model and the audio are fine.
+        let bundled_tools = exe_dir.join("../lib/quickstt/tools");
         let whisper_candidates = [
+            bundled_tools.join(format!("whisper_cpp/whisper-cli{}", exe_ext)),
+            exe_dir.join(format!("tools/whisper_cpp/whisper-cli{}", exe_ext)),
             models_root.join(format!("runtimes/whisper_cpp/cpu/whisper-cli{}", exe_ext)),
             models_root.join(format!("runtimes/whisper_cpp/whisper-cli{}", exe_ext)),
-            exe_dir.join(format!("runtimes/whisper_cpp/cpu/whisper-cli{}", exe_ext)),
             PathBuf::from(format!("/usr/lib/quickstt/tools/whisper_cpp/whisper-cli{}", exe_ext)),
             exe_dir.join(format!("whisper-cli{}", exe_ext)),
         ];
         
         let sherpa_candidates = [
+            bundled_tools.join(format!("sherpa_onnx/bin/sherpa-onnx-offline{}", exe_ext)),
             models_root.join(format!("runtimes/sherpa_onnx/cpu/bin/sherpa-onnx-offline{}", exe_ext)),
             models_root.join(format!("runtimes/sherpa_onnx/sherpa-onnx-offline{}", exe_ext)),
             exe_dir.join(format!("runtimes/sherpa_onnx/cpu/bin/sherpa-onnx-offline{}", exe_ext)),
@@ -107,6 +128,7 @@ impl SttEngineConfig {
         ];
         
         let parakeet_candidates = [
+            bundled_tools.join(format!("parakeet/parakeet_engine{}", exe_ext)),
             exe_dir.join(format!("tools/parakeet/parakeet_engine{}", exe_ext)),
             models_root.join(format!("runtimes/parakeet/parakeet_engine{}", exe_ext)),
             PathBuf::from(format!("/usr/lib/quickstt/tools/parakeet/parakeet_engine{}", exe_ext)),
@@ -128,15 +150,17 @@ impl SttEngineConfig {
         // Q4_K_M is the working CPU quant (Q8_0 decodes to all-<unk> in the
         // shipped GGUF); the worker resolves the file inside model_dir.
         let nemotron_candidates = [
+            bundled_tools.join(format!("nemotron/nemotron_engine{}", exe_ext)),
             exe_dir.join(format!("tools/nemotron/nemotron_engine{}", exe_ext)),
-            PathBuf::from(format!("/usr/lib/quickstt/tools/nemotron/nemotron_engine{}", exe_ext)),
             exe_dir.join(format!("nemotron_engine{}", exe_ext)),
+            bundled_tools.join(format!("nemotron/transcribe-cli{}", exe_ext)),
             exe_dir.join(format!("tools/nemotron/transcribe{}", exe_ext)),
             models_root.join(format!("runtimes/nemotron/transcribe-cli{}", exe_ext)),
             exe_dir.join(format!("tools/nemotron/transcribe-cli{}", exe_ext)),
             exe_dir.join(format!("transcribe-cli{}", exe_ext)),
             exe_dir.join(format!("../third_party/transcribe.cpp/build/bin/Release/transcribe-cli{}", exe_ext)),
             exe_dir.join(format!("../../third_party/transcribe.cpp/build/bin/Release/transcribe-cli{}", exe_ext)),
+            PathBuf::from(format!("/usr/lib/quickstt/tools/nemotron/nemotron_engine{}", exe_ext)),
             PathBuf::from("/usr/lib/quickstt/tools/nemotron/transcribe-cli"),
         ];
 
@@ -156,6 +180,19 @@ impl SttEngineConfig {
         }
         let photon_worker_candidates = photon_worker_candidates;
 
+        // Cactus `needle` CLI (Whistle `.cact`). The downloader stages the
+        // per-OS binary under models/runtimes/whistle; portable builds may
+        // carry it next to the exe instead.
+        let whistle_candidates = [
+            models_root.join(format!("runtimes/whistle/needle{}", exe_ext)),
+            bundled_tools.join(format!("whistle/needle{}", exe_ext)),
+            exe_dir.join(format!("tools/whistle/needle{}", exe_ext)),
+            PathBuf::from(format!(
+                "/usr/lib/quickstt/tools/whistle/needle{}",
+                exe_ext
+            )),
+        ];
+
         // Canary-Qwen worker script (NeMo SALM). Same deployed/dev layout
         // as the Photon worker.
         let mut canary_worker_candidates = vec![
@@ -170,12 +207,24 @@ impl SttEngineConfig {
             }
         }
 
+        // Existing candidates, in priority order. The first one is the
+        // primary engine; the rest are fallbacks used when a binary dies
+        // (SIGILL/SIGSEGV from a mismatched build, missing shared library,
+        // ...) so a single broken copy cannot break transcription.
+        let existing = |cands: &[PathBuf]| -> Vec<PathBuf> {
+            cands.iter().filter(|p| p.exists()).cloned().collect()
+        };
+        let whisper_existing = existing(&whisper_candidates);
+        let nemotron_existing = existing(&nemotron_candidates);
+        let whistle_existing = existing(&whistle_candidates);
+
         Self {
-            whisper_cli_path: whisper_candidates.iter().find(|p| p.exists()).cloned(),
+            whisper_cli_path: whisper_existing.first().cloned(),
             sherpa_onnx_path: sherpa_candidates.iter().find(|p| p.exists()).cloned(),
             parakeet_engine_path: parakeet_candidates.iter().find(|p| p.exists()).cloned(),
             vosk_path: vosk_candidates.iter().find(|p| p.exists()).cloned(),
-            nemotron_path: nemotron_candidates.iter().find(|p| p.exists()).cloned(),
+            nemotron_path: nemotron_existing.first().cloned(),
+            whistle_path: whistle_existing.first().cloned(),
             photon_worker_path: photon_worker_candidates
                 .iter()
                 .find(|p| p.exists())
@@ -185,6 +234,9 @@ impl SttEngineConfig {
                 .iter()
                 .find(|p| p.exists())
                 .cloned(),
+            whisper_cli_fallbacks: whisper_existing.into_iter().skip(1).collect(),
+            nemotron_fallbacks: nemotron_existing.into_iter().skip(1).collect(),
+            whistle_fallbacks: whistle_existing.into_iter().skip(1).collect(),
         }
     }
 }
@@ -194,6 +246,40 @@ impl SttEngineConfig {
 pub fn cached_config() -> SttEngineConfig {
     static CACHE: Lazy<SttEngineConfig> = Lazy::new(SttEngineConfig::detect);
     CACHE.clone()
+}
+
+/// Primary engine binary plus the fallbacks, in priority order.
+fn engine_candidates(primary: Option<PathBuf>, fallbacks: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(fallbacks.len() + 1);
+    if let Some(p) = primary {
+        out.push(p);
+    }
+    for f in fallbacks {
+        if !out.contains(f) {
+            out.push(f.clone());
+        }
+    }
+    out
+}
+
+/// Human-readable exit reason. A signal means the binary was built for a
+/// different CPU (SIGILL from -march=native) or crashed — the single most
+/// common "STT does nothing" failure on Linux, so it is spelled out.
+fn describe_exit(status: &std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return format!(
+                "terminated by signal {sig} (the engine binary was built for a \
+                 different CPU — reinstall the app's own engine build)"
+            );
+        }
+    }
+    match status.code() {
+        Some(c) => format!("exit code {c}"),
+        None => "terminated abnormally".to_string(),
+    }
 }
 
 pub fn transcribe(
@@ -258,6 +344,8 @@ pub fn transcribe_with_language(
         }
         EngineFamily::Vosk => transcribe_vosk(config, &model_dir, wav_path),
         EngineFamily::Nemotron => transcribe_nemotron(config, &model_dir, wav_path, language),
+        EngineFamily::Qwen3Asr => transcribe_qwen3_asr(config, &model_dir, wav_path),
+        EngineFamily::Whistle => transcribe_whistle(config, &model_dir, wav_path, language),
         EngineFamily::Canary => transcribe_canary(config, &model_dir, wav_path, language),
         EngineFamily::Photon => transcribe_photon(config, descriptor, wav_path),
         EngineFamily::CanaryQwen => transcribe_canary_qwen(config, descriptor, wav_path),
@@ -382,6 +470,8 @@ fn should_run_deepfilter_for_model(descriptor: &ModelDescriptor) -> bool {
         EngineFamily::NemoTransducer
             | EngineFamily::NemoCTC
             | EngineFamily::Nemotron
+            | EngineFamily::Qwen3Asr
+            | EngineFamily::Whistle
             | EngineFamily::Canary
             | EngineFamily::Vosk
             | EngineFamily::Photon
@@ -1192,11 +1282,44 @@ fn transcribe_whisper_cpp(
     descriptor: &ModelDescriptor,
     language: &str,
 ) -> Result<String> {
-    let cli = config
-        .whisper_cli_path
-        .as_ref()
-        .context("whisper-cli not found")?;
+    let candidates = engine_candidates(
+        config.whisper_cli_path.clone(),
+        &config.whisper_cli_fallbacks,
+    );
+    if candidates.is_empty() {
+        anyhow::bail!(
+            "whisper-cli not found — install the Whisper GGML model from \
+             Settings → Models (the engine ships with the app)"
+        );
+    }
+    let mut last: Option<anyhow::Error> = None;
+    for cli in &candidates {
+        match transcribe_whisper_cpp_with(
+            config,
+            model_dir,
+            wav_path,
+            descriptor,
+            language,
+            cli,
+        ) {
+            Ok(text) => return Ok(text),
+            Err(e) => {
+                warn!("whisper-cli {:?} failed: {:#}", cli, e);
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.expect("candidate list is not empty"))
+}
 
+fn transcribe_whisper_cpp_with(
+    _config: &SttEngineConfig,
+    model_dir: &Path,
+    wav_path: &Path,
+    descriptor: &ModelDescriptor,
+    language: &str,
+    cli: &Path,
+) -> Result<String> {
     let model_file = find_ggml_file(model_dir)?;
 
     // Resolve the -l flag: Auto omits it (whisper auto-detects); EN-only
@@ -1242,7 +1365,11 @@ fn transcribe_whisper_cpp(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         warn!("whisper-cli error: {}", stderr);
-        anyhow::bail!("whisper-cli failed: {}", stderr);
+        anyhow::bail!(
+            "whisper-cli failed ({}): {}",
+            describe_exit(&output.status),
+            stderr
+        );
     }
 
     let text = String::from_utf8_lossy(&output.stdout)
@@ -1779,6 +1906,233 @@ fn transcribe_nemotron(
     )?;
     let text = ensure_parakeet_ok(response, "transcribe")?.unwrap_or_default();
     Ok(clean_nemotron_text(&text))
+}
+
+/// Qwen3-ASR 0.6B via the Handy transcribe.cpp GGUF worker (same persistent
+/// JSON protocol as Nemotron). Offline per-utterance model: no stream_* calls.
+/// The port accepts auto-detect only, so the request language is "auto"
+/// (the worker maps that to NULL) regardless of the UI selection.
+fn transcribe_qwen3_asr(
+    config: &SttEngineConfig,
+    model_dir: &Path,
+    wav_path: &Path,
+) -> Result<String> {
+    let candidates = engine_candidates(config.nemotron_path.clone(), &config.nemotron_fallbacks);
+    if candidates.is_empty() {
+        anyhow::bail!(
+            "Qwen3-ASR engine not found — install the Qwen3-ASR 0.6B model from \
+             Settings → Models (the transcribe.cpp worker ships with the app)"
+        );
+    }
+    let mut last: Option<anyhow::Error> = None;
+    for cli in &candidates {
+        match transcribe_qwen3_asr_with(config, model_dir, wav_path, cli) {
+            Ok(text) => return Ok(text),
+            Err(e) => {
+                warn!("Qwen3-ASR engine {:?} failed: {:#}", cli, e);
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.expect("candidate list is not empty"))
+}
+
+fn transcribe_qwen3_asr_with(
+    _config: &SttEngineConfig,
+    model_dir: &Path,
+    wav_path: &Path,
+    cli: &Path,
+) -> Result<String> {
+    let gguf = find_qwen3_gguf(model_dir)?;
+    let stem = cli.file_stem().and_then(|f| f.to_str()).unwrap_or("");
+    let is_tcpp_cli = stem == "transcribe-cli" || stem == "transcribe";
+
+    if is_tcpp_cli {
+        info!("Qwen3-ASR via transcribe-cli {:?} gguf={:?}", cli, gguf);
+        let mut nc = Command::new(cli);
+        no_window(&mut nc);
+        // No --language: this port only supports auto-detect.
+        let output = nc
+            .arg("-m")
+            .arg(&gguf)
+            .arg("--threads")
+            .arg("4")
+            .arg("--backend")
+            .arg("cpu")
+            .arg(wav_path)
+            .output()
+            .context("Failed to run transcribe-cli")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("transcribe-cli (Qwen3-ASR) error: {}", stderr);
+            anyhow::bail!(
+                "transcribe-cli failed ({}): {}",
+                describe_exit(&output.status),
+                stderr
+            );
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        // transcribe-cli prints a metadata block then `text: <transcript>`
+        // and `detected-language: xx`; prefer the explicit transcript line.
+        if let Some(line) = text
+            .lines()
+            .find_map(|l| l.trim_start().strip_prefix("text:"))
+        {
+            return Ok(line.trim().to_string());
+        }
+        return Ok(clean_nemotron_text(&text));
+    }
+
+    if !model_dir.exists() {
+        anyhow::bail!("Qwen3-ASR model directory not found: {:?}", model_dir);
+    }
+
+    let mut guard = NEMOTRON_SESSION
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Qwen3-ASR session lock poisoned"))?;
+
+    let dead = guard
+        .as_mut()
+        .map(|s| matches!(s.child.try_wait(), Ok(Some(_))))
+        .unwrap_or(true);
+    let needs_spawn =
+        dead || guard.as_ref().map(|s| s.exe_path != *cli).unwrap_or(true);
+    if needs_spawn {
+        *guard = Some(spawn_parakeet_session(cli)?);
+    }
+
+    let session = guard
+        .as_mut()
+        .context("Qwen3-ASR session was not initialised")?;
+
+    if session.loaded_model_dir.as_deref() != Some(model_dir) {
+        let response = parakeet_request(
+            session,
+            json!({
+                "action": "load",
+                "model_path": gguf.to_string_lossy(),
+                "language": "auto",
+            }),
+        )?;
+        ensure_parakeet_ok(response, "load")?;
+        session.loaded_model_dir = Some(model_dir.to_path_buf());
+    }
+
+    let response = parakeet_request(
+        session,
+        json!({
+            "action": "transcribe",
+            "audio_path": wav_path.to_string_lossy(),
+        }),
+    )?;
+    let text = ensure_parakeet_ok(response, "transcribe")?.unwrap_or_default();
+    Ok(clean_nemotron_text(&text))
+}
+
+/// Pick the best available Qwen3-ASR GGUF (Q4_K_M default, then higher
+/// quants; any Qwen3 gguf as a last resort).
+fn find_qwen3_gguf(model_dir: &Path) -> Result<PathBuf> {
+    for name in [
+        "Qwen3-ASR-0.6B-Q4_K_M.gguf",
+        "Qwen3-ASR-0.6B-Q5_K_M.gguf",
+        "Qwen3-ASR-0.6B-Q6_K.gguf",
+        "Qwen3-ASR-0.6B-Q8_0.gguf",
+        "Qwen3-ASR-0.6B-F16.gguf",
+        "Qwen3-ASR-0.6B-BF16.gguf",
+    ] {
+        let p = model_dir.join(name);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(model_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("Qwen3-ASR") && name.ends_with(".gguf") {
+                return Ok(entry.path());
+            }
+        }
+    }
+    anyhow::bail!("No Qwen3-ASR *.gguf model file found in {:?}", model_dir)
+}
+
+/// Cactus Whistle via the `needle` CLI (one-shot, offline). The CLI returns
+/// one JSON object: {"text":..,"language":..,"ttft_ms":..,"decode_tps":..}.
+/// Language is auto-detected unless the UI selects one of the seven supported
+/// languages. The process exits after the turn, so no RAM stays resident.
+fn transcribe_whistle(
+    config: &SttEngineConfig,
+    model_dir: &Path,
+    wav_path: &Path,
+    language: &str,
+) -> Result<String> {
+    let candidates = engine_candidates(config.whistle_path.clone(), &config.whistle_fallbacks);
+    if candidates.is_empty() {
+        anyhow::bail!(
+            "Cactus Whistle runtime not found — install the Whistle model from \
+             Settings → Models (the Cactus `needle` CLI is fetched with it)"
+        );
+    }
+    let mut last: Option<anyhow::Error> = None;
+    for cli in &candidates {
+        match transcribe_whistle_with(model_dir, wav_path, language, cli) {
+            Ok(text) => return Ok(text),
+            Err(e) => {
+                warn!("Whistle engine {:?} failed: {:#}", cli, e);
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.expect("candidate list is not empty"))
+}
+
+fn transcribe_whistle_with(
+    model_dir: &Path,
+    wav_path: &Path,
+    language: &str,
+    cli: &Path,
+) -> Result<String> {
+    let cact = model_dir.join("whistle.cact");
+    if !cact.exists() {
+        anyhow::bail!("Whistle model file not found: {:?}", cact);
+    }
+    let mut cmd = Command::new(cli);
+    no_window(&mut cmd);
+    cmd.arg("--model").arg(&cact).arg("--audio").arg(wav_path);
+    if let Some(code) = crate::models::catalog::whisper_code(language) {
+        // Whistle supports en/de/fr/es/it/nl/pl; whisper_code covers all of
+        // them. Unknown languages fall through to auto-detect.
+        if matches!(code, "en" | "de" | "fr" | "es" | "it" | "nl" | "pl") {
+            cmd.arg("--audio-language").arg(code);
+        }
+    }
+    let output = cmd.output().context("Failed to run Cactus needle")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!("needle (Whistle) error: {}", stderr);
+        anyhow::bail!(
+            "needle failed ({}): {}",
+            describe_exit(&output.status),
+            stderr
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The last JSON object on stdout is the transcript (banners, if any,
+    // precede it). Fall back to trimmed stdout for older binaries.
+    for line in stdout.lines().rev() {
+        let line = line.trim();
+        if line.starts_with('{') && line.contains("\"text\"") {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                return Ok(v
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string());
+            }
+        }
+    }
+    Ok(stdout.trim().to_string())
 }
 
 static CANARY_SESSION: Lazy<Mutex<Option<ParakeetSession>>> = Lazy::new(|| Mutex::new(None));

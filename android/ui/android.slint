@@ -173,6 +173,15 @@ export component AppWindow inherits Window {
     in-out property <bool> auto-offload: true;
     in-out property <bool> haptics: true;
     in-out property <float> pulse: 0.0;
+    // Live wiring (set from Rust): setup state, model download progress and
+    // the floating-bubble permission.
+    in-out property <string> status-text: "Ready";
+    in-out property <bool> mic-ok: false;
+    in-out property <bool> model-installed: false;
+    in-out property <bool> model-downloading: false;
+    in-out property <float> model-progress: 0.0;
+    in-out property <bool> overlay-ok: false;
+    in-out property <bool> busy: false;
     in property <[string]> tabs: ["Listen", "History", "Models", "Settings"];
 
     in-out property <[Turn]> turns: [
@@ -191,6 +200,11 @@ export component AppWindow inherits Window {
     callback toggle-record();
     callback pick-model(int);
     callback nav(int);
+    // Setup actions (wired in Rust).
+    callback grant-mic();
+    callback download-model();
+    callback toggle-overlay();
+    callback open-overlay-settings();
 
     // Root box: a Rectangle fills the Window; a bare root layout gets centred
     // at its preferred width by the winit backend instead of stretching.
@@ -221,9 +235,9 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: "on-device";
+                    text: root.status-text;
                     font-size: 11px;
-                    color: #4A4A4A;
+                    color: #6A6A6A;
                     vertical-alignment: center;
                 }
 
@@ -429,6 +443,152 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle { horizontal-stretch: 1; height: 1px; background: transparent; }
+
+                // ── Setup + how to use ──────────────────────────────────────
+                Rectangle {
+                    border-radius: 16px;
+                    background: #0B0B0B;
+                    border-width: 1px;
+                    border-color: #1E1E1E;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 12px;
+
+                        Text {
+                            text: "SET UP IN 3 STEPS";
+                            font-size: 10px;
+                            font-weight: 600;
+                            letter-spacing: 1.2px;
+                            color: #4A4A4A;
+                        }
+
+                        // Step 1 — microphone
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: center;
+
+                            Rectangle {
+                                width: 26px; height: 26px; border-radius: 13px;
+                                background: root.mic-ok ? #12241A : #1A1416;
+                                border-width: 1px;
+                                border-color: root.mic-ok ? #245C3B : #4A2028;
+                                Text {
+                                    text: "1"; font-size: 12px; font-weight: 700;
+                                    color: root.mic-ok ? #4ADE80 : #FF7A8A;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+
+                            VerticalLayout {
+                                horizontal-stretch: 1; spacing: 2px;
+                                Text { text: "Allow the microphone"; font-size: 14px; color: #EDEDED; }
+                                Text {
+                                    text: root.mic-ok ? "Granted — the orb can listen." : "Required for dictation.";
+                                    font-size: 12px; color: #7A7A7A; wrap: word-wrap;
+                                }
+                            }
+
+                            if !root.mic-ok : Rectangle {
+                                width: 84px; height: 34px; border-radius: 17px;
+                                background: #4ADE80;
+                                Text { text: "Allow"; font-size: 13px; font-weight: 600; color: #06120B; horizontal-alignment: center; vertical-alignment: center; }
+                                TouchArea { clicked => { root.grant-mic(); } }
+                            }
+                        }
+
+                        // Step 2 — model
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: center;
+
+                            Rectangle {
+                                width: 26px; height: 26px; border-radius: 13px;
+                                background: root.model-installed ? #12241A : #1A1416;
+                                border-width: 1px;
+                                border-color: root.model-installed ? #245C3B : #4A2028;
+                                Text {
+                                    text: "2"; font-size: 12px; font-weight: 700;
+                                    color: root.model-installed ? #4ADE80 : #FF7A8A;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+
+                            VerticalLayout {
+                                horizontal-stretch: 1; spacing: 4px;
+                                Text { text: "Download the speech model"; font-size: 14px; color: #EDEDED; }
+                                Text {
+                                    text: root.model-installed
+                                        ? "Whisper Tiny EN is installed (32 MB, offline)."
+                                        : (root.model-downloading ? "Downloading…" : "Whisper Tiny EN · 32 MB · one-time");
+                                    font-size: 12px; color: #7A7A7A; wrap: word-wrap;
+                                }
+                                if root.model-downloading : Rectangle {
+                                    height: 4px; border-radius: 2px; background: #1E1E1E;
+                                    Rectangle {
+                                        width: parent.width * root.model-progress;
+                                        height: 4px; border-radius: 2px; background: #4ADE80;
+                                    }
+                                }
+                            }
+
+                            if !root.model-installed && !root.model-downloading : Rectangle {
+                                width: 84px; height: 34px; border-radius: 17px;
+                                background: #4ADE80;
+                                Text { text: "Get"; font-size: 13px; font-weight: 600; color: #06120B; horizontal-alignment: center; vertical-alignment: center; }
+                                TouchArea { clicked => { root.download-model(); } }
+                            }
+                        }
+
+                        // Step 3 — float the bubble
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: center;
+
+                            Rectangle {
+                                width: 26px; height: 26px; border-radius: 13px;
+                                background: root.overlay-ok ? #12241A : #1A1416;
+                                border-width: 1px;
+                                border-color: root.overlay-ok ? #245C3B : #4A2028;
+                                Text {
+                                    text: "3"; font-size: 12px; font-weight: 700;
+                                    color: root.overlay-ok ? #4ADE80 : #FF7A8A;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+
+                            VerticalLayout {
+                                horizontal-stretch: 1; spacing: 2px;
+                                Text { text: "Floating bubble over other apps"; font-size: 14px; color: #EDEDED; }
+                                Text {
+                                    text: root.overlay-ok
+                                        ? "On — you will see the mic bubble above other apps."
+                                        : "Shows the mic + transcript while you use other apps.";
+                                    font-size: 12px; color: #7A7A7A; wrap: word-wrap;
+                                }
+                            }
+
+                            if !root.overlay-ok : Rectangle {
+                                width: 84px; height: 34px; border-radius: 17px;
+                                background: #1C1C1C; border-width: 1px; border-color: #2A2A2A;
+                                Text { text: "Enable"; font-size: 13px; font-weight: 600; color: #EDEDED; horizontal-alignment: center; vertical-alignment: center; }
+                                TouchArea { clicked => { root.open-overlay-settings(); } }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: #1A1A1A; }
+
+                        Text {
+                            text: "HOW TO USE";
+                            font-size: 10px; font-weight: 600; letter-spacing: 1.2px; color: #4A4A4A;
+                        }
+
+                        Text {
+                            text: "• Tap the mic orb to start, tap again to stop. The text is transcribed on-device and copied to the clipboard.\n• Or hold the orb while you speak — it stops automatically after you go quiet.\n• Open the Models tab to switch engines, History to replay a turn, Settings for auto-offload and haptics.";
+                            wrap: word-wrap; font-size: 13px; color: #9A9A9A;
+                        }
+                    }
+                }
 
                 // Recent turns.
                 Text {

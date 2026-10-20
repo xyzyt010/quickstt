@@ -7,7 +7,7 @@ pub const REGISTRY_KEY: &str = r"Software\QuickSTT\Config";
 pub const APP_NAME: &str = "QuickSTT";
 
 /// Application version
-pub const APP_VERSION: &str = "2.0.0-alpha.16";
+pub const APP_VERSION: &str = "2.0.0-alpha.17";
 
 /// STT service executable name (platform-specific extension)
 #[cfg(target_os = "windows")]

@@ -250,6 +250,7 @@ See `docs/ARCHITECTURE.md` for the full constraints.
 | **Vosk small EN 0.15** | `Vosk` `libvosk.so` | `~/.local/share/QuickSTT/models/vosk/small_en_us_0.15/` | `%APPDATA%\QuickSTT\models\vosk\small_en_us_0.15\` | 50 MB |
 | **Parakeet TDT 0.6B v3 INT8** | `ParakeetRust` `transcribe-rs onnx` | `.../nemo/tdt_0_6b_v3_int8/` | same | 640 MB |
 | **Nemotron 3.5 Streaming 0.6B Q8_0** | `Nemotron` `nemotron_engine` (GGML) | `.../nemotron/streaming_0.6b_q8_0/*.gguf` | same | 716 MB |
+| **Qwen3-ASR 0.6B Q4_K_M** | `Qwen3Asr` (GGML, offline) | `.../qwen3_asr/qwen3-0.6b-q4km/` | same | 562 MB |
 
 The pill dropdown shows `●` installed / `○` not installed + size (`catalog::display_name`). Download via Dashboard `Models` or manually place as above. Nemotron GGUF is fetched via `tools/nemotron/fetch_and_convert.py` (Handy-compatible).
 
