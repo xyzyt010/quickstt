@@ -31,15 +31,32 @@ Toolchain used and verified on this machine:
 $env:ANDROID_HOME     = "$env:LOCALAPPDATA\Android\Sdk"
 $env:ANDROID_NDK_ROOT = "$env:LOCALAPPDATA\Android\Sdk\ndk\27.3.13750724"
 cd android
-cargo apk build -t aarch64-linux-android
-# → target/release/apk/quickstt-android.apk
+cargo apk build --target aarch64-linux-android --lib
+# → target\debug\apk\quickstt-android.apk (debug-signed, ~166 MB)
 ```
+
+`--lib` is required: the GUI is the cdylib's `android_main`, and cargo-apk
+otherwise also tries to package the desktop `examples/preview.rs`.
 
 Install on a device (USB debugging):
 
 ```powershell
-adb install -r target\release\apk\quickstt-android.apk
+adb install -r target\debug\apk\quickstt-android.apk
 ```
+
+A **release** APK additionally needs a keystore (`cargo apk` refuses to sign
+release builds with the debug key):
+
+```toml
+[package.metadata.android.signing.release]
+path = "quickstt-release.jks"
+keystore_password = "…"
+```
+
+The manifest is generated from `[package.metadata.android]` in `Cargo.toml` —
+cargo-apk 0.10 ignores a hand-written `AndroidManifest.xml`. All eight
+permissions (mic, foreground service, overlay, notifications, wake lock,
+vibrate) are declared there and verified with `aapt dump permissions`.
 
 Preview the exact same UI on Windows/Linux without a device:
 
