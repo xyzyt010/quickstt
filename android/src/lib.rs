@@ -63,6 +63,22 @@ impl Session {
     }
 }
 
+/// Android entry point.
+///
+/// The APK ships this crate as a `cdylib`, and the Java side loads it as
+/// `System.loadLibrary("quickstt_android")` and looks for exactly this
+/// symbol. Without it the library contains only the dependencies and the
+/// app never starts (the activity dies with "UnsatisfiedLinkError").
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn android_main(app: slint::android::AndroidApp) {
+    if let Err(e) = slint::android::init(app) {
+        eprintln!("QuickSTT: Slint Android backend failed to start: {e}");
+        return;
+    }
+    run();
+}
+
 /// Wire callbacks and run the event loop.
 pub fn run() {
     let ui = AppWindow::new().expect("could not create the QuickSTT window");
