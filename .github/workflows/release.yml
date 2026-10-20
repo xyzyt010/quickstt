@@ -238,9 +238,56 @@ jobs:
             QuickSTT_App/QuickSTT_App.exe
             quickstt-rust/target/release/QuickSTT.exe
 
+  build-android:
+    name: Android APK (arm64-v8a)
+    runs-on: ubuntu-22.04
+    # A broken Android build must never block the desktop release.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --locked
+      - name: Restore the release keystore
+        # The keystore is not in the repo (see android/README.md). It comes
+        # from the ANDROID_KEYSTORE_BASE64 secret so the published APK is
+        # signed with the same key as the local builds (an app update
+        # needs the same signature).
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            echo "$KEYSTORE" | base64 -d > android/quickstt-release.jks
+            echo "using the release keystore"
+          else
+            echo "no keystore secret — generating a throwaway key"
+            keytool -genkeypair -v -keystore android/quickstt-release.jks \
+              -alias quickstt -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass quickstt -keypass quickstt \
+              -dname "CN=QuickSTT, OU=CI, O=QuickSTT, L=, S=, C=US"
+          fi
+      - name: Build the APK
+        working-directory: android
+        env:
+          ANDROID_HOME: ${{ steps.ndk.outputs.android-sdk }}
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_SDK_ROOT: ${{ steps.ndk.outputs.android-sdk }}
+        run: cargo apk build --release --target aarch64-linux-android --lib
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-dist
+          path: android/target/release/apk/quickstt-android.apk
+
   publish-release:
     name: Publish GitHub Release
-    needs: [build-linux-deb-appimage]
+    needs: [build-linux-deb-appimage, build-android]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -251,7 +298,11 @@ jobs:
       - name: Collect
         run: |
           mkdir -p release
-          find artifacts -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.tar.gz" -o -name "SHA256SUMS*" -o -name "QuickSTT_Portable.exe" -o -name "QuickSTT.exe" \) -exec cp -f {} release/ \;
+          find artifacts -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.tar.gz" -o -name "SHA256SUMS*" -o -name "QuickSTT_Portable.exe" -o -name "QuickSTT.exe" -o -name "quickstt-android.apk" \) -exec cp -f {} release/ \;
+          # The Android asset gets a stable, descriptive name.
+          if [ -f release/quickstt-android.apk ]; then
+            mv -f release/quickstt-android.apk release/quickstt-android-release.apk
+          fi
           ls -lh release/
           (cd release && sha256sum * | tee SHA256SUMS; cat SHA256SUMS)
       - name: Release notes
@@ -295,6 +346,13 @@ jobs:
 
           ### Checksums
           See \`SHA256SUMS\`.
+
+          ### Android (arm64-v8a)
+          \`\`\`bash
+          wget -O /tmp/quickstt.apk https://github.com/${{ github.repository }}/releases/download/${VER}/quickstt-android-release.apk
+          adb install -r /tmp/quickstt.apk
+          \`\`\`
+          The touch app dictates for real: the microphone is captured with the NDK AAudio API, whisper.cpp (arm64-v8a, shipped inside the APK) transcribes on-device, the text is copied to the clipboard and a floating bubble shows the mic state above other apps. The Listen tab walks through the three setup steps (microphone permission → model download → overlay permission) and has a **Test mic** button. The 32 MB model is downloaded in-app, never bundled.
           NOTES
           cat /tmp/notes.md
       - name: Create Release
