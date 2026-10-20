@@ -1,0 +1,830 @@
+import { ScrollView } from "std-widgets.slint";
+
+// QuickSTT for Android — touch-first UI.
+//
+// This is deliberately NOT the desktop dashboard: phones are held in one
+// hand, so the primary action (the mic orb) sits in the bottom third of the
+// thumb arc, every target is at least 48 DIP, and navigation is a fixed
+// bottom bar instead of a collapsible sidebar. Same palette and typography
+// family as the desktop app so both feel like one product.
+
+export struct Turn {
+    text: string,
+    when: string,
+    seconds: int,
+}
+
+export struct ModelItem {
+    name: string,
+    detail: string,
+    size: string,
+    installed: bool,
+}
+
+// A 24px status dot that fills when listening.
+component StatusDot inherits Rectangle {
+    in property <bool> active;
+    width: 8px;
+    height: 8px;
+    border-radius: 4px;
+    background: active ? #4ADE80 : #4A4A4A;
+    animate background { duration: 160ms; }
+}
+
+// Pill switch — 46x28 box, 22px knob, 140ms slide.
+component Toggle inherits Rectangle {
+    in-out property <bool> on;
+    callback toggled();
+
+    width: 48px;
+    height: 30px;
+    border-radius: 15px;
+    background: root.on ? #245C3B : #1A1A1A;
+    border-width: 1px;
+    border-color: root.on ? #3E8B5F : #2C2C2C;
+    animate background { duration: 150ms; easing: ease-out; }
+
+    Rectangle {
+        width: 24px;
+        height: 24px;
+        y: 2px;
+        x: root.on ? 21px : 2px;
+        border-radius: 12px;
+        background: root.on ? #FFFFFF : #B0B0B0;
+        animate x { duration: 150ms; easing: ease-out; }
+    }
+
+    TouchArea {
+        clicked => { root.toggled(); }
+    }
+}
+
+// Bottom-bar entry: 3px active rail + label, whole 1/4 column tappable.
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback picked();
+
+    // Share the bar evenly: four equal touch columns.
+    horizontal-stretch: 1;
+    background: transparent;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 9px;
+
+        Rectangle {
+            width: root.active ? 24px : 6px;
+            height: 3px;
+            border-radius: 2px;
+            background: root.active ? #FFFFFF : transparent;
+            animate width { duration: 160ms; easing: ease-out; }
+        }
+
+        Text {
+            text: root.label;
+            font-size: 11px;
+            font-weight: root.active ? 600 : 400;
+            color: root.active ? #FFFFFF : #6B6B6B;
+            horizontal-alignment: center;
+        }
+    }
+
+    TouchArea {
+        clicked => { root.picked(); }
+    }
+}
+
+// A transcript row with a circular play affordance.
+component TurnRow inherits Rectangle {
+    in property <string> text;
+    in property <string> when;
+    in property <int> seconds;
+
+    height: 68px;
+    border-radius: 12px;
+    background: transparent;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 12px;
+        alignment: center;
+
+        Rectangle {
+            width: 42px;
+            height: 42px;
+            border-radius: 21px;
+            background: #161616;
+            border-width: 1px;
+            border-color: #2A2A2A;
+
+            Path {
+                width: 9px;
+                height: 11px;
+                x: 18px;
+                y: 15px;
+                commands: "M 0 0 L 9 5.5 L 0 11 Z";
+                fill: #EDEDED;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            vertical-stretch: 1;
+
+            Text {
+                text: root.text;
+                font-size: 14px;
+                color: #EDEDED;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+
+            Text {
+                text: root.when;
+                font-size: 11px;
+                color: #5E5E5E;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: "\{root.seconds}s";
+            font-size: 11px;
+            color: #5E5E5E;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "QuickSTT";
+    background: #000000;
+    default-font-size: 15px;
+    preferred-width: 412px;
+    preferred-height: 760px;
+
+    in-out property <int> tab: 0;
+    in-out property <bool> recording: false;
+    in-out property <string> live-text: "Tap the orb, then speak naturally.";
+    in-out property <int> selected-model: 0;
+    in-out property <bool> auto-offload: true;
+    in-out property <bool> haptics: true;
+    in-out property <float> pulse: 0.0;
+    in property <[string]> tabs: ["Listen", "History", "Models", "Settings"];
+
+    in-out property <[Turn]> turns: [
+        { text: "Schedule the release review for Thursday morning.", when: "2 minutes ago", seconds: 5 },
+        { text: "Remind me to pick up the dry cleaning on the way home.", when: "26 minutes ago", seconds: 4 },
+        { text: "The new encoder cuts latency roughly in half.", when: "1 hour ago", seconds: 6 },
+    ];
+
+    in-out property <[ModelItem]> models: [
+        { name: "SenseVoice Small", detail: "5 languages · auto detect · CPU", size: "229 MB", installed: true },
+        { name: "Whisper Tiny EN", detail: "English · fastest CPU", size: "32 MB", installed: true },
+        { name: "Phonon-2 0.6B", detail: "English · highest compact accuracy", size: "688 MB", installed: false },
+        { name: "Parakeet TDT 0.6B", detail: "English · highest accuracy", size: "640 MB", installed: false },
+    ];
+
+    callback toggle-record();
+    callback pick-model(int);
+    callback nav(int);
+
+    // Root box: a Rectangle fills the Window; a bare root layout gets centred
+    // at its preferred width by the winit backend instead of stretching.
+    Rectangle {
+        background: #000000;
+
+    // ── Header ────────────────────────────────────────────────────────────
+    VerticalLayout {
+        // Status bar allowance (the winit Android surface is full-bleed).
+        Rectangle { height: 26px; background: transparent; }
+
+        Rectangle {
+            height: 56px;
+            background: transparent;
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                spacing: 12px;
+                alignment: center;
+
+                Text {
+                    text: "QuickSTT";
+                    font-size: 20px;
+                    font-weight: 700;
+                    color: #FFFFFF;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: "on-device";
+                    font-size: 11px;
+                    color: #4A4A4A;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                Rectangle {
+                    height: 32px;
+                    border-radius: 16px;
+                    background: root.recording ? #12241A : #101010;
+                    border-width: 1px;
+                    border-color: root.recording ? #245C3B : #222222;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 13px;
+                        spacing: 7px;
+                        alignment: center;
+
+                        StatusDot { active: root.recording; }
+
+                        Text {
+                            text: root.recording ? "Listening" : "Idle";
+                            font-size: 12px;
+                            color: root.recording ? #B7F7CD : #8A8A8A;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Body ──────────────────────────────────────────────────────────
+        Rectangle {
+            vertical-stretch: 1;
+            background: #000000;
+
+            // ══ LISTEN ═══════════════════════════════════════════════════
+            if root.tab == 0 : ScrollView {
+                VerticalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                spacing: 16px;
+
+                // Orb: 184px core, breathing ring while listening.
+                Rectangle {
+                    height: 216px;
+                    background: transparent;
+
+                    Rectangle {
+                        width: 184px + root.pulse * 30px;
+                        height: 184px + root.pulse * 30px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: self.width / 2;
+                        background: transparent;
+                        border-width: 1px;
+                        border-color: #245C3B;
+                        opacity: root.recording ? 0.85 - root.pulse * 0.55 : 0.0;
+                    }
+
+                    Rectangle {
+                        width: 184px;
+                        height: 184px;
+                        x: (parent.width - 184px) / 2;
+                        y: (parent.height - 184px) / 2;
+                        border-radius: 92px;
+                        background: root.recording ? #101A13 : #0D0D0D;
+                        border-width: 1px;
+                        border-color: root.recording ? #2E6B47 : #242424;
+                        animate background { duration: 200ms; }
+                        animate border-color { duration: 200ms; }
+
+                        // Drawn microphone: capsule + half-ring cradle + stand.
+                        Rectangle {
+                            width: 26px;
+                            height: 40px;
+                            x: (parent.width - 26px) / 2;
+                            y: 56px;
+                            border-radius: 13px;
+                            background: root.recording ? #4ADE80 : #FFFFFF;
+                            animate background { duration: 200ms; }
+                        }
+
+                        Rectangle {
+                            width: 48px;
+                            height: 22px;
+                            x: (parent.width - 48px) / 2;
+                            y: 78px;
+                            clip: true;
+                            background: transparent;
+
+                            Rectangle {
+                                width: 48px;
+                                height: 48px;
+                                y: -26px;
+                                border-radius: 24px;
+                                background: transparent;
+                                border-width: 2px;
+                                border-color: root.recording ? #4ADE80 : #FFFFFF;
+                            }
+                        }
+
+                        Rectangle {
+                            width: 2px;
+                            height: 12px;
+                            x: (parent.width - 2px) / 2;
+                            y: 118px;
+                            background: root.recording ? #4ADE80 : #FFFFFF;
+                        }
+
+                        Rectangle {
+                            width: 22px;
+                            height: 2px;
+                            x: (parent.width - 22px) / 2;
+                            y: 130px;
+                            border-radius: 1px;
+                            background: root.recording ? #4ADE80 : #FFFFFF;
+                        }
+
+                        TouchArea {
+                            clicked => { root.toggle-record(); }
+                        }
+                    }
+                }
+
+                // Model chip.
+                Rectangle {
+                    height: 48px;
+                    border-radius: 12px;
+                    background: #0C0C0C;
+                    border-width: 1px;
+                    border-color: #222222;
+
+                    HorizontalLayout {
+                        padding-left: 15px;
+                        padding-right: 15px;
+                        spacing: 10px;
+                        alignment: center;
+
+                        Rectangle {
+                            width: 7px;
+                            height: 7px;
+                            border-radius: 4px;
+                            background: #4ADE80;
+                        }
+
+                        Text {
+                            text: root.models[root.selected-model].name;
+                            font-size: 13px;
+                            color: #EDEDED;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "· Auto";
+                            font-size: 12px;
+                            color: #5E5E5E;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        Text {
+                            text: "Models ›";
+                            font-size: 12px;
+                            color: #8A8A8A;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    TouchArea {
+                        clicked => { root.nav(2); }
+                    }
+                }
+
+                // Live transcript.
+                Rectangle {
+                    min-height: 92px;
+                    border-radius: 16px;
+                    background: #0E0E0E;
+                    border-width: 1px;
+                    border-color: #242424;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 7px;
+
+                        Text {
+                            text: root.recording ? "LIVE" : "READY";
+                            font-size: 10px;
+                            font-weight: 600;
+                            letter-spacing: 1.2px;
+                            color: root.recording ? #4ADE80 : #4A4A4A;
+                        }
+
+                        Text {
+                            text: root.live-text;
+                            wrap: word-wrap;
+                            font-size: 16px;
+                            color: root.recording ? #FFFFFF : #8A8A8A;
+                        }
+                    }
+                }
+
+                Rectangle { horizontal-stretch: 1; height: 1px; background: transparent; }
+
+                // Recent turns.
+                Text {
+                    text: "RECENT";
+                    font-size: 10px;
+                    font-weight: 600;
+                    letter-spacing: 1.2px;
+                    color: #4A4A4A;
+                }
+
+                Rectangle {
+                    border-radius: 16px;
+                    background: #0B0B0B;
+                    border-width: 1px;
+                    border-color: #1E1E1E;
+
+                    VerticalLayout {
+                        padding: 5px;
+
+                        for t[i] in root.turns : TurnRow {
+                            visible: i < 2;
+                            text: t.text;
+                            when: t.when;
+                            seconds: t.seconds;
+                        }
+                    }
+                }
+
+                Rectangle { height: 4px; background: transparent; }
+                }
+            }
+
+            // ══ HISTORY ══════════════════════════════════════════════════
+            if root.tab == 1 : ScrollView {
+                VerticalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    padding-top: 8px;
+                    padding-bottom: 16px;
+                    spacing: 14px;
+
+                    Text {
+                        text: "History";
+                        font-size: 26px;
+                        font-weight: 700;
+                        color: #FFFFFF;
+                    }
+
+                    Text {
+                        text: "Every finished turn, with its audio. Tap a row to replay.";
+                        font-size: 13px;
+                        color: #6B6B6B;
+                        wrap: word-wrap;
+                    }
+
+                    Rectangle {
+                        border-radius: 16px;
+                        background: #0B0B0B;
+                        border-width: 1px;
+                        border-color: #1E1E1E;
+
+                        VerticalLayout {
+                            padding: 5px;
+
+                            for t[i] in root.turns : TurnRow {
+                                text: t.text;
+                                when: t.when;
+                                seconds: t.seconds;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ══ MODELS ═══════════════════════════════════════════════════
+            if root.tab == 2 : ScrollView {
+                VerticalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    padding-top: 8px;
+                    padding-bottom: 16px;
+                    spacing: 14px;
+
+                    Text {
+                        text: "Models";
+                        font-size: 26px;
+                        font-weight: 700;
+                        color: #FFFFFF;
+                    }
+
+                    Text {
+                        text: "Nothing is bundled. Downloads run in-app and stay on the device.";
+                        font-size: 13px;
+                        color: #6B6B6B;
+                        wrap: word-wrap;
+                    }
+
+                    for m[i] in root.models : Rectangle {
+                        height: 86px;
+                        border-radius: 16px;
+                        background: root.selected-model == i ? #0F1A13 : #0B0B0B;
+                        border-width: 1px;
+                        border-color: root.selected-model == i ? #2E6B47 : #1E1E1E;
+                        animate background { duration: 150ms; }
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 14px;
+                            spacing: 10px;
+                            alignment: center;
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 4px;
+                                vertical-stretch: 1;
+
+                                Text {
+                                    text: m.name;
+                                    font-size: 15px;
+                                    font-weight: 600;
+                                    color: #FFFFFF;
+                                    overflow: elide;
+                                }
+
+                                Text {
+                                    text: m.detail;
+                                    font-size: 12px;
+                                    color: #6B6B6B;
+                                    overflow: elide;
+                                }
+
+                                Text {
+                                    text: m.size;
+                                    font-size: 11px;
+                                    color: #4A4A4A;
+                                }
+                            }
+
+                            Rectangle {
+                                height: 30px;
+                                border-radius: 15px;
+                                background: m.installed ? #12241A : #161616;
+                                border-width: 1px;
+                                border-color: m.installed ? #245C3B : #2C2C2C;
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: m.installed ? "Installed" : "Download";
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        color: m.installed ? #9FE8BA : #D0D0D0;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => { root.pick-model(i); }
+                        }
+                    }
+
+                    Rectangle { height: 4px; background: transparent; }
+                }
+            }
+
+            // ══ SETTINGS ═════════════════════════════════════════════════
+            if root.tab == 3 : ScrollView {
+                VerticalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    padding-top: 8px;
+                    padding-bottom: 16px;
+                    spacing: 18px;
+
+                    Text {
+                        text: "Settings";
+                        font-size: 26px;
+                        font-weight: 700;
+                        color: #FFFFFF;
+                    }
+
+                    // Engine card.
+                    Rectangle {
+                        border-radius: 16px;
+                        background: #0B0B0B;
+                        border-width: 1px;
+                        border-color: #1E1E1E;
+
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 10px;
+
+                            Text {
+                                text: "ENGINE";
+                                font-size: 10px;
+                                font-weight: 600;
+                                letter-spacing: 1.2px;
+                                color: #4A4A4A;
+                            }
+
+                            Text {
+                                text: root.models[root.selected-model].name;
+                                font-size: 16px;
+                                font-weight: 600;
+                                color: #FFFFFF;
+                            }
+
+                            Text {
+                                text: root.models[root.selected-model].detail;
+                                font-size: 12px;
+                                color: #6B6B6B;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    // Behaviour card.
+                    Rectangle {
+                        border-radius: 16px;
+                        background: #0B0B0B;
+                        border-width: 1px;
+                        border-color: #1E1E1E;
+
+                        VerticalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            padding-top: 6px;
+                            padding-bottom: 6px;
+
+                            Rectangle {
+                                height: 62px;
+                                background: transparent;
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 12px;
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 3px;
+                                        vertical-stretch: 1;
+
+                                        Text {
+                                            text: "Unload model when idle";
+                                            font-size: 14px;
+                                            color: #EDEDED;
+                                        }
+
+                                        Text {
+                                            text: "Frees RAM after a minute without speech";
+                                            font-size: 11px;
+                                            color: #5E5E5E;
+                                        }
+                                    }
+
+                                    Toggle {
+                                        on: root.auto-offload;
+                                        toggled => { root.auto-offload = !root.auto-offload; }
+                                    }
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: #1A1A1A; }
+
+                            Rectangle {
+                                height: 62px;
+                                background: transparent;
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 12px;
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 3px;
+                                        vertical-stretch: 1;
+
+                                        Text {
+                                            text: "Haptic feedback";
+                                            font-size: 14px;
+                                            color: #EDEDED;
+                                        }
+
+                                        Text {
+                                            text: "A short buzz when listening starts and stops";
+                                            font-size: 11px;
+                                            color: #5E5E5E;
+                                        }
+                                    }
+
+                                    Toggle {
+                                        on: root.haptics;
+                                        toggled => { root.haptics = !root.haptics; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Overlay note.
+                    Rectangle {
+                        border-radius: 16px;
+                        background: #0B0B0B;
+                        border-width: 1px;
+                        border-color: #1E1E1E;
+
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 8px;
+
+                            Text {
+                                text: "FLOATING PILL";
+                                font-size: 10px;
+                                font-weight: 600;
+                                letter-spacing: 1.2px;
+                                color: #4A4A4A;
+                            }
+
+                            Text {
+                                text: "The always-on mic pill needs the overlay foreground service, which lands with the next build. This screen runs the full dashboard.";
+                                font-size: 12px;
+                                color: #6B6B6B;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "QuickSTT · offline speech, no account, no cloud";
+                        font-size: 11px;
+                        color: #3A3A3A;
+                        horizontal-alignment: center;
+                    }
+
+                    Rectangle { height: 4px; background: transparent; }
+                }
+            }
+        }
+
+        // ── Bottom navigation ─────────────────────────────────────────────
+        Rectangle {
+            height: 2px;
+            background: #1A1A1A;
+        }
+
+        Rectangle {
+            height: 74px;
+            background: #080808;
+
+            HorizontalLayout {
+                padding-bottom: 10px;
+
+                NavItem {
+                    width: root.width / 4;
+                    horizontal-stretch: 1;
+                    label: "Listen";
+                    active: root.tab == 0;
+                    picked => { root.nav(0); }
+                }
+
+                NavItem {
+                    width: root.width / 4;
+                    horizontal-stretch: 1;
+                    label: "History";
+                    active: root.tab == 1;
+                    picked => { root.nav(1); }
+                }
+
+                NavItem {
+                    width: root.width / 4;
+                    horizontal-stretch: 1;
+                    label: "Models";
+                    active: root.tab == 2;
+                    picked => { root.nav(2); }
+                }
+
+                NavItem {
+                    width: root.width / 4;
+                    horizontal-stretch: 1;
+                    label: "Settings";
+                    active: root.tab == 3;
+                    picked => { root.nav(3); }
+                }
+            }
+        }
+
+        // Home-indicator allowance on gesture-nav phones.
+        Rectangle {
+            height: 18px;
+            background: #080808;
+        }
+    }
+    }
+}

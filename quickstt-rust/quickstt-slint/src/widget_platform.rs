@@ -216,6 +216,32 @@ pub fn show_app_window(window: &slint::Window) {
         crate::log_line(&format!("show_app_window FAILED: {e:?}"));
     }
     configure_app_window(window);
+    // First show: fit inside the monitor work area, then centre. Done here
+    // (not at construction) because the scale factor is only real once the
+    // HWND exists, and every show path funnels through this function.
+    #[cfg(target_os = "windows")]
+    {
+        static FIRST_SHOW: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(true);
+        if FIRST_SHOW.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            let scale = window_scale(window).max(0.5);
+            let (al, at, ar, ab) = work_area();
+            let max_w = (((ar - al) as f32) / scale - 40.0).max(320.0);
+            let max_h = (((ab - at) as f32) / scale - 90.0).max(240.0);
+            let cur = window.size();
+            // Window::size() reports PHYSICAL px on this backend (the markup's
+            // root.width is the DIP value), so convert before comparing.
+            let (w, h) = (cur.width as f32 / scale, cur.height as f32 / scale);
+            if w > max_w || h > max_h {
+                let (nw, nh) = (w.min(max_w).max(520.0), h.min(max_h).max(400.0));
+                crate::log_line(&format!(
+                    "dashboard: fitting to work area: {w:.0}x{h:.0} -> {nw:.0}x{nh:.0} dip (scale {scale:.3})"
+                ));
+                window.set_size(slint::LogicalSize::new(nw, nh));
+            }
+            center_on_work_area(window);
+        }
+    }
     #[cfg(target_os = "windows")]
     if let Some(raw) = hwnd_of(window) {
         let hwnd = HWND(raw as _);
@@ -510,6 +536,31 @@ pub fn native_rect(window: &slint::Window) -> Option<(i32, i32, i32, i32)> {
             let mut rc = RECT::default();
             if GetWindowRect(HWND(raw as _), &mut rc).is_ok() {
                 return Some((rc.left, rc.top, rc.right, rc.bottom));
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        None
+    }
+}
+
+/// Native CLIENT size (physical px). Slint's layout is expressed in logical
+/// px and its windows are physical; when the two disagree the right/bottom of
+/// every layout is clipped, so diagnostics and the DPI self-check compare
+/// Slint's `Window::size()` against this value.
+pub fn client_size(window: &slint::Window) -> Option<(i32, i32)> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+        let raw = hwnd_of(window)?;
+        unsafe {
+            let mut rc = RECT::default();
+            if GetClientRect(HWND(raw as _), &mut rc).is_ok() {
+                return Some((rc.right - rc.left, rc.bottom - rc.top));
             }
         }
         None
@@ -1064,6 +1115,50 @@ pub fn dpi_scale(hwnd_raw: isize) -> f32 {
     unsafe {
         let dpi = GetDpiForWindow(HWND(hwnd_raw as _));
         dpi as f32 / 96.0
+    }
+}
+
+/// Monitor scale of the primary display, usable BEFORE any window exists
+/// (app startup, initial dashboard sizing). `window_scale` needs an HWND.
+#[cfg(target_os = "windows")]
+pub fn system_scale() -> f32 {
+    use windows::Win32::UI::HiDpi::GetDpiForSystem;
+    unsafe { GetDpiForSystem() as f32 / 96.0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn system_scale() -> f32 {
+    // X11/Slint report logical pixels 1:1 on the platforms we ship; the pill
+    // and dashboard are laid out in DIPs there.
+    1.0
+}
+
+/// Centre an app window in the primary work area (physical px). Used on the
+/// dashboard's first show so a large default size never opens half off-screen
+/// on a short display (e.g. 1536x960 at 125%).
+pub fn center_on_work_area(window: &slint::Window) {
+    #[cfg(target_os = "windows")]
+    if let (Some((wl, wt, wr, wb)), Some(raw)) = (native_rect(window), hwnd_of(window)) {
+        let (al, at, ar, ab) = work_area();
+        let (w, h) = (wr - wl, wb - wt);
+        let x = al + ((ar - al) - w).max(0) / 2;
+        let y = at + ((ab - at) - h).max(0) / 2;
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOP};
+            let _ = SetWindowPos(
+                HWND(raw as _),
+                HWND_TOP,
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
     }
 }
 

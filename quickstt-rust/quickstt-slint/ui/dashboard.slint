@@ -156,6 +156,18 @@ component IconMore inherits Rectangle {
     Rectangle { x: 12.3px; y: 17.7px; width: 3.4px; height: 3.4px; border-radius: 1.7px; background: root.tint; }
 }
 
+// Hamburger (☰) — three drawn bars. Collapse / expand the sidebar exactly like
+// the old chevron, but it reads as a menu affordance at touch sizes and never
+// rotates (a rotating glyph looked like a spinner mid-animation).
+component IconMenuBars inherits Rectangle {
+    in property <color> tint: #9A9A9A;
+    width: 28px;
+    height: 28px;
+    Rectangle { x: 7px; y: 8.9px; width: 14px; height: 1.8px; border-radius: 0.9px; background: root.tint; }
+    Rectangle { x: 7px; y: 13.1px; width: 14px; height: 1.8px; border-radius: 0.9px; background: root.tint; }
+    Rectangle { x: 7px; y: 17.3px; width: 14px; height: 1.8px; border-radius: 0.9px; background: root.tint; }
+}
+
 // "Download" — arrow into a tray (row menu).
 component IconDownload inherits Rectangle {
     in property <color> tint: #B9B9B9;
@@ -211,9 +223,10 @@ component IconPause inherits Rectangle {
     Rectangle { x: 15px; y: 8.2px; width: 2.8px; height: 11.6px; border-radius: 1.4px; background: root.tint; }
 }
 
-// Row action button (28px): plate + drawn glyph, hover / press / active
-// states with quick consistent animations. kind: 0 = copy (flips to a green
-// tick while "copied"), 1 = delete, 2 = ⋮.
+// Row action button: 40x40 hit target (touch-friendly — a 28px plate alone is
+// below the 44px fingertip rule once the row is scaled), plate + drawn glyph,
+// hover / press / active states with quick consistent animations.
+// kind: 0 = copy (flips to a green tick while "copied"), 1 = delete, 2 = ⋮.
 component HistButton inherits Rectangle {
     in property <int> kind: 0;
     in property <bool> copied: false;
@@ -224,16 +237,16 @@ component HistButton inherits Rectangle {
     in property <color> hover-tint: #FFFFFF;
     callback clicked();
 
-    width: 28px;
-    height: 28px;
+    width: 40px;
+    height: 40px;
 
     // The plate shrinks slightly while pressed — instant tactile feedback.
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: bt.pressed ? 24px : 28px;
-        height: bt.pressed ? 24px : 28px;
-        border-radius: 8px;
+        width: bt.pressed ? 30px : 34px;
+        height: bt.pressed ? 30px : 34px;
+        border-radius: 10px;
         background: root.copied ? #14301F : ((bt.has-hover || root.active) ? root.hover-plate : root.rest-plate);
         animate background { duration: 130ms; easing: ease-out; }
         animate width { duration: 90ms; easing: ease-out; }
@@ -241,16 +254,22 @@ component HistButton inherits Rectangle {
     }
 
     IconCopy {
+        x: 6px;
+        y: 6px;
         visible: root.kind == 0 && !root.copied;
         tint: (bt.has-hover || root.active) ? root.hover-tint : root.rest-tint;
         sheet-bg: root.copied ? #14301F : ((bt.has-hover || root.active) ? root.hover-plate : root.rest-plate);
     }
-    IconCheck { visible: root.kind == 0 && root.copied; }
+    IconCheck { x: 6px; y: 6px; visible: root.kind == 0 && root.copied; }
     IconTrash {
+        x: 6px;
+        y: 6px;
         visible: root.kind == 1;
         tint: (bt.has-hover || root.active) ? root.hover-tint : root.rest-tint;
     }
     IconMore {
+        x: 6px;
+        y: 6px;
         visible: root.kind == 2;
         tint: (bt.has-hover || root.active) ? root.hover-tint : root.rest-tint;
     }
@@ -270,23 +289,23 @@ component HistMenuItem inherits Rectangle {
     in property <string> label: "";
     callback clicked();
 
-    height: 34px;
+    height: 44px;
     border-radius: 8px;
     background: hit.has-hover ? (root.danger ? #2A1414 : #242424) : transparent;
     animate background { duration: 110ms; easing: ease-out; }
 
-    IconCopy { x: 7px; y: 3px; visible: root.kind == 0 && !root.copied; tint: root.danger ? #FF8A8A : #B9B9B9; sheet-bg: hit.has-hover ? (root.danger ? #2A1414 : #242424) : #171717; }
-    IconCheck { x: 7px; y: 3px; visible: root.kind == 0 && root.copied; }
-    IconDownload { x: 7px; y: 3px; visible: root.kind == 1; }
-    IconTrash { x: 7px; y: 3px; visible: root.kind == 2; tint: #FF8A8A; }
+    IconCopy { x: 8px; y: 8px; visible: root.kind == 0 && !root.copied; tint: root.danger ? #FF8A8A : #B9B9B9; sheet-bg: hit.has-hover ? (root.danger ? #2A1414 : #242424) : #171717; }
+    IconCheck { x: 8px; y: 8px; visible: root.kind == 0 && root.copied; }
+    IconDownload { x: 8px; y: 8px; visible: root.kind == 1; }
+    IconTrash { x: 8px; y: 8px; visible: root.kind == 2; tint: #FF8A8A; }
 
     Text {
-        x: 43px;
+        x: 46px;
         y: 0px;
-        width: parent.width - 53px;
+        width: parent.width - 56px;
         height: parent.height;
         text: root.label;
-        font-size: 12.5px;
+        font-size: 13.5px;
         color: root.danger ? #FF9A9A : #E8E8E8;
         vertical-alignment: center;
         overflow: elide;
@@ -303,13 +322,27 @@ component HistMenuItem inherits Rectangle {
 
 export component DashboardWidget inherits Window {
     title: "QuickSTT Control Center";
-    preferred-width: 860px;
-    preferred-height: 620px;
-    min-width: 720px;
-    min-height: 480px;
+    preferred-width: 940px;
+    preferred-height: 700px;
+    // Small windows must stay usable: the layout reflows (sidebar → icon rail)
+    // instead of being laid out wider than the window and clipped.
+    min-width: 520px;
+    min-height: 400px;
     background: #000000;
 
     in-out property <int> active-tab: 0;
+
+    // Adaptive rail: below ~820 logical px the sidebar collapses to its icon
+    // rail so the content column keeps a usable width. Set from Rust on a
+    // timer — a root.width binding here would feed back into the window's
+    // preferred size (Slint reports that as a binding loop).
+    in-out property <bool> rail-mode: false;
+    // What the sidebar actually shows: the icon rail when the user collapsed
+    // it OR when the window is too narrow for the full panel.
+    out property <bool> rail-active: root.sidebar-collapsed || root.rail-mode;
+    // Minimum fingertip target. Touchscreen-first on Android, and touch-capable
+    // Windows/Linux convertibles get the same hit areas.
+    out property <length> tap-size: 44px;
 
     // Model & Language State
     in property <[string]> models: ["Vosk Small EN (50M)", "NVIDIA Parakeet TDT 0.6B", "Nemotron 3.5 Streaming", "Vosk Large EN (US)", "Vosk Small Indian EN", "Vosk Small German"];
@@ -369,6 +402,12 @@ export component DashboardWidget inherits Window {
     // Sidebar: collapsible to icons via the chevron, drag-resizable 150-280px.
     in-out property <bool> sidebar-collapsed: false;
     in-out property <int> sidebar-width: 200;
+    // Width at the moment a sidebar drag started (absolute math: a moving
+    // pointer must never accumulate deltas onto an already-updated width).
+    in-out property <int> sidebar-drag-start: 200;
+    // "Copied to clipboard" toast: Rust flips this; the root-level overlay
+    // animates its opacity + rise, then Rust flips it back after ~2.5s.
+    in-out property <bool> history-toast-show: false;
     // History backup: ON stores every finished turn (text + audio) in the
     // dashboard history; OFF stops new recordings (existing rows stay).
     in-out property <bool> history-enabled: true;
@@ -389,7 +428,7 @@ export component DashboardWidget inherits Window {
     property <length> hist-menu-y: 0px;
     property <bool> hist-menu-grown: false;
     in property <string> recording-dir: "C:\\Users\\hemsh_sfya5gq\\Recordings";
-    in property <string> app-version: "2.0.0-alpha.13 (Rust & Slint Edition)";
+    in property <string> app-version: "2.0.0-alpha.16 (Rust & Slint Edition)";
 
     // Callbacks
     callback select-model(string);
@@ -446,14 +485,30 @@ export component DashboardWidget inherits Window {
     in property <string> recommend-reason: "";
     in property <string> hardware-info: "";
 
+    // Monitor scale factor (1.0 = 96 dpi, 1.25 = 125%, …), set from Rust via
+    // GetDpiForWindow. Slint's winit-software backend renders at this scale but
+    // hands the layout the *physical* window size, so a plain layout overflows
+    // the surface by the scale factor. Laying the whole UI out in DIP units
+    // (physical / scale) makes the scaled render land exactly on the window.
+    in-out property <float> ui-scale: 1.0;
+    // Layout probes (read over IPC by DASHGEOM).
+    out property <length> probe-root-w: root.width;
+    out property <length> probe-box-w: layout-box.width;
+    out property <length> probe-side-w: side-panel.width;
+
     // Borderless Window Dragging
     callback drag_start();
     callback drag_moved();
     callback drag_end();
 
-    VerticalLayout {
-        padding: 0px;
-        spacing: 0px;
+    // Layout box: fills the window (Window.root width already arrives in DIP
+    // units on this backend; the renderer scales it to the physical surface).
+    layout-box := Rectangle {
+        background: #000000;
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
 
 
         // ══════════════════════════════════════════════════════════════════════════
@@ -467,39 +522,42 @@ export component DashboardWidget inherits Window {
             // between 150px and 280px. Dragging is disabled while collapsed —
             // the collapsed rail is a fixed icon strip, so there is nothing to
             // drag and re-expanding should not jump the layout.
-            Rectangle {
-                width: root.sidebar-collapsed ? 56px : root.sidebar-width * 1px;
+            side-panel := Rectangle {
+                width: root.rail-active ? 56px : root.sidebar-width * 1px;
                 background: #050505;
                 border-width: 1px;
                 border-color: #1A1A1A;
 
                 VerticalLayout {
-                    padding: root.sidebar-collapsed ? 4px : 12px;
+                    padding: root.rail-active ? 4px : 12px;
                     spacing: 6px;
 
                     // Collapse / expand — TOP RIGHT of the rail (the panel's
                     // title-bar control): right-aligned, always reachable and
                     // visible in both states, and it never shifts nav items.
+                    // Drawn hamburger (☰), 44x40 touch target, no rotation.
                     HorizontalLayout {
                         alignment: end;
                         Rectangle {
-                            width: 32px;
-                            height: 28px;
-                            border-radius: 6px;
+                            width: root.tap-size;
+                            height: 40px;
+                            border-radius: 8px;
                             background: chev_touch.has-hover ? #1A1A1A : transparent;
                             border-width: chev_touch.has-hover ? 1px : 0px;
                             border-color: #262626;
-                            Text {
-                                width: parent.width;
-                                height: parent.height;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                text: root.sidebar-collapsed ? "›" : "‹";
-                                font-size: 18px;
-                                color: chev_touch.has-hover ? #FFFFFF : #9A9A9A;
+                            IconMenuBars {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                tint: chev_touch.has-hover ? #FFFFFF : #9A9A9A;
                             }
                             chev_touch := TouchArea {
-                                clicked => { root.set-sidebar-collapsed(!root.sidebar-collapsed); }
+                                // Write the property directly for a 0 ms visual
+                                // response (the callback alone only persisted the
+                                // choice — the UI never followed along live).
+                                clicked => {
+                                    root.sidebar-collapsed = !root.sidebar-collapsed;
+                                    root.set-sidebar-collapsed(root.sidebar-collapsed);
+                                }
                                 mouse-cursor: pointer;
                             }
                         }
@@ -507,15 +565,15 @@ export component DashboardWidget inherits Window {
 
                     // Navigation Item 0: General
                     Rectangle {
-                        height: 40px;
+                        height: 48px;
                         border-radius: 8px;
                         background: root.active-tab == 0 ? #1A1A1A : (tab0_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 0 ? 1px : 0px;
                         border-color: #FFFFFF;
 
                         HorizontalLayout {
-                            padding-left: root.sidebar-collapsed ? 0px : 12px;
-                            spacing: root.sidebar-collapsed ? 0px : 10px;
+                            padding-left: root.rail-active ? 0px : 12px;
+                            spacing: root.rail-active ? 0px : 10px;
                             Text {
                                 text: "⚙";
                                 font-size: 15px;
@@ -524,7 +582,7 @@ export component DashboardWidget inherits Window {
                             }
                             Text {
                                 text: "General";
-                                visible: !root.sidebar-collapsed;
+                                visible: !root.rail-active;
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 0 ? 700 : 500;
@@ -540,15 +598,15 @@ export component DashboardWidget inherits Window {
 
                     // Navigation Item 1: Models
                     Rectangle {
-                        height: 40px;
+                        height: 48px;
                         border-radius: 8px;
                         background: root.active-tab == 1 ? #1A1A1A : (tab1_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 1 ? 1px : 0px;
                         border-color: #FFFFFF;
 
                         HorizontalLayout {
-                            padding-left: root.sidebar-collapsed ? 0px : 12px;
-                            spacing: root.sidebar-collapsed ? 0px : 10px;
+                            padding-left: root.rail-active ? 0px : 12px;
+                            spacing: root.rail-active ? 0px : 10px;
                             Text {
                                 text: "🎙";
                                 font-size: 15px;
@@ -557,7 +615,7 @@ export component DashboardWidget inherits Window {
                             }
                             Text {
                                 text: "Speech Models";
-                                visible: !root.sidebar-collapsed;
+                                visible: !root.rail-active;
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 1 ? 700 : 500;
@@ -573,15 +631,15 @@ export component DashboardWidget inherits Window {
 
                     // Navigation Item 2: Style
                     Rectangle {
-                        height: 40px;
+                        height: 48px;
                         border-radius: 8px;
                         background: root.active-tab == 2 ? #1A1A1A : (tab2_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 2 ? 1px : 0px;
                         border-color: #FFFFFF;
 
                         HorizontalLayout {
-                            padding-left: root.sidebar-collapsed ? 0px : 12px;
-                            spacing: root.sidebar-collapsed ? 0px : 10px;
+                            padding-left: root.rail-active ? 0px : 12px;
+                            spacing: root.rail-active ? 0px : 10px;
                             Text {
                                 text: "🎨";
                                 font-size: 15px;
@@ -590,7 +648,7 @@ export component DashboardWidget inherits Window {
                             }
                             Text {
                                 text: "Widget Style";
-                                visible: !root.sidebar-collapsed;
+                                visible: !root.rail-active;
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 2 ? 700 : 500;
@@ -606,15 +664,15 @@ export component DashboardWidget inherits Window {
 
                     // Navigation Item 3: Wakewords
                     Rectangle {
-                        height: 40px;
+                        height: 48px;
                         border-radius: 8px;
                         background: root.active-tab == 3 ? #1A1A1A : (tab3_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 3 ? 1px : 0px;
                         border-color: #FFFFFF;
 
                         HorizontalLayout {
-                            padding-left: root.sidebar-collapsed ? 0px : 12px;
-                            spacing: root.sidebar-collapsed ? 0px : 10px;
+                            padding-left: root.rail-active ? 0px : 12px;
+                            spacing: root.rail-active ? 0px : 10px;
                             Text {
                                 text: "👂";
                                 font-size: 15px;
@@ -623,7 +681,7 @@ export component DashboardWidget inherits Window {
                             }
                             Text {
                                 text: "Wake Words & VAD";
-                                visible: !root.sidebar-collapsed;
+                                visible: !root.rail-active;
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 3 ? 700 : 500;
@@ -639,15 +697,15 @@ export component DashboardWidget inherits Window {
 
                     // Navigation Item 4: System & Updates
                     Rectangle {
-                        height: 40px;
+                        height: 48px;
                         border-radius: 8px;
                         background: root.active-tab == 4 ? #1A1A1A : (tab4_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 4 ? 1px : 0px;
                         border-color: #FFFFFF;
 
                         HorizontalLayout {
-                            padding-left: root.sidebar-collapsed ? 0px : 12px;
-                            spacing: root.sidebar-collapsed ? 0px : 10px;
+                            padding-left: root.rail-active ? 0px : 12px;
+                            spacing: root.rail-active ? 0px : 10px;
                             Text {
                                 text: "🔄";
                                 font-size: 15px;
@@ -656,7 +714,7 @@ export component DashboardWidget inherits Window {
                             }
                             Text {
                                 text: "System & Info";
-                                visible: !root.sidebar-collapsed;
+                                visible: !root.rail-active;
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 4 ? 700 : 500;
@@ -680,7 +738,7 @@ export component DashboardWidget inherits Window {
                         background: #0E0E0E;
                         border-width: 1px;
                         border-color: #262626;
-                        visible: !root.sidebar-collapsed;
+                        visible: !root.rail-active;
                         HorizontalLayout {
                             alignment: center;
                             spacing: 6px;
@@ -707,13 +765,19 @@ export component DashboardWidget inherits Window {
                     x: parent.width - 6px;
                     width: 6px;
                     height: parent.height;
-                    enabled: !root.sidebar-collapsed;
+                    enabled: !root.rail-active;
                     mouse-cursor: col-resize;
-                    // pressed-x is where the button went down, so the delta works without
-                    // any manual press bookkeeping.
+                    // Anchor the width at press time, then follow the pointer
+                    // ABSOLUTELY (start + total offset) — never accumulate.
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            root.sidebar-drag-start = root.sidebar-width;
+                        }
+                    }
                     moved => {
                         if (self.pressed) {
-                            root.set-sidebar-width(root.sidebar-width * 1px + (self.mouse-x - self.pressed-x));
+                            root.sidebar-width = clamp(root.sidebar-drag-start + round((self.mouse-x - self.pressed-x) / 1px), 150, 280);
+                            root.set-sidebar-width(root.sidebar-width * 1px);
                         }
                     }
                 }
@@ -724,6 +788,9 @@ export component DashboardWidget inherits Window {
                 background: #000000;
 
                 ScrollView {
+                    // Touch: drag anywhere on the page to pan (Windows/Linux
+                    // touchscreens + precision touchpads), wheel still works.
+                    mouse-drag-pan-enabled: true;
                     VerticalLayout {
                         alignment: start;
 
@@ -784,7 +851,8 @@ export component DashboardWidget inherits Window {
                                     // Backup toggle: OFF stops new turns from
                                     // being recorded (existing rows stay).
                                     CheckBox {
-                                        text: "Back up new turns";
+                                        height: 40px;
+                                        text: root.rail-mode ? "Back up" : "Back up new turns";
                                         checked: root.history-enabled;
                                         toggled => { root.set-history-enabled(self.checked); }
                                     }
@@ -820,17 +888,19 @@ export component DashboardWidget inherits Window {
                                             spacing: 9px;
 
                                             // Play / pause — the primary control.
+                                            // 44x44 fingertip target with a 36px
+                                            // visual circle (was 32x32).
                                             Rectangle {
-                                                width: 32px;
-                                                height: 32px;
+                                                width: root.tap-size;
+                                                height: root.tap-size;
                                                 opacity: item.has_audio ? 1.0 : 0.4;
 
                                                 Rectangle {
                                                     x: (parent.width - self.width) / 2;
                                                     y: (parent.height - self.height) / 2;
-                                                    width: play_touch.pressed ? 27px : 32px;
-                                                    height: play_touch.pressed ? 27px : 32px;
-                                                    border-radius: 16px;
+                                                    width: play_touch.pressed ? 31px : 36px;
+                                                    height: play_touch.pressed ? 31px : 36px;
+                                                    border-radius: 18px;
                                                     background: item.playing ? #FFFFFF : (play_touch.has-hover ? #202020 : #141414);
                                                     border-width: 1px;
                                                     border-color: item.playing ? #FFFFFF : (play_touch.has-hover ? #303030 : #202020);
@@ -840,14 +910,14 @@ export component DashboardWidget inherits Window {
                                                     animate height { duration: 90ms; easing: ease-out; }
                                                 }
                                                 IconPlay {
-                                                    x: 2px;
-                                                    y: 2px;
+                                                    x: 8px;
+                                                    y: 8px;
                                                     visible: !item.playing;
                                                     tint: play_touch.has-hover ? #FFFFFF : #E6E6E6;
                                                 }
                                                 IconPause {
-                                                    x: 2px;
-                                                    y: 2px;
+                                                    x: 8px;
+                                                    y: 8px;
                                                     visible: item.playing;
                                                 }
                                                 play_touch := TouchArea {
@@ -904,7 +974,7 @@ export component DashboardWidget inherits Window {
 
                                         // ── Lines 2 & 3: transcript + timeline ──
                                         VerticalLayout {
-                                            padding-left: 41px;
+                                            padding-left: 53px;
                                             spacing: 9px;
 
                                             Text {
@@ -922,7 +992,7 @@ export component DashboardWidget inherits Window {
                                                 // round handle; the played part is white.
                                                 Rectangle {
                                                     horizontal-stretch: 1;
-                                                    height: 20px;
+                                                    height: 34px;
 
                                                     Rectangle {
                                                         y: (parent.height - self.height) / 2;
@@ -941,11 +1011,11 @@ export component DashboardWidget inherits Window {
                                                         }
 
                                                         Rectangle {
-                                                            x: clamp(parent.width * item.progress - 6px, 0px, parent.width - 12px);
+                                                            x: clamp(parent.width * item.progress - 7px, 0px, parent.width - 14px);
                                                             y: (parent.height - self.height) / 2;
-                                                            width: 12px;
-                                                            height: 12px;
-                                                            border-radius: 6px;
+                                                            width: 14px;
+                                                            height: 14px;
+                                                            border-radius: 7px;
                                                             background: #FFFFFF;
                                                             visible: item.has_audio && (item.progress > 0.001 || item.playing);
                                                             opacity: seek_touch.has-hover || item.playing ? 1.0 : 0.0;
@@ -995,16 +1065,19 @@ export component DashboardWidget inherits Window {
                                 Text { text: "System Startup & Behavior"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 CheckBox {
+                                    height: 40px;
                                     text: "Start with Windows on logon";
                                     checked: root.start-with-windows;
                                     toggled => { root.set-start-with-windows(self.checked); }
                                 }
                                 CheckBox {
+                                    height: 40px;
                                     text: "Start minimized to system tray";
                                     checked: root.start-minimized;
                                     toggled => { root.set-start-minimized(self.checked); }
                                 }
                                 CheckBox {
+                                    height: 40px;
                                     text: "Export synchronized .lrc (lyrics/timestamp) files with recordings";
                                     checked: root.lrc-enabled;
                                     toggled => { root.set-lrc-enabled(self.checked); }
@@ -1026,6 +1099,7 @@ export component DashboardWidget inherits Window {
                                 Text { text: "Inactivity & Silence Auto-Stop"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 CheckBox {
+                                    height: 40px;
                                     text: "Automatically stop and commit transcription when silence is detected";
                                     checked: root.auto-stop-silence;
                                     toggled => { root.set-auto-stop-silence(self.checked); }
@@ -1041,6 +1115,7 @@ export component DashboardWidget inherits Window {
                                         min-width: 180px;
                                     }
                                     Slider {
+                                        height: 34px;
                                         minimum: 1;
                                         maximum: 60;
                                         value: root.silence-duration;
@@ -1073,6 +1148,7 @@ export component DashboardWidget inherits Window {
                                 Text { text: "Memory Management & Model Offloading"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 CheckBox {
+                                    height: 40px;
                                     text: "Auto-offload speech model when idle (saves RAM)";
                                     checked: root.auto-offload;
                                     toggled => { root.set-auto-offload(self.checked); }
@@ -1088,6 +1164,7 @@ export component DashboardWidget inherits Window {
                                         min-width: 180px;
                                     }
                                     Slider {
+                                        height: 34px;
                                         minimum: 5;
                                         maximum: 180;
                                         value: root.offload-seconds;
@@ -1120,6 +1197,7 @@ export component DashboardWidget inherits Window {
                                 Text { text: "Quick Transcription Hotkey (Ctrl+Space)"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 CheckBox {
+                                    height: 40px;
                                     text: "Enable global Ctrl+Space dictation overlay";
                                     checked: root.ctrl-space-enabled;
                                     toggled => { root.set-ctrl-space-enabled(self.checked); }
@@ -1135,6 +1213,7 @@ export component DashboardWidget inherits Window {
                                         spacing: 8px;
                                         Text { text: "Trigger Mode:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
                                         ComboBox {
+                                            height: 40px;
                                             model: ["Push-to-Talk (Hold)", "Toggle (Press on/off)"];
                                             current-index: root.ctrl-space-mode;
                                             selected(v) => { root.set-ctrl-space-mode(self.current-index); }
@@ -1144,6 +1223,7 @@ export component DashboardWidget inherits Window {
                                         spacing: 8px;
                                         Text { text: "Output Target:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
                                         ComboBox {
+                                            height: 40px;
                                             model: ["Type into active app", "Copy to clipboard", "Show only"];
                                             current-index: root.ctrl-space-output;
                                             selected(v) => { root.set-ctrl-space-output(self.current-index); }
@@ -1152,6 +1232,7 @@ export component DashboardWidget inherits Window {
                                 }
 
                                 CheckBox {
+                                    height: 40px;
                                     text: "Clean disfluencies (um, uh, repeats) from non-streaming transcripts";
                                     checked: root.clean-disfluencies;
                                     toggled => { root.set-clean-disfluencies(self.checked); }
@@ -1166,6 +1247,7 @@ export component DashboardWidget inherits Window {
                                         min-width: 110px;
                                     }
                                     ComboBox {
+                                        height: 40px;
                                         model: ["FDT 66M tagger - fillers + repeats only (66MB)", "S1-mini INT4 (0.6B) - self-corrections + numbers (375MB, slow)", "SmolLM2 360M Q4 - self-corrections + numbers (271MB, fast)", "Gemma 3 270M Q4 - self-corrections + numbers (253MB, fast)"];
                                         current-index: root.disfluency-engine;
                                         enabled: root.clean-disfluencies;
@@ -1284,6 +1366,7 @@ export component DashboardWidget inherits Window {
                                     spacing: 12px;
                                     Text { text: "Selected Model:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
                                     ComboBox {
+                                        height: 40px;
                                         model: root.models;
                                         current-index: root.selected-model;
                                         selected(v) => { root.select-model(v); }
@@ -1294,6 +1377,7 @@ export component DashboardWidget inherits Window {
                                     spacing: 12px;
                                     Text { text: "Active Language:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
                                     ComboBox {
+                                        height: 40px;
                                         model: root.languages;
                                         current-index: root.selected-language;
                                         selected(v) => { root.select-language(v); }
@@ -1341,11 +1425,13 @@ export component DashboardWidget inherits Window {
                                 HorizontalLayout {
                                     spacing: 10px;
                                     LineEdit {
+                                        height: 40px;
                                         text: root.catalog-search;
                                         placeholder-text: "Search models by name…";
                                         edited(t) => { root.set-catalog-search(t); }
                                     }
                                     ComboBox {
+                                        height: 40px;
                                         model: root.catalog-langs;
                                         current-index: root.catalog-lang-idx;
                                         selected(v) => { root.set-catalog-lang-filter(v); }
@@ -1661,6 +1747,7 @@ export component DashboardWidget inherits Window {
                                     spacing: 12px;
                                     Text { text: "Widget Opacity:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 160px; }
                                     Slider {
+                                        height: 34px;
                                         minimum: 20;
                                         maximum: 100;
                                         value: root.ui-opacity;
@@ -1673,6 +1760,7 @@ export component DashboardWidget inherits Window {
                                     spacing: 12px;
                                     Text { text: "Corner Roundness:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 160px; }
                                     Slider {
+                                        height: 34px;
                                         minimum: 0;
                                         maximum: 25;
                                         value: root.ui-pill-radius;
@@ -1685,6 +1773,7 @@ export component DashboardWidget inherits Window {
                                     spacing: 12px;
                                     Text { text: "System Tray Icon Size:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 160px; }
                                     Slider {
+                                        height: 34px;
                                         minimum: 16;
                                         maximum: 64;
                                         value: root.tray-icon-size;
@@ -1694,6 +1783,7 @@ export component DashboardWidget inherits Window {
                                 }
 
                                 CheckBox {
+                                    height: 40px;
                                     text: "Show animated waveform when actively listening";
                                     checked: root.show-waveform;
                                     toggled => { root.set-show-waveform(self.checked); }
@@ -1703,6 +1793,7 @@ export component DashboardWidget inherits Window {
                                     spacing: 12px;
                                     Text { text: "Waveform Sensitivity:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 160px; }
                                     Slider {
+                                        height: 34px;
                                         minimum: 1;
                                         maximum: 15;
                                         value: root.waveform-sensitivity;
@@ -1752,6 +1843,7 @@ export component DashboardWidget inherits Window {
                                         Text { text: "When enabled, QuickSTT listens for wake phrases in the background (< 1 MB RAM)."; font-size: 11px; color: #9A9A9A; }
                                     }
                                     CheckBox {
+                                        height: 40px;
                                         text: "Active";
                                         checked: root.wakeword-enabled;
                                         toggled => { root.set-wakeword-enabled(self.checked); }
@@ -1779,6 +1871,7 @@ export component DashboardWidget inherits Window {
                                     spacing: 12px;
                                     Text { text: "Wakeword Sensitivity:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 170px; }
                                     Slider {
+                                        height: 34px;
                                         minimum: 0;
                                         maximum: 100;
                                         value: root.wakeword-sensitivity;
@@ -1804,6 +1897,7 @@ export component DashboardWidget inherits Window {
                                     spacing: 12px;
                                     Text { text: "VAD Speech Gate:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 170px; }
                                     Slider {
+                                        height: 34px;
                                         minimum: 0;
                                         maximum: 100;
                                         value: root.vad-sensitivity;
@@ -1869,11 +1963,13 @@ export component DashboardWidget inherits Window {
                                 HorizontalLayout {
                                     spacing: 20px;
                                     CheckBox {
+                                        height: 40px;
                                         text: "\"Hey Jarvis\"";
                                         checked: root.ww-hey-jarvis;
                                         toggled => { root.toggle-wakeword-phrase("hey jarvis", self.checked); }
                                     }
                                     CheckBox {
+                                        height: 40px;
                                         text: "\"Alexa\"";
                                         checked: root.ww-alexa;
                                         toggled => { root.toggle-wakeword-phrase("alexa", self.checked); }
@@ -1906,6 +2002,7 @@ export component DashboardWidget inherits Window {
                                     spacing: 8px;
                                     Text { text: "Clap Action:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; }
                                     ComboBox {
+                                        height: 40px;
                                         model: ["Start Dictation", "Stop Dictation", "Disabled"];
                                         current-index: root.transient-action;
                                         enabled: true;
@@ -2030,6 +2127,42 @@ export component DashboardWidget inherits Window {
     }
 }
 
+    // ── "Copied" toast ──
+    // Root-level overlay (declared before the ⋮ menu so the menu still paints
+    // over it). Rust flips history-toast-show on copy and back off ~2.5 s
+    // later; opacity + rise animate both ways for the fade in/out. No
+    // TouchArea: it never intercepts clicks.
+    Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.history-toast-show ? (root.height - 64px) : (root.height - 50px);
+        width: 196px;
+        height: 40px;
+        border-radius: 10px;
+        background: #161616;
+        border-width: 1px;
+        border-color: #2E2E2E;
+        drop-shadow-blur: 18px;
+        drop-shadow-color: #000000AA;
+        drop-shadow-offset-y: 6px;
+        opacity: root.history-toast-show ? 1.0 : 0.0;
+        animate opacity { duration: 260ms; easing: ease-in-out; }
+        animate y { duration: 260ms; easing: ease-out; }
+
+        IconCheck { x: 10px; y: 6px; }
+
+        Text {
+            x: 44px;
+            y: 0px;
+            width: parent.width - 54px;
+            height: parent.height;
+            text: "Copied to clipboard";
+            font-size: 12.5px;
+            font-weight: 600;
+            color: #EDEDED;
+            vertical-alignment: center;
+        }
+    }
+
     // ── Floating history row menu (⋮) ──
     // A root-level overlay declared after the whole UI so it always paints on
     // top (Slint stacks in declaration order). Staying inside this window
@@ -2149,4 +2282,5 @@ export component DashboardWidget inherits Window {
             }
         }
     }
+        }
 }

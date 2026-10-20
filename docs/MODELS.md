@@ -1,6 +1,6 @@
-# Models — Vosk, Parakeet, Nemotron (offline, local)
+# Models — Vosk, Parakeet, Phonon-2, SenseVoice, Nemotron (offline, local)
 
-QuickSTT is **100% offline** by default. All three models run on-device via `quickstt-core/src/models/catalog.rs:15` `EngineFamily` and `models/engine.rs` dispatch.
+QuickSTT is **100% offline** by default. Every model runs on-device via `quickstt-core/src/models/catalog.rs:15` `EngineFamily` and `models/engine.rs` dispatch.
 
 ## Catalog
 
@@ -9,6 +9,7 @@ QuickSTT is **100% offline** by default. All three models run on-device via `qui
 | **Vosk small EN 0.15** | `Vosk` (`libvosk.so` / `libvosk.dll` via `vosk_api.h` `dlopen`) | `vosk/small_en_us_0.15/` | same | 50 MB | Fastest CPU, dictation |
 | **Parakeet TDT 0.6B v3 INT8** | `ParakeetRust` (`transcribe-rs 0.3.3 onnx` `ort` `libonnxruntime.so`) | `nemo/tdt_0_6b_v3_int8/` | same | 640 MB | Highest accuracy offline |
 | **Phonon-2 0.6B INT8** | `Phonon2` (same persistent `parakeet_engine` worker as Parakeet) | `phonon2/phonon-2-0.6b-int8/` | same | 688 MB | Best compact English accuracy (Fermion Research) |
+| **SenseVoice Small Multilingual INT8** | `SenseVoice` (ONNX Runtime CTC, CPU) | `sensevoice/small_multilingual/` | same | 229 MB | Fast multilingual (zh/en/ja/ko/yue) with auto language detect |
 | **Nemotron 3.5 Streaming 0.6B Q8_0** | `Nemotron` (`tools/nemotron/nemotron_engine` `transcribe.cpp` Handy GGML) | `nemotron/streaming_0.6b_q8_0/*.gguf` | same | 716 MB | Streaming + VAD, low latency |
 
 Also in catalog (Whisper/Moonshine for fallback): `whisper_cpp/tiny_en_q5` 32M, `base_en_q8` 74M, `small_en_q8` 264M, `large_v3_turbo_q8` 1500M, `moonshine_v2/*`.
@@ -84,11 +85,42 @@ command travels over the single-instance IPC socket):
 printf 'DOWNLOAD Phonon-2\n' | timeout 2 bash -c 'cat > /dev/tcp/127.0.0.1/47631'
 ```
 
+## SenseVoice Small Multilingual (FunAudioLLM)
+
+`EngineFamily::SenseVoice` runs the sherpa-onnx INT8 export of FunAudioLLM /
+Xiaomi **SenseVoice Small** directly on ONNX Runtime — a single CTC forward
+pass, no autoregressive decoder, so it is the fastest multilingual option here
+(and the only one that detects the spoken language itself).
+
+| File | Source |
+|---|---|
+| `model.int8.onnx` (229 MB) | `csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17` @ `2365baea…` |
+| `tokens.txt` | same |
+| `LICENSE` | same |
+
+Languages: Chinese, English, Japanese, Korean, Cantonese (plus emotion/event
+tags in the model, which this app ignores). The dashboard exposes the model's
+own language tokens — `Auto`, `zh`, `en`, `ja`, `ko`, `yue` — and `Auto` is the
+default, so no per-recording language picker is required.
+
+Execution provider: **CPU only** on every OS. The DirectML EP crashes with
+`0xC0000005` on the sense_voice graph, so the Windows worker pins this model to
+`CpuOnly` while Parakeet/Phonon keep DirectML. Linux uses the shared
+`runtimes/parakeet/libonnxruntime.so` via `ORT_DYLIB_PATH`; Windows and Android
+link/resolve their own ONNX Runtime.
+
+Downloaded on demand (never bundled):
+
+```bash
+printf 'DOWNLOAD SenseVoice\n' | timeout 2 bash -c 'cat > /dev/tcp/127.0.0.1/47631'
+```
+
 ## Engines — how they run
 
 - **Vosk:** `Source/native/vosk_api.h` `VoskAPI::load` `dlopen("libvosk.so")`, Windows `libvosk.dll`. Native `stt_service` loads it directly; Rust fallback `transcribe_vosk()` tries `vosk_transcriber` helper then `libvosk.so` via `stt_service`.
 - **Parakeet:** `transcribe-rs` Rust ONNX, persistent `ParakeetPipe` child process (`engine.rs:276` `ParakeetSession` line-delimited JSON `{"action":"load","model_path":…}` / `{"action":"transcribe","audio_path":…}`) — zero file-I/O, `CloseHandle` vs `pid_t/pipe/poll`.
 - **Phonon-2:** same worker as Parakeet (`Phonon2 → transcribe_parakeet_rust`); files live in `phonon2/phonon-2-0.6b-int8/` and load on demand.
+- **SenseVoice:** `transcribe-rs` Rust ONNX CTC session (`SenseVoice` family), CPU EP; `model.int8.onnx` + `tokens.txt` from `sensevoice/small_multilingual/`, language token chosen in the dashboard (`Auto` by default).
 - **Nemotron:** `nemotron_engine` (built from `tools/nemotron` `transcribe.cpp` Handy) invoked `nemotron_engine --model *.gguf --audio *.wav --vad` (`engine.rs:find_gguf_file`).
 
 At runtime `RUST_LOG=info quickstt 2>&1 | grep -E "Whisper|Parakeet|Vosk|Nemotron|libvosk|libonnx"` shows which engine fired.

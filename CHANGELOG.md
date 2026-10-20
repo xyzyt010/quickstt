@@ -1,5 +1,39 @@
 # Changelog
 
+## [2.0.0-alpha.16] — 2026-10-20
+
+### Fixed
+- **Dashboard clipped on high-DPI / small windows.** The window minimum was
+  applied in *physical* pixels while the Slint layout works in DIPs, so at 125%
+  the smallest allowed window was 20% narrower than the layout minimum and the
+  right edge (copy / delete / ⋮) was drawn outside the surface. The dashboard
+  now opens at its designed 940×700 DIP, is clamped to the monitor work area,
+  is centred on first show, and can no longer be resized below the layout
+  minimum.
+- **‹/› chevron replaced by a hamburger.** Same collapse/expand action, drawn
+  three-bar icon, 44×40 touch target, no rotation, nav items never shift.
+- Instant sidebar toggle, delete, copy ("Copied" toast) and play/pause.
+
+### Added
+- **Touch-first desktop GUI (Windows + Linux).** Scroll views pan by dragging
+  (`mouse-drag-pan-enabled`), history rows are 44 DIP, play 44, copy/delete/⋮
+  40 with 34 DIP plates, nav items 48, checkboxes/combos 40, sliders 34, seek
+  bar 34 with a 14 DIP handle.
+- **Adaptive sidebar.** Below 820 DIP the sidebar collapses to the 56 DIP icon
+  rail automatically; the persisted user toggle still wins.
+- **SenseVoice Small Multilingual** (229 MB, zh/en/ja/ko/yue with auto language
+  detect) downloadable in-app on Windows and Linux. CPU execution provider on
+  every OS.
+- **Android app scaffold** (`android/`) — a new touch-first GUI (bottom
+  navigation, record orb, 48 DIP targets), `cargo apk` build, plus a desktop
+  preview binary for reviewing the scene without an emulator. Runtime wiring
+  and the floating overlay pill are the next milestone.
+
+### Changed
+- `parakeet_engine` links ONNX Runtime statically with the DirectML provider on
+  Windows; SenseVoice is pinned to the CPU provider there (DirectML
+  access-violates on the sense_voice graph).
+
 ## [Unreleased] — Widget Polish & Migration Fixes
 
 ### Fixed

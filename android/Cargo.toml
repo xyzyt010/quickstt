@@ -1,0 +1,51 @@
+[package]
+name = "quickstt-android"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace: the desktop workspace builds for Windows/Linux only.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "quickstt-android-preview"
+path = "src/main.rs"
+
+[dependencies]
+[target.'cfg(target_os = "android")'.dependencies]
+slint = { version = "1.17", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-android-activity-06",
+    "renderer-software",
+] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+slint = { version = "1.17", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-software",
+] }
+
+[build-dependencies]
+slint-build = "1.17"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+
+[package.metadata.android]
+package = "ai.quickstt.app"
+apk_name = "quickstt-android"
+build_targets = ["aarch64-linux-android"]
+manifest = "AndroidManifest.xml"
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 34

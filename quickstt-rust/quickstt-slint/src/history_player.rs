@@ -148,6 +148,14 @@ pub fn play(path: &Path) -> Result<f32> {
     Ok(dur)
 }
 
+/// Eagerly create + start the output stream (the one slow step of the first
+/// playback, ~100-300 ms of WASAPI/ALSA setup) on the calling thread. Called
+/// once at startup so the first play click is instant; the stream then lives
+/// for the process lifetime, exactly as if the first play had created it.
+pub fn warm() {
+    let _ = ensure_player();
+}
+
 /// Pause, keeping the play head.
 pub fn pause() {
     if let Ok(guard) = cell().lock() {

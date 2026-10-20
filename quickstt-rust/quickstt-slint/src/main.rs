@@ -1003,7 +1003,12 @@ fn spawn_ipc_listener(
                     // Field diagnostics: the IPC thread only queues; the main
                     // thread dispatches (Slint handles are main-thread
                     // affine — even Weak::upgrade misbehaves off-thread).
-                    "CLICKTEST" | "RCLICK" | "DBLCLICK" | "CYCLE" | "OVERLAY" | "WINLIST" | "MENU2OPEN" => {
+                    // DASHGEOM / DASHSYNC / DASHLET are the DPI + responsive
+                    // layout probes: they log Slint's logical size vs the
+                    // native client size and can re-apply the size so the
+                    // layout and the surface agree.
+                    "CLICKTEST" | "RCLICK" | "DBLCLICK" | "CYCLE" | "OVERLAY" | "WINLIST" | "MENU2OPEN"
+                    | "DASHGEOM" | "DASHSYNC" | "DASHLET" => {
                         let _ = diag_tx.send(cmd_s);
                         log_line("diag queued");
                     }
@@ -2198,6 +2203,25 @@ fn main() -> QuickSttResult<()> {
 
     let pill = PillWidget::new().unwrap();
     let dashboard = DashboardWidget::new().unwrap();
+    // DPI + initial geometry. The dashboard is the resizable app window, so it
+    // opens at its designed size in DIPs (not at the winit minimum, which made
+    // it look cramped), clamped to the monitor work area so it never opens
+    // half off-screen on a short display.
+    {
+        let scale = widget_platform::system_scale().max(0.5);
+        dashboard.set_ui_scale(scale);
+        let (al, at, ar, ab) = widget_platform::work_area();
+        let max_w = (ar - al) as f32 / scale;
+        let max_h = (ab - at) as f32 / scale;
+        let w = 940.0_f32.min((max_w - 60.0).max(520.0));
+        let h = 700.0_f32.min((max_h - 80.0).max(400.0));
+        dashboard
+            .window()
+            .set_size(slint::LogicalSize::new(w, h));
+        log_line(&format!(
+            "dashboard: initial size {w:.0}x{h:.0} dip (work area {max_w:.0}x{max_h:.0} dip, scale {scale:.3})"
+        ));
+    }
     {
         let (sw, sh) = widget_platform::screen_size();
         log_line(&format!("screen {sw}x{sh}"));
@@ -2319,6 +2343,10 @@ fn main() -> QuickSttResult<()> {
     // copy happened; the tick clears it ~1.2s later so the row falls back.
     let history_copied: Arc<Mutex<(i32, std::time::Instant)>> =
         Arc::new(Mutex::new((-1, std::time::Instant::now())));
+    // "Copied to clipboard" toast deadline (None = hidden). The dashboard
+    // sync tick hides it once past; the label is fixed.
+    let history_toast_until: Arc<Mutex<Option<std::time::Instant>>> =
+        Arc::new(Mutex::new(None));
     // Last finished turn (trimmed): "Paste last transcript" types this.
     let last_turn: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     // Smooth footprint morph: window size+pos lerp over ~240ms so expand /
@@ -3909,16 +3937,8 @@ fn dock_hop(
     // The rows live in ONE persistent VecModel: changed rows are patched with
     // set_row_data, so the 10Hz playback tick never recreates the list —
     // scroll position, hover state and the open ⋮ menu all survive.
-    let hist_play_idx = history_play_idx.clone();
-    let hist_menu_idx = history_menu_idx.clone();
-    let hist_copied = history_copied.clone();
-    let hist_dirty = history_dirty.clone();
     let hist_vec_model: std::rc::Rc<VecModel<HistRow>> = std::rc::Rc::new(VecModel::default());
     dashboard.set_history_items(ModelRc::from(hist_vec_model.clone()));
-    let hist_vec_tick = hist_vec_model.clone();
-    let mut hist_model: Vec<HistRow> = Vec::new();
-    let mut hist_last_seq: u64 = u64::MAX;
-    let mut hist_last_push: std::time::Instant = std::time::Instant::now() - std::time::Duration::from_secs(1);
     let menu_pin_timer = menu_pin.clone();
     let flyout_ui_timer = flyout_ui.clone();
     let menu2_open_at_timer = menu2_open_at.clone();
@@ -4394,6 +4414,83 @@ fn dock_hop(
                         if let Ok(mut v) = dash_visible_timer.lock() {
                             *v = true;
                         }
+                    }
+                } else if cmd == "DASHGEOM" {
+                    if let Some(d) = dash_timer.upgrade() {
+                        let w = d.window();
+                        let logical = w.size();
+                        let client = widget_platform::client_size(w);
+                        let native = widget_platform::native_rect(w);
+                        let slint_scale = w.scale_factor();
+                        let plat_scale = widget_platform::window_scale(w);
+                        log_line(&format!(
+                            "dashgeom: slint_logical={}x{} slint_scale={:.3} platform_scale={:.3} client={:?} window={:?} sidebar={} collapsed={}",
+                            logical.width,
+                            logical.height,
+                            slint_scale,
+                            plat_scale,
+                            client,
+                            native,
+                            d.get_sidebar_width(),
+                            d.get_sidebar_collapsed(),
+                        ));
+                        log_line(&format!(
+                            "dashgeom: probes root={} box={} side={} ui_scale={:.3} rail={}",
+                            d.get_probe_root_w(),
+                            d.get_probe_box_w(),
+                            d.get_probe_side_w(),
+                            d.get_ui_scale(),
+                            d.get_rail_mode(),
+                        ));
+                        if let (Some((cw, ch)), true) = (client, slint_scale > 0.0) {
+                            let want_w = cw as f32 / slint_scale;
+                            let want_h = ch as f32 / slint_scale;
+                            log_line(&format!(
+                                "dashgeom: implied logical from client = {:.1}x{:.1} (delta {:+.1}x{:+.1})",
+                                want_w,
+                                want_h,
+                                logical.width as f32 - want_w,
+                                logical.height as f32 - want_h,
+                            ));
+                        }
+                    }
+                } else if cmd == "DASHSYNC" {
+                    // Re-apply the current physical size as a LOGICAL size so
+                    // Slint's layout and the winit surface agree. Idempotent:
+                    // when they already agree the resulting physical size is
+                    // unchanged, so this never shrinks/grows the window.
+                    if let Some(d) = dash_timer.upgrade() {
+                        let w = d.window();
+                        let sf = w.scale_factor();
+                        if let (Some((cw, ch)), true) = (widget_platform::client_size(w), sf > 0.0)
+                        {
+                            let tw = cw as f32 / sf;
+                            let th = ch as f32 / sf;
+                            log_line(&format!(
+                                "dashsync: before logical={}x{} client={}x{} scale={:.3} -> set_size({:.1},{:.1})",
+                                w.size().width,
+                                w.size().height,
+                                cw,
+                                ch,
+                                sf,
+                                tw,
+                                th,
+                            ));
+                            w.set_size(slint::LogicalSize::new(tw, th));
+                        }
+                    }
+                } else if cmd == "DASHLET" {
+                    // Responsive-layout probe: what width does the dashboard
+                    // think it has, and where does the history card end?
+                    if let Some(d) = dash_timer.upgrade() {
+                        let w = d.window();
+                        log_line(&format!(
+                            "dashlet: width={} height={} sidebar={} collapsed={}",
+                            w.size().width,
+                            w.size().height,
+                            d.get_sidebar_width(),
+                            d.get_sidebar_collapsed(),
+                        ));
                     }
                 } else if cmd.starts_with("MENUROW") {
                     let n: i32 = cmd
@@ -6488,19 +6585,31 @@ fn dock_hop(
     }
     {
         let state = state.clone();
+        let dash_w = dashboard.as_weak();
         dashboard.on_set_sidebar_width(move |v: f32| {
+            let px = (v.round() as i64).clamp(150, 280) as u32;
             if let Ok(mut s) = state.lock() {
-                s.settings.dash_sidebar_width = (v.round() as i64).clamp(150, 280) as u32;
+                s.settings.dash_sidebar_width = px;
                 let _ = s.settings.save_all();
+            }
+            // Apply the clamped value back instantly (the drag end-point is
+            // authoritative even if the pointer overshot the range).
+            if let Some(d) = dash_w.upgrade() {
+                d.set_sidebar_width(px as i32);
             }
         });
     }
     {
         let state = state.clone();
+        let dash_w = dashboard.as_weak();
         dashboard.on_set_sidebar_collapsed(move |on| {
             if let Ok(mut s) = state.lock() {
                 s.settings.dash_sidebar_collapsed = on;
                 let _ = s.settings.save_all();
+            }
+            // Apply instantly — the chevron must never wait for a sync tick.
+            if let Some(d) = dash_w.upgrade() {
+                d.set_sidebar_collapsed(on);
             }
         });
     }
@@ -6573,6 +6682,8 @@ fn dock_hop(
         let state = state.clone();
         let copied = history_copied.clone();
         let dirty = history_dirty.clone();
+        let dash_w = dashboard.as_weak();
+        let toast_until = history_toast_until.clone();
         dashboard.on_history_copy(move |i| {
             if let Ok(s) = state.lock() {
                 if let Some(item) = s.history.get(i as usize) {
@@ -6584,9 +6695,18 @@ fn dock_hop(
                         text.len()
                     ));
                     if ok {
-                        // Flash the row's copy button green ✓ for a beat.
+                        // Flash the row's copy button green ✓ for a beat…
                         *mlock(&copied) = (i, std::time::Instant::now());
                         *mlock(&dirty) = true;
+                        // …and float a "Copied to clipboard" toast that fades
+                        // out on its own after ~2.5s (cleared by the sync).
+                        *mlock(&toast_until) = Some(
+                            std::time::Instant::now()
+                                + std::time::Duration::from_millis(2500),
+                        );
+                        if let Some(d) = dash_w.upgrade() {
+                            d.set_history_toast_show(true);
+                        }
                     }
                 }
             }
@@ -6867,7 +6987,13 @@ fn dock_hop(
         });
     }
 
-    // Apply persisted style + dashboard initial values.
+    // One-time startup fixups + wakeword service bootstrap. (This region used
+    // to ALSO mirror settings into the widgets and rebuild the history rows —
+    // but it ran exactly ONCE, which made every history action look dead:
+    // delete left the row on screen, play never morphed, the seek bar never
+    // filled, the sidebar chevron never moved. All mirrors + the row rebuild
+    // now live in the 20 Hz sync timer below; only genuinely one-time work
+    // stays here.)
     {
         if let Ok(mut s) = state.lock() {
             // Clap transient: respect the persisted action (dashboard unlocked).
@@ -6910,14 +7036,61 @@ fn dock_hop(
                     wh.start();
                 }
             }
+        }
+    }
+    // One-time registry probe (a per-tick registry read would be needless
+    // churn; the toggle handler re-applies on failure).
+    dashboard.set_start_with_windows(autostart::is_autostart_enabled());
+
+    // Pre-warm the history playback stream on the UI thread so the FIRST
+    // play click is instant (stream creation is its only slow step).
+    history_player::warm();
+
+    // ── Live dashboard sync (20 Hz) ──
+    // Mirrors the settings into the widgets and rebuilds the history rows
+    // whenever something changed (dirty flag / new turn / 10 Hz while a clip
+    // plays). This is what makes row actions instant: delete clears the row,
+    // play morphs to pause, the seek bar fills, the sidebar chevron moves —
+    // all within one 50 ms tick. Idle ticks are a handful of no-op sets.
+    let dash_sync_timer = Timer::default();
+    let state_sync = state.clone();
+    let pill_sync = pill.as_weak();
+    let dash_sync = dashboard.as_weak();
+    let hist_play_idx = history_play_idx.clone();
+    let hist_menu_idx = history_menu_idx.clone();
+    let hist_copied = history_copied.clone();
+    let hist_dirty = history_dirty.clone();
+    let hist_toast_until = history_toast_until.clone();
+    let hist_vec_tick = hist_vec_model.clone();
+    let mut hist_model: Vec<HistRow> = Vec::new();
+    let mut hist_last_seq: u64 = u64::MAX;
+    let mut hist_last_push = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    // Adaptive sidebar: the dashboard reports its own solved width from here
+    // (a `root.width` binding in the markup would feed back into the window's
+    // preferred size — Slint flags that as a binding loop).
+    let mut adapt_tick: u32 = 0;
+    dash_sync_timer.start(
+        TimerMode::Repeated,
+        std::time::Duration::from_millis(50),
+        move || {
+            let Some(dashboard) = dash_sync.upgrade() else {
+                return;
+            };
+            let Some(pill) = pill_sync.upgrade() else {
+                return;
+            };
+            let Ok(s) = state_sync.lock() else { return };
             pill.set_pill_opacity((s.settings.active_opacity as f32 / 100.0).clamp(0.2, 1.0));
             pill.set_pill_radius(s.settings.pill_radius as f32);
             dashboard.set_ui_opacity(s.settings.active_opacity.clamp(20, 100) as i32);
             dashboard.set_ui_pill_radius(s.settings.pill_radius.clamp(0, 25) as i32);
+            // Recomputed per tick — the wakeword toggles can flip it live.
+            let ww_enabled = s.wakeword_active
+                || (!s.settings.wake_word_mode.eq_ignore_ascii_case("Off")
+                    && !s.settings.wake_word_mode.trim().is_empty());
             dashboard.set_wakeword_enabled(ww_enabled);
             dashboard.set_wakeword_sensitivity(s.settings.wakeword_sensitivity.clamp(0, 100) as i32);
             dashboard.set_vad_sensitivity(s.settings.vad_sensitivity.clamp(0, 100) as i32);
-            dashboard.set_start_with_windows(autostart::is_autostart_enabled());
             dashboard.set_start_minimized(s.settings.startup_background);
             dashboard.set_lrc_enabled(s.settings.lrc_enabled);
             dashboard.set_auto_stop_silence(s.settings.auto_stop_silence);
@@ -6932,6 +7105,26 @@ fn dock_hop(
             dashboard.set_sidebar_width(s.settings.dash_sidebar_width.clamp(150, 280) as i32);
             dashboard.set_sidebar_collapsed(s.settings.dash_sidebar_collapsed);
             dashboard.set_history_enabled(s.settings.history_enabled);
+
+            // Adaptive rail (~4 Hz): collapse the sidebar to its icon rail
+            // whenever the window is too narrow for the full panel, so the
+            // content column always keeps a usable width on small screens,
+            // half-snapped windows and touch devices. Threshold is in DIPs,
+            // while Window::size() reports physical px on this backend.
+            adapt_tick = adapt_tick.wrapping_add(1);
+            if adapt_tick % 8 == 0 {
+                let scale = dashboard.get_ui_scale().max(0.5);
+                let dip_w = dashboard.window().size().width as f32 / scale;
+                dashboard.set_rail_mode(dip_w > 0.5 && dip_w < 820.0);
+            }
+            // Follow the monitor scale (a window dragged to a different-DPI
+            // screen must re-derive its DIP layout box).
+            if adapt_tick % 32 == 0 {
+                let s = widget_platform::window_scale(dashboard.window()).max(0.5);
+                if (dashboard.get_ui_scale() - s).abs() > 0.01 {
+                    dashboard.set_ui_scale(s);
+                }
+            }
 
             // ── History rows (dashboard) ──
             // Rebuild only when something actually changed: a new/deleted turn
@@ -6951,6 +7144,14 @@ fn dock_hop(
                 if cg.0 >= 0 && cg.1.elapsed() >= std::time::Duration::from_millis(1200) {
                     *cg = (-1, std::time::Instant::now());
                     *mlock(&hist_dirty) = true;
+                }
+            }
+            // The "Copied to clipboard" toast fades out after ~2.5s (the
+            // opacity transition animates both ways in the UI).
+            if let Some(until) = *mlock(&hist_toast_until) {
+                if std::time::Instant::now() >= until {
+                    *mlock(&hist_toast_until) = None;
+                    dashboard.set_history_toast_show(false);
                 }
             }
             let since_push = hist_last_push.elapsed();
@@ -7044,8 +7245,8 @@ fn dock_hop(
             if !s.settings.recording_dir.is_empty() {
                 dashboard.set_recording_dir(s.settings.recording_dir.clone().into());
             }
-        }
-    }
+        },
+    );
 
     // Full event loop — NOT pill.run(): run() returns when its window
     // hides, which made Show/Hide quit the whole app (tray and all).

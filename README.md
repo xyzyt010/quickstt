@@ -174,6 +174,32 @@ cargo build -p quickstt-gui --release
 
 ---
 
+## Quick Start — Android (preview)
+
+The Android build is a **new** touch-first GUI — bottom navigation, a
+thumb-reachable record orb, 48 DIP minimum targets — not a scaled-down copy of
+the desktop window. Same engines and palette.
+
+```powershell
+$env:ANDROID_HOME     = "$env:LOCALAPPDATA\Android\Sdk"
+$env:ANDROID_NDK_ROOT = "$env:LOCALAPPDATA\Android\Sdk\ndk\27.3.13750724"
+cd android
+cargo apk build -t aarch64-linux-android
+adb install -r target\release\apk\quickstt-android.apk
+```
+
+Preview the exact same scene on Windows/Linux without a device:
+
+```powershell
+cd android
+cargo run --bin quickstt-android-preview
+```
+
+See [`android/README.md`](android/README.md) for the status matrix — the audio
+runtime and the always-on overlay pill are the remaining steps.
+
+---
+
 ## Screenshots
 
 | Pill (idle) | Pill (listening) | Dashboard | TextBoard |
