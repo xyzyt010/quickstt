@@ -12,12 +12,15 @@ record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window
 | Touch-first dashboard (Listen, History, Models, Settings) | ✅ implemented |
 | Desktop preview of the Android scene | ✅ `cargo run --example preview` |
 | **Microphone capture** (NDK AAudio, 16 kHz mono) | ✅ implemented |
+| **Input conditioning** (DC removal, soft limiting, clip/dead watch) | ✅ implemented |
+| **Microphone self-test** ("Test mic" in the setup card) | ✅ implemented |
 | **On-device transcription** (whisper.cpp for arm64-v8a) | ✅ implemented |
 | **Model download in-app** (Whisper Tiny EN, 32 MB) | ✅ implemented |
 | **Clipboard copy** of the finished transcript | ✅ implemented |
 | **Floating bubble over other apps** (WindowManager overlay) | ✅ implemented (read-out bubble) |
 | Setup steps / how-to-use card in the Listen tab | ✅ implemented |
 | Tap-to-record on the floating bubble | ⏳ needs a Java service (cargo-apk cannot declare one) |
+| Always-on wake word (background mic) | ⏳ needs a Java foreground service |
 | SenseVoice / Phonon-2 / Parakeet ONNX on device | ⏳ needs the ONNX Runtime AAR for each ABI |
 
 ## How it works
@@ -26,17 +29,27 @@ record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window
    no Android backend). It records 16 kHz mono float, which is exactly what
    whisper.cpp wants, so no resampling is needed. `src/audio.rs` is the Rust
    side (start / read / stop + level metering + WAV writing).
-2. **Transcribe** — whisper.cpp is cross-compiled for `arm64-v8a` with the
+2. **Conditioning** — `src/conditioner.rs` (the same algorithm as the
+   desktop) removes the DC offset with a 20 Hz high-pass, soft-limits the
+   signal and watches the raw rail fraction. A clipped microphone is
+   reported ("Input clipped — lower the mic gain") and a silent one ("No
+   signal from the microphone") instead of producing a bogus transcript.
+   The **"Test mic"** button in the setup card opens the mic for a second
+   and reports the level, so the user can check the input without
+   recording.
+3. **Transcribe** — whisper.cpp is cross-compiled for `arm64-v8a` with the
    Android NDK (`cmake` + the NDK toolchain file, portable x86-64 baseline so
    it never SIGILLs), stripped and shipped inside the APK
    (`prebuilt/whisper-cli-arm64-v8a`). At first run it is written to the app's
-   private files directory and executed once per turn.
-3. **Model** — never bundled. The Listen tab's step 2 downloads
+   private files directory and executed once per turn. A silent take is
+   rejected *before* the engine runs (whisper hallucinates short words on
+   noise-only audio).
+4. **Model** — never bundled. The Listen tab's step 2 downloads
    `ggml-tiny.en-q5_1.bin` (32 MB) from the same HuggingFace source the
    desktop app uses, with a progress bar.
-4. **Result** — the transcript is shown in the app, pushed into History and
+5. **Result** — the transcript is shown in the app, pushed into History and
    copied to the system clipboard, so it can be pasted into any app.
-5. **Floating bubble** — a `WindowManager` overlay (`TYPE_APPLICATION_OVERLAY`)
+6. **Floating bubble** — a `WindowManager` overlay (`TYPE_APPLICATION_OVERLAY`)
    shows the mic state and the last transcript above other apps. The user
    grants "Display over other apps" in step 3 of the setup card.
 
