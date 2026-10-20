@@ -787,32 +787,28 @@ export component AppWindow inherits Window {
                 padding-bottom: 10px;
 
                 NavItem {
-                    width: root.width / 4;
-                    horizontal-stretch: 1;
+                    width: 25%;
                     label: "Listen";
                     active: root.tab == 0;
                     picked => { root.nav(0); }
                 }
 
                 NavItem {
-                    width: root.width / 4;
-                    horizontal-stretch: 1;
+                    width: 25%;
                     label: "History";
                     active: root.tab == 1;
                     picked => { root.nav(1); }
                 }
 
                 NavItem {
-                    width: root.width / 4;
-                    horizontal-stretch: 1;
+                    width: 25%;
                     label: "Models";
                     active: root.tab == 2;
                     picked => { root.nav(2); }
                 }
 
                 NavItem {
-                    width: root.width / 4;
-                    horizontal-stretch: 1;
+                    width: 25%;
                     label: "Settings";
                     active: root.tab == 3;
                     picked => { root.nav(3); }

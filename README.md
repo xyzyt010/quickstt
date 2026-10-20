@@ -192,7 +192,7 @@ Preview the exact same scene on Windows/Linux without a device:
 
 ```powershell
 cd android
-cargo run --bin quickstt-android-preview
+cargo run --example preview
 ```
 
 See [`android/README.md`](android/README.md) for the status matrix — the audio

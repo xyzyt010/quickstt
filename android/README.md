@@ -11,7 +11,7 @@ It shares the desktop palette and the same model engines.
 |---|---|
 | Rust + Slint native Android app (`android_main`) | ✅ builds / installs |
 | Touch-first dashboard (Listen, History, Models, Settings) | ✅ implemented |
-| Desktop preview of the Android scene | ✅ `cargo run --bin quickstt-android-preview` |
+| Desktop preview of the Android scene | ✅ `cargo run --example preview` |
 | Audio capture + transcription wiring | ⏳ next (port `quickstt-core` engine calls) |
 | Always-on floating pill (overlay + foreground service) | ⏳ next (Kotlin service + `WindowManager`) |
 | SenseVoice / Phonon-2 / Parakeet ONNX on device | ⏳ needs the ONNX Runtime AAR for each ABI |
@@ -45,7 +45,7 @@ Preview the exact same UI on Windows/Linux without a device:
 
 ```powershell
 cd android
-cargo run --bin quickstt-android-preview
+cargo run --example preview
 ```
 
 ## Why the UI differs from the desktop

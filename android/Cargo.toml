@@ -10,10 +10,6 @@ publish = false
 [lib]
 crate-type = ["cdylib", "lib"]
 
-[[bin]]
-name = "quickstt-android-preview"
-path = "src/main.rs"
-
 [dependencies]
 [target.'cfg(target_os = "android")'.dependencies]
 slint = { version = "1.17", default-features = false, features = [
