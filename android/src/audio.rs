@@ -7,12 +7,35 @@
 
 use std::path::Path;
 
-extern "C" {
-    fn qs_audio_start(sample_rate: i32) -> i32;
-    fn qs_audio_read(out: *mut f32, frames: i32) -> i32;
-    fn qs_audio_channels() -> i32;
-    fn qs_audio_sample_rate() -> i32;
-    fn qs_audio_stop();
+/// Android: the real NDK AAudio shim (src/aaudio.c).
+#[cfg(target_os = "android")]
+mod ffi {
+    extern "C" {
+        pub fn qs_audio_start(sample_rate: i32) -> i32;
+        pub fn qs_audio_read(out: *mut f32, frames: i32) -> i32;
+        pub fn qs_audio_channels() -> i32;
+        pub fn qs_audio_sample_rate() -> i32;
+        pub fn qs_audio_stop();
+    }
+}
+
+/// Desktop preview: no microphone — the stub fails every start, so the
+/// preview window still renders (and the record button reports why).
+#[cfg(not(target_os = "android"))]
+mod ffi {
+    pub fn qs_audio_start(_sample_rate: i32) -> i32 {
+        -2
+    }
+    pub fn qs_audio_read(_out: *mut f32, _frames: i32) -> i32 {
+        -1
+    }
+    pub fn qs_audio_channels() -> i32 {
+        1
+    }
+    pub fn qs_audio_sample_rate() -> i32 {
+        0
+    }
+    pub fn qs_audio_stop() {}
 }
 
 /// Sample rate used for capture + transcription (whisper.cpp native rate).
@@ -47,7 +70,7 @@ impl Recorder {
         if self.active {
             return Ok(());
         }
-        let rc = unsafe { qs_audio_start(SAMPLE_RATE) };
+        let rc = unsafe { ffi::qs_audio_start(SAMPLE_RATE) };
         if rc != 0 {
             return Err(match rc {
                 -1 => "could not create the audio stream".to_string(),
@@ -69,11 +92,11 @@ impl Recorder {
         if !self.active || out.is_empty() {
             return 0;
         }
-        let channels = unsafe { qs_audio_channels() }.max(1) as usize;
+        let channels = unsafe { ffi::qs_audio_channels() }.max(1) as usize;
         // AAudio fills interleaved frames; read into a scratch buffer when
         // the device gave us more than one channel.
         let mut scratch = vec![0f32; out.len() * channels];
-        let n = unsafe { qs_audio_read(scratch.as_mut_ptr(), out.len() as i32) };
+        let n = unsafe { ffi::qs_audio_read(scratch.as_mut_ptr(), out.len() as i32) };
         if n <= 0 {
             return 0;
         }
@@ -111,7 +134,7 @@ impl Recorder {
     /// Stop capture and release the microphone.
     pub fn stop(&mut self) {
         if self.active {
-            unsafe { qs_audio_stop() };
+            unsafe { ffi::qs_audio_stop() };
             self.active = false;
         }
     }
