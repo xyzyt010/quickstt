@@ -133,7 +133,11 @@ jobs:
           cp -f assets/icon_app.png assets/quickstt.png
           EXTRA=""
           [[ -f "$STT" ]] && EXTRA="-e $STT"
-          linuxdeploy --appdir dist/AppDir -e "$BIN" $EXTRA -d assets/quickstt.desktop -i assets/quickstt.png --plugin gtk --output appimage 2>&1 | tail -n 40 || true
+          linuxdeploy --appdir dist/AppDir -e "$BIN" $EXTRA -d assets/quickstt.desktop -i assets/quickstt.png --plugin gtk --output appimage > dist/linuxdeploy.log 2>&1 || true
+          # Surface WHY the AppImage failed (the gtk plugin often cannot
+          # auto-detect the GTK version) instead of silently shipping only
+          # the tarball.
+          tail -n 25 dist/linuxdeploy.log || true
           # Bundle the OWW wakeword heads next to the binary inside the AppDir
           # (the app's exe-adjacent lookup finds them there on first run).
           mkdir -p dist/AppDir/usr/bin/wakeword_models
