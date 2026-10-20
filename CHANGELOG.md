@@ -1,5 +1,50 @@
 # Changelog
 
+## [2.0.0-alpha.18] — 2026-10-20
+
+### Fixed
+- **Linux: dictation started by itself and the wake word never fired.**
+  Both were the same fault — the microphone input was *clipped*. With the
+  capture gain cranked up (+30 dB internal boost **+** +30 dB ADC gain) the
+  ADC delivered a rail-to-rail square wave instead of speech: the VAD read
+  it as continuous speech, the wake word head scored 0.000 and the transient
+  detector saw random onsets, so the app started dictating on nothing. The
+  input path now conditions every sample (20 Hz DC-blocking high-pass +
+  soft limiter), watches the raw rail fraction, reports a broken input
+  ("Microphone input is CLIPPED (saturated)" / "No audio is arriving from
+  the microphone") and **never triggers a wake word or a clap on it**.
+- **Any platform: a noisy room recorded your voice and produced
+  "+0 chars, nothing heard".** The segmenter's start gate was inverted: it
+  armed on a *non-speech* chunk and opened the utterance on the next speech
+  chunk, so a continuously loud signal never opened an utterance at all. The
+  gate now does what it always claimed to do — the first qualifying chunk
+  arms, the second consecutive one starts the turn.
+- **The dashboard's microphone selection was ignored by two of the three
+  capture paths.** Only the foreground stream used it; the background wake
+  word listener and the engine stream always opened the OS default. All
+  three now follow the selection, and changing it re-opens the background
+  stream immediately.
+- **PTT and the background listener fought over the microphone** (Linux
+  shares one ALSA PCM): the foreground session could end up with pure
+  silence. The background listener is now stopped — and waited for — before
+  the foreground stream opens.
+- **The engine stream could not open a 48 kHz USB headset.** It now falls
+  back to the device's native format and resamples on the way in.
+- **Android: a silent take was sent to whisper**, which hallucinates
+  short words ("you", "yeah") on noise-only audio. Silent takes are now
+  rejected before the engine runs.
+
+### Added
+- **Android: the same input protection as the desktop.** The AAudio capture
+  is conditioned (DC removal + soft limiting), the setup card shows the live
+  input health ("clipped" / "no signal"), a new **"Test mic"** button
+  verifies the microphone without recording, and the app says what is wrong
+  instead of pretending to listen to silence.
+- **The foreground capture logs its level**, so a silent session is
+  diagnosable instead of mysterious.
+- **Linux: the README now documents the clipped-microphone fix** with the
+  exact `amixer` / `pactl` commands.
+
 ## [2.0.0-alpha.17] — 2026-10-20
 
 ### Fixed
@@ -18,10 +63,10 @@
   nothing was on screen and Ctrl+Space looked completely dead. The window is
   now mapped explicitly after `show()` and re-mapped (at most every 2 s) if
   the WM unmaps it behind Slint's back.
-- **Pill visibility (Windows + Linux).** The collapsed widget was a 9×41
-  hairline sliver that disappeared over dark videos. It is now a 32×32 mic
-  circle (light glyph + 1px ring) on every dock — always findable, and the
-  hover morph grows out of it in place.
+- **Pill visibility (Windows + Linux).** The collapsed widget is a hairline
+  bar that can disappear over dark videos; the window is now mapped
+  explicitly and re-mapped when the window manager unmaps it, so the pill is
+  always on screen. The pill's look is unchanged.
 - **CI: Linux engines are built for the portable x86-64 baseline**
   (`GGML_NATIVE=OFF`, `-march=x86-64 -mtune=generic`) for whisper.cpp,
   transcribe.cpp and the native backend, so a release can no longer ship a
