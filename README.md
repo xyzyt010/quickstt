@@ -114,7 +114,9 @@ curl -fsSL https://raw.githubusercontent.com/quickstt/quickstt/main/scripts/inst
 
 - **Wayland?** Mint defaults to X11 (Cinnamon). `tray-icon` + `global-hotkey` are native. If you switched to experimental Wayland, install `wtype`: `sudo apt install wtype`, and use XWayland for hotkeys.
 - **No tray icon?** Mint Cinnamon panel may hide indicators: `System Settings → Applets` ensure **System Tray** or **AppIndicator** is enabled. Or run `quickstt` and check `ps aux | grep quickstt`.
-- **No mic?** `Menu → Sound → Input` select your mic, or `pactl list sources`.
+- **No mic?** `Menu → Sound → Input` select your mic, or `pactl list sources`. The app binds the input device **when it starts** — after changing the system default input, restart QuickSTT (or pick the device explicitly in the dashboard).
+- **"Transcribe failed" / the model never loads?** The app runs the engine binary that ships with it (`<prefix>/lib/quickstt/tools/…`). A leftover copy in `/usr/lib/quickstt` from an older release used to shadow it — that build was compiled with `-march=native` and dies with *SIGILL* on other CPUs, so the model was never loaded. Since 2.0.0-alpha.17 the bundled engine always wins, a broken binary is skipped automatically, and the log states the real reason (`terminated by signal 4 — the engine binary was built for a different CPU`). If you still see it, remove the stale tree: `sudo rm -rf /usr/lib/quickstt/tools` and reinstall the `.deb`.
+- **Nothing appears on screen?** The mini pill is a *translucent always-on-top* window; on some WMs it needs the "always on top" window rule. `/tmp/quickstt-slint.log` shows the pill geometry and the engine path it used.
 
 ---
 
@@ -174,19 +176,27 @@ cargo build -p quickstt-gui --release
 
 ---
 
-## Quick Start — Android (preview)
+## Quick Start — Android
 
 The Android build is a **new** touch-first GUI — bottom navigation, a
 thumb-reachable record orb, 48 DIP minimum targets — not a scaled-down copy of
-the desktop window. Same engines and palette.
+the desktop window. It dictates for real: the microphone is captured through
+the NDK AAudio API, whisper.cpp (cross-compiled for arm64-v8a, shipped inside
+the APK) transcribes on-device, the text is copied to the clipboard, and a
+floating bubble above other apps shows the mic state and the last transcript.
+The Listen tab walks through the three setup steps (microphone permission →
+model download → overlay permission).
 
 ```powershell
 $env:ANDROID_HOME     = "$env:LOCALAPPDATA\Android\Sdk"
 $env:ANDROID_NDK_ROOT = "$env:LOCALAPPDATA\Android\Sdk\ndk\27.3.13750724"
 cd android
-cargo apk build -t aarch64-linux-android
+cargo apk build --release --target aarch64-linux-android --lib
 adb install -r target\release\apk\quickstt-android.apk
 ```
+
+Prebuilt APKs: `dist/quickstt-android-release.apk` (3.4 MB, signed) and
+`dist/quickstt-android-debug.apk`.
 
 Preview the exact same scene on Windows/Linux without a device:
 
@@ -195,8 +205,8 @@ cd android
 cargo run --example preview
 ```
 
-See [`android/README.md`](android/README.md) for the status matrix — the audio
-runtime and the always-on overlay pill are the remaining steps.
+See [`android/README.md`](android/README.md) for the status matrix, the engine
+rebuild steps and the remaining items.
 
 ---
 
