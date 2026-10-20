@@ -6,11 +6,11 @@ QuickSTT is **100% offline** by default. Every model runs on-device via `quickst
 
 | Model | EngineFamily | Display | Path Linux Mint (`~/.local/share/QuickSTT/models/…`) | Path Windows (`%APPDATA%\QuickSTT\models\…`) | Size | Best for |
 |---|---|---|---|---|---|
-| **Vosk small EN 0.15** | `Vosk` (`libvosk.so` / `libvosk.dll` via `vosk_api.h` `dlopen`) | `vosk/small_en_us_0.15/` | same | 50 MB | Fastest CPU, dictation |
-| **Parakeet TDT 0.6B v3 INT8** | `ParakeetRust` (`transcribe-rs 0.3.3 onnx` `ort` `libonnxruntime.so`) | `nemo/tdt_0_6b_v3_int8/` | same | 640 MB | Highest accuracy offline |
-| **Phonon-2 0.6B INT8** | `Phonon2` (same persistent `parakeet_engine` worker as Parakeet) | `phonon2/phonon-2-0.6b-int8/` | same | 688 MB | Best compact English accuracy (Fermion Research) |
-| **SenseVoice Small Multilingual INT8** | `SenseVoice` (ONNX Runtime CTC, CPU) | `sensevoice/small_multilingual/` | same | 229 MB | Fast multilingual (zh/en/ja/ko/yue) with auto language detect |
-| **Nemotron 3.5 Streaming 0.6B Q8_0** | `Nemotron` (`tools/nemotron/nemotron_engine` `transcribe.cpp` Handy GGML) | `nemotron/streaming_0.6b_q8_0/*.gguf` | same | 716 MB | Streaming + VAD, low latency |
+| **Vosk small EN 0.15** | `Vosk` (`libvosk.so` / `libvosk.dll` via `vosk_api.h` `dlopen`) | `vosk/small_en_us_0.15/` | same | same | 50 MB | Fastest CPU, dictation |
+| **Parakeet TDT 0.6B v3 INT8** | `ParakeetRust` (`transcribe-rs 0.3.3 onnx` `ort` `libonnxruntime.so`) | `nemo/tdt_0_6b_v3_int8/` | same | same | 640 MB | Highest accuracy offline |
+| **Phonon-2 0.6B INT8** | `Phonon2` (same persistent `parakeet_engine` worker as Parakeet) | `phonon2/phonon-2-0.6b-int8/` | same | same | 688 MB | Best compact English accuracy (Fermion Research) |
+| **SenseVoice Small Multilingual INT8** | `SenseVoice` (ONNX Runtime CTC, CPU) | `sensevoice/small_multilingual/` | same | same | 229 MB | Fast multilingual (zh/en/ja/ko/yue) with auto language detect |
+| **Nemotron 3.5 Streaming 0.6B Q8_0** | `Nemotron` (`tools/nemotron/nemotron_engine` `transcribe.cpp` Handy GGML) | `nemotron/streaming_0.6b_q8_0/*.gguf` | same | same | 716 MB | Streaming + VAD, low latency |
 
 Also in catalog (Whisper/Moonshine for fallback): `whisper_cpp/tiny_en_q5` 32M, `base_en_q8` 74M, `small_en_q8` 264M, `large_v3_turbo_q8` 1500M, `moonshine_v2/*`.
 
