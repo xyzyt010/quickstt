@@ -1,6 +1,6 @@
-[package]
+﻿[package]
 name = "quickstt-android"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 publish = false
 
@@ -103,3 +103,4 @@ config_changes = "orientation|screenSize|screenLayout|keyboardHidden|uiMode|dens
 orientation = "fullUser"
 launch_mode = "singleTask"
 exported = true
+

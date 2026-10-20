@@ -22,30 +22,45 @@ int qs_audio_start(int32_t sample_rate) {
     if (g_stream != NULL) {
         return 0; // already recording
     }
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        int32_t channels = (attempt == 0) ? 1 : 2;
-        AAudioStreamBuilder *builder = NULL;
-        if (AAudio_createStreamBuilder(&builder) != AAUDIO_OK) {
-            return -1;
-        }
-        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-        AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_EXCLUSIVE);
-        AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
-        AAudioStreamBuilder_setChannelCount(builder, channels);
-        AAudioStreamBuilder_setSampleRate(builder, sample_rate);
-        AAudioStreamBuilder_setDataCallback(builder, NULL, NULL);
-        aaudio_result_t res = AAudioStreamBuilder_openStream(builder, &g_stream);
-        AAudioStreamBuilder_delete(builder);
-        if (res == AAUDIO_OK && g_stream != NULL) {
-            g_channels = channels;
-            if (AAudioStream_requestStart(g_stream) == AAUDIO_OK) {
-                return 0;
+    // Try, in order:
+    //   1. mono float, shared   - the mode nearly every device supports
+    //   2. mono float, exclusive - some devices only give exclusive access
+    //   3. stereo float, shared  - the device may refuse mono
+    // Low-latency is tried first, then the default mode (a device that
+    // refuses a low-latency stream usually accepts the default one).
+    const int32_t channel_counts[2] = {1, 2};
+    const aaudio_sharing_mode_t sharing_modes[2] = {
+        AAUDIO_SHARING_MODE_SHARED, AAUDIO_SHARING_MODE_EXCLUSIVE};
+    const aaudio_performance_mode_t perf_modes[2] = {
+        AAUDIO_PERFORMANCE_MODE_LOW_LATENCY, AAUDIO_PERFORMANCE_MODE_NONE};
+
+    for (int c = 0; c < 2; ++c) {
+        for (int s = 0; s < 2; ++s) {
+            for (int p = 0; p < 2; ++p) {
+                AAudioStreamBuilder *builder = NULL;
+                if (AAudio_createStreamBuilder(&builder) != AAUDIO_OK) {
+                    return -1;
+                }
+                AAudioStreamBuilder_setPerformanceMode(builder, perf_modes[p]);
+                AAudioStreamBuilder_setSharingMode(builder, sharing_modes[s]);
+                AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
+                AAudioStreamBuilder_setChannelCount(builder, channel_counts[c]);
+                AAudioStreamBuilder_setSampleRate(builder, sample_rate);
+                AAudioStreamBuilder_setDataCallback(builder, NULL, NULL);
+                aaudio_result_t res = AAudioStreamBuilder_openStream(builder, &g_stream);
+                AAudioStreamBuilder_delete(builder);
+                if (res == AAUDIO_OK && g_stream != NULL) {
+                    g_channels = channel_counts[c];
+                    if (AAudioStream_requestStart(g_stream) == AAUDIO_OK) {
+                        return 0;
+                    }
+                    AAudioStream_close(g_stream);
+                    g_stream = NULL;
+                    return -3;
+                }
+                g_stream = NULL;
             }
-            AAudioStream_close(g_stream);
-            g_stream = NULL;
-            return -3;
         }
-        g_stream = NULL;
     }
     return -2;
 }
@@ -61,7 +76,7 @@ int32_t qs_audio_read(float *out, int32_t frames) {
     while (done < frames) {
         aaudio_result_t r = AAudioStream_read(
             g_stream, out + (int64_t)done * g_channels,
-            (frames - done) * g_channels * sizeof(float), 1000000000LL /* 100 ms */);
+            (frames - done) * g_channels * sizeof(float), 100000000LL /* 100 ms */);
         if (r < 0) {
             return -2;
         }

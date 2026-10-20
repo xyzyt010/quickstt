@@ -14,14 +14,38 @@ record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window
 | **Microphone capture** (NDK AAudio, 16 kHz mono) | ✅ implemented |
 | **Input conditioning** (DC removal, soft limiting, clip/dead watch) | ✅ implemented |
 | **Microphone self-test** ("Test mic" in the setup card) | ✅ implemented |
+| **Runtime permission flow** (system dialog + result pickup) | ✅ implemented |
 | **On-device transcription** (whisper.cpp for arm64-v8a) | ✅ implemented |
 | **Model download in-app** (Whisper Tiny EN, 32 MB) | ✅ implemented |
 | **Clipboard copy** of the finished transcript | ✅ implemented |
 | **Floating bubble over other apps** (WindowManager overlay) | ✅ implemented (read-out bubble) |
 | Setup steps / how-to-use card in the Listen tab | ✅ implemented |
+| Activity log + status line (every action says what it did) | ✅ implemented |
 | Tap-to-record on the floating bubble | ⏳ needs a Java service (cargo-apk cannot declare one) |
 | Always-on wake word (background mic) | ⏳ needs a Java foreground service |
 | SenseVoice / Phonon-2 / Parakeet ONNX on device | ⏳ needs the ONNX Runtime AAR for each ABI |
+
+## Two traps that made every button look dead
+
+Both were found by reading the platform crates and fixed in `src/platform.rs`:
+
+1. **`ndk-context` hands out the `Application`, not the `Activity`.**
+   `android-activity` 0.6 initialises the ndk context with
+   `Application.getApplication()`. An `Application` has **no**
+   `requestPermissions()`, **no** `startActivity()` and **no** `window` system
+   service — calling them raises a Java `NoSuchMethodError` that the JNI layer
+   swallows, so the button did nothing at all. The Activity now comes from
+   `AndroidApp::activity_as_ptr()`.
+2. **`requestPermissions()` and `startActivity()` must run on the UI thread.**
+   The Slint event loop runs on android-activity's own `android_main` thread,
+   not the Java UI thread. Every such call is dispatched with
+   `AndroidApp::run_on_java_main_thread()`.
+
+The app also polls `checkSelfPermission` while a dialog is open, so the setup
+card advances to "Test mic" as soon as the user grants the permission — and
+the overlay permission is picked up when the user comes back from the system
+settings.
+
 
 ## How it works
 
@@ -129,6 +153,25 @@ Copy-Item "$env:TEMP\whisper-android\bin\whisper-cli" android\prebuilt\whisper-c
 - **No dense tables**: model rows are 86 DIP cards, settings rows 62 DIP.
 - **No hover/pressed micro-states**: touch has no hover, so state is carried by
   colour, fill and the breathing ring.
+
+### Slint layout rules the scene follows
+
+Getting these wrong is what made the first phone build look broken (words in
+the wrong place, cards hanging off the screen):
+
+- A layout inside a plain `Rectangle` does **not** stretch to the rectangle —
+  it keeps its own size and floats in the middle. Nested layouts bind
+  `width: parent.width` (or `100%` inside a `ScrollView`).
+- A row inside a **padded** layout must **not** bind its width: the layout
+  already hands out the padded width, and an explicit width overrides the
+  padding and overflows the card.
+- `Text` is centred inside its slot by default → every piece of body text sets
+  `horizontal-alignment: left`.
+- A layout's `alignment` is the **main axis**: for a `HorizontalLayout` that
+  is horizontal, so `alignment: center` centres the row. Use
+  `cross-axis-alignment: center` to centre the items vertically.
+- Long texts wrap or elide — a long text must never widen the layout.
+
 
 ## Next steps (in order)
 

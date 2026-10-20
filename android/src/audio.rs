@@ -96,7 +96,7 @@ impl Recorder {
             return Err(match rc {
                 -1 => "could not create the audio stream".to_string(),
                 -2 => {
-                    "the microphone does not support 16 kHz float capture".to_string()
+                    "the microphone does not support a 16 kHz float stream".to_string()
                 }
                 -3 => "the microphone could not be started".to_string(),
                 _ => format!("audio error {rc}"),

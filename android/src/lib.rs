@@ -1,8 +1,8 @@
-//! QuickSTT for Android — touch-first dictation.
+﻿//! QuickSTT for Android — touch-first dictation.
 //!
 //! The UI is a dedicated touch-first Slint scene (`ui/android.slint`), not the
 //! desktop dashboard: phones get a bottom nav, a thumb-reachable record orb
-//! and 48+ DIP targets.
+//! and 44+ DIP targets.
 //!
 //! What actually works in this build:
 //!   * real microphone capture (NDK AAudio via the `src/aaudio.c` shim — cpal
@@ -15,9 +15,13 @@
 //!   * a floating bubble above other apps (WindowManager overlay) that shows
 //!     the mic state and the last transcript.
 //!
+//! Every action reports what it did: the status line and the activity log in
+//! the UI (and logcat) always say what happened, so a silent button is not
+//! possible any more.
+//!
 //! Build:
 //!   * `cargo apk build` → Android APK (`android_main` below)
-//!   * `cargo run --bin quickstt-android-preview` → desktop preview window
+//!   * `cargo run --example preview` → desktop preview window
 
 mod audio;
 mod conditioner;
@@ -71,12 +75,71 @@ impl Session {
 /// app never starts (the activity dies with "UnsatisfiedLinkError").
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "C" fn android_main(app: slint::android::AndroidApp) {
+pub fn android_main(app: slint::android::AndroidApp) {
+    // The platform layer needs the Activity instance (for the permission
+    // dialog, the clipboard and the overlay), so keep a handle before the
+    // backend consumes it.
+    platform::init(app.clone());
     if let Err(e) = slint::android::init(app) {
         eprintln!("QuickSTT: Slint Android backend failed to start: {e}");
         return;
     }
     run();
+}
+
+/// The engines the app knows about.
+///
+/// Only the whisper.cpp tiny.en model runs on Android — the bigger engines
+/// are part of the desktop build. The catalog is built from the *real* state
+/// of the device, so the Models tab never shows a button that cannot work.
+fn model_catalog() -> Vec<ModelItem> {
+    let installed = stt::model_installed();
+    vec![
+        ModelItem {
+            name: "Whisper Tiny EN".into(),
+            detail: "English · on-device · fastest · auto-selected".into(),
+            size: "32 MB".into(),
+            installed,
+            supported: true,
+        },
+        ModelItem {
+            name: "SenseVoice Small".into(),
+            detail: "5 languages · auto-detect".into(),
+            size: "229 MB".into(),
+            installed: false,
+            supported: false,
+        },
+        ModelItem {
+            name: "Parakeet TDT 0.6B".into(),
+            detail: "English · highest accuracy".into(),
+            size: "640 MB".into(),
+            installed: false,
+            supported: false,
+        },
+        ModelItem {
+            name: "Phonon-2 0.6B".into(),
+            detail: "English · highest compact accuracy".into(),
+            size: "688 MB".into(),
+            installed: false,
+            supported: false,
+        },
+    ]
+}
+
+/// Push a line into the activity log (shown in the UI and in logcat).
+fn note(ui: &slint::Weak<AppWindow>, log: &Arc<Mutex<Vec<String>>>, message: &str) {
+    platform::log(message);
+    let text = {
+        let Ok(mut lines) = log.lock() else { return };
+        lines.push(message.to_string());
+        while lines.len() > 6 {
+            lines.remove(0);
+        }
+        lines.join("\n")
+    };
+    if let Some(ui) = ui.upgrade() {
+        ui.set_log_text(text.into());
+    }
 }
 
 /// Wire callbacks and run the event loop.
@@ -86,22 +149,44 @@ pub fn run() {
     // The desktop preview should look like a phone. (On Android the surface is
     // the device screen; the request is ignored there.)
     #[cfg(not(target_os = "android"))]
-    ui.window()
-        .set_size(slint::LogicalSize::new(412.0, 760.0));
+    {
+        ui.window()
+            .set_size(slint::LogicalSize::new(412.0, 760.0));
+        // QS_TAB=0..3 opens the preview on a given tab (dev aid).
+        if let Ok(tab) = std::env::var("QS_TAB") {
+            if let Ok(tab) = tab.parse::<i32>() {
+                ui.set_tab(tab.clamp(0, 3));
+            }
+        }
+    }
 
     // Recent turns are a growable model so a finished dictation can appear
     // immediately, exactly like the desktop history list.
     let turns = Rc::new(slint::VecModel::from(Vec::<Turn>::new()));
     ui.set_turns(turns.clone().into());
 
+    // The Models tab shows the real catalog.
+    ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
+
+    // The activity log: the last few things the app did.
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
     // Shared between the UI thread and the capture thread.
     let stop_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let pending: Arc<Mutex<Option<PendingTurn>>> = Arc::new(Mutex::new(None));
+    // Set while a permission dialog is on screen.
+    let perm_wait: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
 
     // ── Setup state (permissions + model) ──────────────────────────────────
     {
         let weak = ui.as_weak();
+        let log = log.clone();
+        let perm_wait = perm_wait.clone();
         ui.on_grant_mic(move || {
+            note(&weak, &log, "Requesting the microphone permission…");
+            if let Ok(mut wait) = perm_wait.lock() {
+                *wait = Some(std::time::Instant::now());
+            }
             platform::request_mic_permission();
             if let Some(ui) = weak.upgrade() {
                 ui.set_status_text("Waiting for the permission dialog…".into());
@@ -110,10 +195,13 @@ pub fn run() {
     }
     {
         let weak = ui.as_weak();
+        let log = log.clone();
         ui.on_download_model(move || {
             let weak = weak.clone();
+            let log = log.clone();
             // Download off the UI thread; the UI only receives progress.
             std::thread::spawn(move || {
+                note(&weak, &log, "Downloading the speech model (32 MB)…");
                 let result = stt::download_model(|done, total| {
                     let frac = if total > 0 {
                         (done as f32 / total as f32).clamp(0.0, 1.0)
@@ -132,6 +220,7 @@ pub fn run() {
                     });
                 });
                 let done_weak = weak.clone();
+                let done_log = log.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = done_weak.upgrade() {
                         ui.set_model_downloading(false);
@@ -139,10 +228,13 @@ pub fn run() {
                             Ok(()) => {
                                 ui.set_model_installed(true);
                                 ui.set_model_progress(1.0);
+                                ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
                                 ui.set_status_text("Model ready — tap the mic".into());
+                                note(&done_weak, &done_log, "Model installed.");
                             }
                             Err(e) => {
                                 ui.set_status_text(format!("Download failed: {e}").into());
+                                note(&done_weak, &done_log, &format!("Download failed: {e}"));
                             }
                         }
                     }
@@ -152,7 +244,9 @@ pub fn run() {
     }
     {
         let weak = ui.as_weak();
+        let log = log.clone();
         ui.on_open_overlay_settings(move || {
+            note(&weak, &log, "Opening the “display over other apps” settings…");
             platform::open_overlay_settings();
             if let Some(ui) = weak.upgrade() {
                 ui.set_status_text("Enable “Display over other apps”, then come back".into());
@@ -161,12 +255,15 @@ pub fn run() {
     }
     {
         let weak = ui.as_weak();
+        let log = log.clone();
         ui.on_toggle_overlay(move || {
             let allowed = platform::can_draw_overlays();
             if allowed {
                 platform::hide_overlay();
+                note(&weak, &log, "Floating bubble hidden.");
             } else {
                 platform::show_overlay("QuickSTT ready", "");
+                note(&weak, &log, "Floating bubble shown.");
             }
             if let Some(ui) = weak.upgrade() {
                 ui.set_overlay_ok(allowed);
@@ -183,6 +280,8 @@ pub fn run() {
         let weak = ui.as_weak();
         let stop_flag = stop_flag.clone();
         let pending = pending.clone();
+        let log = log.clone();
+        let perm_wait = perm_wait.clone();
         ui.on_toggle_record(move || {
             let Some(ui) = weak.upgrade() else { return };
 
@@ -191,16 +290,23 @@ pub fn run() {
                 stop_flag.store(true, Ordering::SeqCst);
                 ui.set_recording(false);
                 ui.set_status_text("Finishing…".into());
+                note(&weak, &log, "Stopping the recording…");
                 return;
             }
 
             // Start.
             if !platform::has_mic_permission() {
+                note(&weak, &log, "The microphone permission is missing.");
                 platform::request_mic_permission();
+                if let Ok(mut wait) = perm_wait.lock() {
+                    *wait = Some(std::time::Instant::now());
+                }
                 ui.set_status_text("Microphone permission needed".into());
+                ui.set_tab(0);
                 return;
             }
             if !stt::model_installed() {
+                note(&weak, &log, "The speech model is not downloaded yet.");
                 ui.set_status_text("Download the model first (step 2)".into());
                 ui.set_tab(0);
                 return;
@@ -208,6 +314,7 @@ pub fn run() {
             let mut session = Session::new();
             if let Err(e) = session.recorder.start() {
                 ui.set_status_text(format!("Microphone failed: {e}").into());
+                note(&weak, &log, &format!("Microphone failed: {e}"));
                 return;
             }
             stop_flag.store(false, Ordering::SeqCst);
@@ -215,6 +322,7 @@ pub fn run() {
             ui.set_busy(false);
             ui.set_live_text("Listening… speak now.".into());
             ui.set_status_text("Recording".into());
+            note(&weak, &log, "Recording started.");
             platform::show_overlay("Listening…", "");
 
             let weak = weak.clone();
@@ -272,7 +380,10 @@ pub fn run() {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = hweak.upgrade() {
                                 ui.set_status_text(msg.into());
-                                ui.set_mic_health(card.into());
+                                ui.set_mic_health(card.clone().into());
+                            }
+                            if !card.is_empty() {
+                                platform::log(&card);
                             }
                         });
                     }
@@ -299,6 +410,13 @@ pub fn run() {
                 session.recorder.stop();
                 let samples = std::mem::take(&mut session.samples);
                 let health = session.recorder.health();
+                let status_weak = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = status_weak.upgrade() {
+                        ui.set_busy(true);
+                        ui.set_status_text("Transcribing…".into());
+                    }
+                });
                 transcribe(samples, health, &pending);
             });
         });
@@ -319,15 +437,23 @@ pub fn run() {
     // The user can verify the microphone without recording a take.
     {
         let weak = ui.as_weak();
+        let log = log.clone();
+        let perm_wait = perm_wait.clone();
         ui.on_test_mic(move || {
             let Some(ui) = weak.upgrade() else { return };
             if !platform::has_mic_permission() {
+                note(&weak, &log, "The microphone permission is missing.");
                 platform::request_mic_permission();
+                if let Ok(mut wait) = perm_wait.lock() {
+                    *wait = Some(std::time::Instant::now());
+                }
                 ui.set_status_text("Microphone permission needed".into());
                 return;
             }
             ui.set_status_text("Testing the microphone…".into());
+            note(&weak, &log, "Testing the microphone…");
             let weak = weak.clone();
+            let log = log.clone();
             std::thread::spawn(move || {
                 let mut rec = audio::Recorder::new();
                 let result = match rec.start() {
@@ -362,7 +488,7 @@ pub fn run() {
                     }
                     Err(e) => {
                         rec.stop();
-                        let _ = e;
+                        platform::log(&format!("the microphone could not be opened: {e}"));
                         None
                     }
                 };
@@ -392,8 +518,10 @@ pub fn run() {
                                     String::new(),
                                 ),
                             };
-                            ui.set_status_text(status.into());
+                            ui.set_status_text(status.clone().into());
                             ui.set_mic_health(card.into());
+                            platform::log(&status);
+                            let _ = &log;
                         }
                     }
                 });
@@ -401,16 +529,21 @@ pub fn run() {
         });
     }
 
-    // Model picker.
+    // Model picker — only engines that exist on Android can be selected.
     {
         let weak = ui.as_weak();
+        let log = log.clone();
         ui.on_pick_model(move |idx| {
-            if let Some(ui) = weak.upgrade() {
-                let count = ui.get_models().row_count() as i32;
-                if idx >= 0 && idx < count {
-                    ui.set_selected_model(idx);
-                }
+            let Some(ui) = weak.upgrade() else { return };
+            let models = ui.get_models();
+            let Some(model) = models.row_data(idx.max(0) as usize) else { return };
+            if !model.supported {
+                note(&weak, &log, &format!("{} is not available on Android yet.", model.name));
+                ui.set_status_text(format!("{} runs on the desktop build only.", model.name).into());
+                return;
             }
+            ui.set_selected_model(idx);
+            note(&weak, &log, &format!("Model: {}", model.name));
         });
     }
 
@@ -419,7 +552,10 @@ pub fn run() {
         let weak = ui.as_weak();
         let turns = turns.clone();
         let pending = pending.clone();
+        let log = log.clone();
+        let perm_wait = perm_wait.clone();
         let mut phase: f32 = 0.0;
+        let mut ticks: u32 = 0;
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
@@ -434,6 +570,50 @@ pub fn run() {
                     phase = 0.0;
                     ui.set_pulse(0.0);
                 }
+
+                // A permission dialog is open: watch for the answer.
+                let waiting = perm_wait.lock().ok().and_then(|w| *w);
+                if let Some(since) = waiting {
+                    if platform::has_mic_permission() {
+                        if let Ok(mut w) = perm_wait.lock() {
+                            *w = None;
+                        }
+                        ui.set_mic_ok(true);
+                        ui.set_status_text("Microphone ready — tap the mic".into());
+                        note(&weak, &log, "Microphone permission granted.");
+                    } else if since.elapsed() > std::time::Duration::from_secs(90) {
+                        if let Ok(mut w) = perm_wait.lock() {
+                            *w = None;
+                        }
+                        ui.set_status_text("Microphone permission was not granted".into());
+                        note(&weak, &log, "Microphone permission was not granted.");
+                    }
+                }
+
+                // The overlay permission is granted in the system settings:
+                // pick it up when the user comes back.
+                ticks += 1;
+                #[cfg(not(target_os = "android"))]
+                if ticks == 2 {
+                    // The winit backend sizes the window from the content, so
+                    // the phone size has to be applied once it exists.
+                    ui.window()
+                        .set_size(slint::LogicalSize::new(412.0, 760.0));
+                }
+                if ticks % 40 == 0 {
+                    let overlay = platform::can_draw_overlays();
+                    if overlay != ui.get_overlay_ok() {
+                        ui.set_overlay_ok(overlay);
+                        note(&weak, &log, "Floating bubble permission updated.");
+                    }
+                    // The model may have been downloaded in the background.
+                    let installed = stt::model_installed();
+                    if installed != ui.get_model_installed() {
+                        ui.set_model_installed(installed);
+                        ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
+                    }
+                }
+
                 // A finished turn arrived from the worker thread.
                 let done = pending.lock().ok().and_then(|mut p| p.take());
                 if let Some(turn) = done {
@@ -449,9 +629,11 @@ pub fn run() {
                             when: "just now".into(),
                             seconds: turn.seconds,
                         });
+                        note(&weak, &log, "Transcribed and copied to the clipboard.");
                     } else {
                         ui.set_status_text(turn.status.clone().into());
                         platform::show_overlay(&turn.status, "");
+                        note(&weak, &log, &turn.status);
                     }
                 }
             },
@@ -462,6 +644,7 @@ pub fn run() {
 
     // Initial setup state.
     {
+        let weak = ui.as_weak();
         let mic_ok = platform::has_mic_permission();
         let model_ok = stt::model_installed();
         let overlay_ok = platform::can_draw_overlays();
@@ -475,6 +658,7 @@ pub fn run() {
         } else {
             "Ready — tap the mic".into()
         });
+        note(&weak, &log, "QuickSTT started.");
     }
 
     ui.run().expect("Slint event loop failed");
@@ -550,3 +734,5 @@ fn transcribe(samples: Vec<f32>, health: u8, pending: &Arc<Mutex<Option<PendingT
         });
     }
 }
+
+
