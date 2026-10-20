@@ -115,6 +115,14 @@ curl -fsSL https://raw.githubusercontent.com/quickstt/quickstt/main/scripts/inst
 - **Wayland?** Mint defaults to X11 (Cinnamon). `tray-icon` + `global-hotkey` are native. If you switched to experimental Wayland, install `wtype`: `sudo apt install wtype`, and use XWayland for hotkeys.
 - **No tray icon?** Mint Cinnamon panel may hide indicators: `System Settings → Applets` ensure **System Tray** or **AppIndicator** is enabled. Or run `quickstt` and check `ps aux | grep quickstt`.
 - **No mic?** `Menu → Sound → Input` select your mic, or `pactl list sources`. The app binds the input device **when it starts** — after changing the system default input, restart QuickSTT (or pick the device explicitly in the dashboard).
+- **The mic is too loud (the app hears a wall of noise, the wake word never fires, dictation starts by itself)?** The input is *clipped*: the capture gain is so high that every sample sits at the digital rail. QuickSTT now says so in the log (`Microphone input is CLIPPED (saturated)`) and refuses to trigger on it. Fix the gain:
+  ```bash
+  amixer -c 0 set 'Internal Mic Boost' 100%   # keep the mic boost
+  amixer -c 0 set Capture 20%                 # ADC gain down from +30 dB to -7.5 dB
+  pactl set-source-volume alsa_input.pci-0000_00_1f.3.analog-stereo 20%
+  ```
+  Check the result with `parec -d default --rate=44100 --format=s16 --channels=2 | head -c 200000 | xxd | head`; a healthy voice peaks at 3000–15000, a clipped one at 32767.
+- **"No audio is arriving from the microphone"?** The input device delivers only silence (muted source, wrong device, a broken driver). Pick another input in the dashboard (both the wake word listener and the engine now follow that choice) or check with `arecord -D default -d 3 /tmp/t.wav`.
 - **"Transcribe failed" / the model never loads?** The app runs the engine binary that ships with it (`<prefix>/lib/quickstt/tools/…`). A leftover copy in `/usr/lib/quickstt` from an older release used to shadow it — that build was compiled with `-march=native` and dies with *SIGILL* on other CPUs, so the model was never loaded. Since 2.0.0-alpha.17 the bundled engine always wins, a broken binary is skipped automatically, and the log states the real reason (`terminated by signal 4 — the engine binary was built for a different CPU`). If you still see it, remove the stale tree: `sudo rm -rf /usr/lib/quickstt/tools` and reinstall the `.deb`.
 - **Nothing appears on screen?** The mini pill is a *translucent always-on-top* window; on some WMs it needs the "always on top" window rule. `/tmp/quickstt-slint.log` shows the pill geometry and the engine path it used.
 
