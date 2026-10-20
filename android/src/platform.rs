@@ -97,6 +97,13 @@ where
     // The Activity instance (a JNI global reference we do not own).
     let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
     let out = f(&mut env, &activity);
+    // A failed Java call leaves a pending exception on this thread. Clear it,
+    // otherwise every later JNI call on that thread fails with
+    // "JNI DETECTED ERROR IN APPLICATION: pending exception".
+    if env.exception_check().unwrap_or(false) {
+        log("a Java call failed - the exception was cleared");
+        let _ = env.exception_clear();
+    }
     // Never delete a reference we do not own.
     std::mem::forget(activity);
     out
