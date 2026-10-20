@@ -36,12 +36,57 @@ lto = true
 codegen-units = 1
 strip = true
 
+# ── APK metadata (cargo-apk generates AndroidManifest.xml from this) ────────
 [package.metadata.android]
 package = "ai.quickstt.app"
 apk_name = "quickstt-android"
 build_targets = ["aarch64-linux-android"]
-manifest = "AndroidManifest.xml"
 
 [package.metadata.android.sdk]
 min_sdk_version = 26
 target_sdk_version = 34
+
+# Microphone: the dictation engine.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.RECORD_AUDIO"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.MODIFY_AUDIO_SETTINGS"
+
+# Always-on pill: a foreground service keeps the engine alive off-screen.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.FOREGROUND_SERVICE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.FOREGROUND_SERVICE_MICROPHONE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.POST_NOTIFICATIONS"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.WAKE_LOCK"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.VIBRATE"
+
+# Draw the mic pill above other apps (the user grants this in Settings).
+[[package.metadata.android.uses_permission]]
+name = "android.permission.SYSTEM_ALERT_WINDOW"
+
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.microphone"
+required = true
+
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.touchscreen"
+required = false
+
+[package.metadata.android.application]
+label = "QuickSTT"
+theme = "@android:style/Theme.Black.NoTitleBar.Fullscreen"
+
+[package.metadata.android.application.activity]
+config_changes = "orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
+orientation = "fullUser"
+launch_mode = "singleTask"
+exported = true
