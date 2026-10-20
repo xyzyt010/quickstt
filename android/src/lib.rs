@@ -238,7 +238,10 @@ pub fn run() {
                     }
                     session.samples.extend_from_slice(&chunk[..n]);
                     let rms = session.recorder.rms;
-                    if rms > 0.012 {
+                    // Speech bar: the desktop's VAD floor (min_rms at the
+                    // default sensitivity) — quiet speech still counts, so
+                    // the 1.4 s auto-stop does not swallow a whole take.
+                    if rms > 0.0055 {
                         session.spoke = true;
                         session.last_voice = std::time::Instant::now();
                     }
@@ -509,11 +512,14 @@ fn transcribe(samples: Vec<f32>, health: u8, pending: &Arc<Mutex<Option<PendingT
         return;
     }
     // Silence gate: never hand a silent take to whisper — it hallucinates
-    // short words ("you", "yeah") on noise-only audio.
+    // short words ("you", "yeah") on noise-only audio. The thresholds are
+    // the desktop's proven ones (wav_is_silent), converted to the f32
+    // scale: peak floor 600/32768, rms floor 50/32768, 0.25 s minimum.
     let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     let sum: f32 = samples.iter().map(|s| s * s).sum();
     let rms = (sum / samples.len().max(1) as f32).sqrt();
-    if peak < 0.01 || rms < 0.004 {
+    let secs = samples.len() as f32 / audio::SAMPLE_RATE as f32;
+    if secs < 0.25 || peak < 600.0 / 32768.0 || rms < 50.0 / 32768.0 {
         fail("No speech detected".into());
         return;
     }
