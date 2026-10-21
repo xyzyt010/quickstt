@@ -16,14 +16,61 @@ record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window
 | **Microphone self-test** ("Test mic" in the setup card) | ✅ implemented |
 | **Runtime permission flow** (system dialog + result pickup) | ✅ implemented |
 | **On-device transcription** (whisper.cpp for arm64-v8a) | ✅ implemented |
-| **Model download in-app** (Whisper Tiny EN, 32 MB) | ✅ implemented |
+| **Model download in-app** (Whisper Tiny/Base/Small EN) | ✅ implemented |
 | **Clipboard copy** of the finished transcript | ✅ implemented |
 | **Floating bubble over other apps** (WindowManager overlay) | ✅ implemented (read-out bubble) |
+| **Typing into the app in front** (real KeyEvents) | ✅ implemented, needs the INJECT_EVENTS permission |
+| **Share sheet** for the last transcript | ✅ implemented |
 | Setup steps / how-to-use card in the Listen tab | ✅ implemented |
 | Activity log + status line (every action says what it did) | ✅ implemented |
+| Tab bar with real icons and an active marker | ✅ implemented |
 | Tap-to-record on the floating bubble | ⏳ needs a Java service (cargo-apk cannot declare one) |
 | Always-on wake word (background mic) | ⏳ needs a Java foreground service |
-| SenseVoice / Phonon-2 / Parakeet ONNX on device | ⏳ needs the ONNX Runtime AAR for each ABI |
+| SenseVoice / Parakeet / Qwen3-ASR on device | ⏳ they are desktop-only; the phone build is English only |
+
+## The models are real
+
+`stt::MODELS` is the single source of truth and it only contains whisper.cpp
+models the bundled engine can really load on a phone:
+
+| Model | File | Size |
+|---|---|---|
+| Whisper Tiny EN | `ggml-tiny.en-q5_1.bin` | 32 MB |
+| Whisper Base EN | `ggml-base.en-q5_1.bin` | 57 MB |
+| Whisper Small EN | `ggml-small.en-q5_1.bin` | 181 MB |
+
+The Models tab renders that list with the real download state — there is no
+placeholder row and no button that cannot work. The phone build is English
+only; the multilingual engines (SenseVoice, Parakeet, Qwen3-ASR) are part of
+the desktop app and are not pretended to exist here.
+
+## Typing into other apps
+
+`platform::inject_text()` types with **real key events**: the characters are
+turned into `KeyEvent`s by `KeyCharacterMap.getEvents()` (so capitals and
+punctuation come out right) and pushed into the input stack with
+`InputManager.injectInputEvent` — the same path a hardware keyboard uses.
+
+The flow in the app:
+
+1. tap the orb (the bubble appears over everything),
+2. switch to the app you want to write in,
+3. speak — after 1.4 s of silence the recording ends by itself, the text is
+   transcribed and **typed into the app in front**.
+
+The text is *always* copied to the clipboard as well, so a phone that refuses
+the injection still gives the user the text (long-press → Paste), and the
+bubble says which of the two happened.
+
+`INJECT_EVENTS` is a system permission, so Android only allows the injection
+for apps that hold it. On a rooted phone or a userdebug build:
+
+```bash
+adb shell pm grant ai.quickstt.app android.permission.INJECT_EVENTS
+```
+
+Without it the app falls back to the clipboard and says so — the Settings tab
+explains this as well.
 
 ## Two traps that made every button look dead
 
@@ -68,11 +115,13 @@ settings.
    private files directory and executed once per turn. A silent take is
    rejected *before* the engine runs (whisper hallucinates short words on
    noise-only audio).
-4. **Model** — never bundled. The Listen tab's step 2 downloads
-   `ggml-tiny.en-q5_1.bin` (32 MB) from the same HuggingFace source the
-   desktop app uses, with a progress bar.
+4. **Model** — never bundled. The Models tab lists the whisper.cpp models the
+   phone can run (Tiny / Base / Small EN) and downloads the chosen one from
+   the same HuggingFace source the desktop app uses, with a progress bar. The
+   choice is remembered between launches.
 5. **Result** — the transcript is shown in the app, pushed into History and
-   copied to the system clipboard, so it can be pasted into any app.
+   copied to the system clipboard, so it can be pasted into any app. If
+   another app is in front, the text is also *typed* into it (see above).
 6. **Floating bubble** — a `WindowManager` overlay (`TYPE_APPLICATION_OVERLAY`)
    shows the mic state and the last transcript above other apps. The user
    grants "Display over other apps" in step 3 of the setup card.
@@ -115,9 +164,10 @@ keystore_password = "…"
 ```
 
 The manifest is generated from `[package.metadata.android]` in `Cargo.toml` —
-cargo-apk 0.10 ignores a hand-written `AndroidManifest.xml`. All eight
+cargo-apk 0.10 ignores a hand-written `AndroidManifest.xml`. All nine
 permissions (mic, foreground service, overlay, notifications, wake lock,
-vibrate) are declared there and verified with `aapt dump permissions`.
+vibrate, input injection) are declared there and verified with
+`aapt dump permissions`.
 
 Preview the exact same UI on Windows/Linux without a device:
 

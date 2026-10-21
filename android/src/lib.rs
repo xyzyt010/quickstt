@@ -87,43 +87,24 @@ pub fn android_main(app: slint::android::AndroidApp) {
     run();
 }
 
-/// The engines the app knows about.
+/// The engines the Models tab lists.
 ///
-/// Only the whisper.cpp tiny.en model runs on Android — the bigger engines
-/// are part of the desktop build. The catalog is built from the *real* state
-/// of the device, so the Models tab never shows a button that cannot work.
+/// Only engines that really run on the phone are in here: the catalog is
+/// built from `stt::MODELS` (whisper.cpp models the bundled engine can
+/// load) and each entry carries its *real* download state. Nothing in the
+/// list is a placeholder, and nothing promises a language or a feature the
+/// phone build cannot do.
 fn model_catalog() -> Vec<ModelItem> {
-    let installed = stt::model_installed();
-    vec![
-        ModelItem {
-            name: "Whisper Tiny EN".into(),
-            detail: "English · on-device · fastest · auto-selected".into(),
-            size: "32 MB".into(),
-            installed,
-            supported: true,
-        },
-        ModelItem {
-            name: "SenseVoice Small".into(),
-            detail: "5 languages · auto-detect".into(),
-            size: "229 MB".into(),
-            installed: false,
-            supported: false,
-        },
-        ModelItem {
-            name: "Parakeet TDT 0.6B".into(),
-            detail: "English · highest accuracy".into(),
-            size: "640 MB".into(),
-            installed: false,
-            supported: false,
-        },
-        ModelItem {
-            name: "Phonon-2 0.6B".into(),
-            detail: "English · highest compact accuracy".into(),
-            size: "688 MB".into(),
-            installed: false,
-            supported: false,
-        },
-    ]
+    stt::MODELS
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| ModelItem {
+            name: spec.name.into(),
+            detail: spec.detail.into(),
+            size: spec.size.into(),
+            installed: stt::model_installed(index),
+        })
+        .collect()
 }
 
 /// Push a line into the activity log (shown in the UI and in logcat).
@@ -174,6 +155,9 @@ pub fn run() {
     // Shared between the UI thread and the capture thread.
     let stop_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let pending: Arc<Mutex<Option<PendingTurn>>> = Arc::new(Mutex::new(None));
+    // The last finished transcript — what the "type into the app" and
+    // "share" actions push out.
+    let last_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     // Set while a permission dialog is on screen.
     let perm_wait: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
 
@@ -197,12 +181,15 @@ pub fn run() {
         let weak = ui.as_weak();
         let log = log.clone();
         ui.on_download_model(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let index = ui.get_selected_model().max(0) as usize;
+            let spec = stt::model(index);
             let weak = weak.clone();
             let log = log.clone();
             // Download off the UI thread; the UI only receives progress.
             std::thread::spawn(move || {
-                note(&weak, &log, "Downloading the speech model (32 MB)…");
-                let result = stt::download_model(|done, total| {
+                note(&weak, &log, &format!("Downloading {} ({}…", spec.name, spec.size));
+                let result = stt::download_model(index, |done, total| {
                     let frac = if total > 0 {
                         (done as f32 / total as f32).clamp(0.0, 1.0)
                     } else {
@@ -214,7 +201,8 @@ pub fn run() {
                             ui.set_model_progress(frac);
                             ui.set_model_downloading(true);
                             ui.set_status_text(
-                                format!("Downloading the model… {}%", (frac * 100.0) as i32).into(),
+                                format!("Downloading {}… {}%", spec.name, (frac * 100.0) as i32)
+                                    .into(),
                             );
                         }
                     });
@@ -226,11 +214,10 @@ pub fn run() {
                         ui.set_model_downloading(false);
                         match result {
                             Ok(()) => {
-                                ui.set_model_installed(true);
                                 ui.set_model_progress(1.0);
                                 ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
                                 ui.set_status_text("Model ready — tap the mic".into());
-                                note(&done_weak, &done_log, "Model installed.");
+                                note(&done_weak, &done_log, &format!("{} installed.", spec.name));
                             }
                             Err(e) => {
                                 ui.set_status_text(format!("Download failed: {e}").into());
@@ -305,7 +292,7 @@ pub fn run() {
                 ui.set_tab(0);
                 return;
             }
-            if !stt::model_installed() {
+            if !stt::model_installed(ui.get_selected_model().max(0) as usize) {
                 note(&weak, &log, "The speech model is not downloaded yet.");
                 ui.set_status_text("Download the model first (step 2)".into());
                 ui.set_tab(0);
@@ -328,6 +315,7 @@ pub fn run() {
             let weak = weak.clone();
             let stop_flag = stop_flag.clone();
             let pending = pending.clone();
+            let model_index = ui.get_selected_model().max(0) as usize;
             std::thread::spawn(move || {
                 let mut session = session;
                 let mut chunk = vec![0f32; 1600]; // 100 ms
@@ -417,7 +405,7 @@ pub fn run() {
                         ui.set_status_text("Transcribing…".into());
                     }
                 });
-                transcribe(samples, health, &pending);
+                transcribe(samples, health, model_index, &pending);
             });
         });
     }
@@ -529,21 +517,69 @@ pub fn run() {
         });
     }
 
-    // Model picker — only engines that exist on Android can be selected.
+    // Model picker. Every entry is a whisper.cpp model the bundled engine can
+    // really load, so picking one always works.
     {
         let weak = ui.as_weak();
         let log = log.clone();
         ui.on_pick_model(move |idx| {
             let Some(ui) = weak.upgrade() else { return };
-            let models = ui.get_models();
-            let Some(model) = models.row_data(idx.max(0) as usize) else { return };
-            if !model.supported {
-                note(&weak, &log, &format!("{} is not available on Android yet.", model.name));
-                ui.set_status_text(format!("{} runs on the desktop build only.", model.name).into());
+            let index = idx.max(0) as usize;
+            let spec = stt::model(index);
+            ui.set_selected_model(index as i32);
+            stt::save_selected(index);
+            note(&weak, &log, &format!("Model: {}", spec.name));
+            if stt::model_installed(index) {
+                ui.set_status_text(format!("{} is ready", spec.name).into());
+            } else {
+                ui.set_status_text(
+                    format!("{} is not downloaded yet — tap Download", spec.name).into(),
+                );
+            }
+        });
+    }
+
+    // Type the last transcript into the app in front, with real key events.
+    {
+        let weak_a = ui.as_weak();
+        let log_a = log.clone();
+        let text_a = last_text.clone();
+        ui.on_type_into_app(move || {
+            let Some(ui) = weak_a.upgrade() else { return };
+            let text = text_a.lock().ok().map(|t| t.clone()).unwrap_or_default();
+            if text.trim().is_empty() {
+                note(&weak_a, &log_a, "There is nothing to type yet.");
+                ui.set_status_text("Record something first".into());
                 return;
             }
-            ui.set_selected_model(idx);
-            note(&weak, &log, &format!("Model: {}", model.name));
+            match platform::inject_text(&text) {
+                Ok(()) => {
+                    note(&weak_a, &log_a, "Typed into the app in front.");
+                    ui.set_status_text("Typed into the app in front".into());
+                    platform::show_overlay("Typed", &text);
+                }
+                Err(e) => {
+                    note(&weak_a, &log_a, &format!("Could not type: {e}"));
+                    platform::copy_to_clipboard(&text);
+                    ui.set_status_text("Typing is not allowed — copied instead".into());
+                    platform::show_overlay("Copied", &text);
+                }
+            }
+        });
+        // Share the last transcript with the picker as well.
+        let weak_b = ui.as_weak();
+        let log_b = log.clone();
+        let text_b = last_text.clone();
+        ui.on_share_text(move || {
+            let Some(ui) = weak_b.upgrade() else { return };
+            let text = text_b.lock().ok().map(|t| t.clone()).unwrap_or_default();
+            if text.trim().is_empty() {
+                ui.set_status_text("Record something first".into());
+                return;
+            }
+            if platform::share_text(&text) {
+                note(&weak_b, &log_b, "Opened the share sheet.");
+            }
         });
     }
 
@@ -554,6 +590,7 @@ pub fn run() {
         let pending = pending.clone();
         let log = log.clone();
         let perm_wait = perm_wait.clone();
+        let last_text = last_text.clone();
         let mut phase: f32 = 0.0;
         let mut ticks: u32 = 0;
         let timer = slint::Timer::default();
@@ -607,7 +644,8 @@ pub fn run() {
                         note(&weak, &log, "Floating bubble permission updated.");
                     }
                     // The model may have been downloaded in the background.
-                    let installed = stt::model_installed();
+                    let index = ui.get_selected_model().max(0) as usize;
+                    let installed = stt::model_installed(index);
                     if installed != ui.get_model_installed() {
                         ui.set_model_installed(installed);
                         ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
@@ -621,14 +659,40 @@ pub fn run() {
                     ui.set_busy(false);
                     if turn.ok {
                         ui.set_live_text(turn.text.clone().into());
-                        ui.set_status_text(turn.status.clone().into());
+                        ui.set_has_text(true);
+                        // Remember it for the "type into the app" action.
+                        if let Ok(mut slot) = last_text.lock() {
+                            *slot = turn.text.clone();
+                        }
+                        // The clipboard always gets the text — that works
+                        // everywhere, even when the app may not inject keys.
                         platform::copy_to_clipboard(&turn.text);
-                        platform::show_overlay("Copied", &turn.text);
                         turns.push(Turn {
-                            text: turn.text.into(),
+                            text: turn.text.clone().into(),
                             when: "just now".into(),
                             seconds: turn.seconds,
                         });
+
+                        // If another app is in front, type the text straight
+                        // into it with real key events.
+                        let mut status = "Copied to the clipboard".to_string();
+                        if !platform::has_window_focus() {
+                            match platform::inject_text(&turn.text) {
+                                Ok(()) => {
+                                    status = "Typed into the app in front".to_string();
+                                    note(&weak, &log, "Typed into the app in front.");
+                                }
+                                Err(e) => {
+                                    note(
+                                        &weak,
+                                        &log,
+                                        &format!("Typing into the app is not allowed: {e}"),
+                                    );
+                                }
+                            }
+                        }
+                        ui.set_status_text(status.clone().into());
+                        platform::show_overlay(&status, &turn.text);
                         note(&weak, &log, "Transcribed and copied to the clipboard.");
                     } else {
                         ui.set_status_text(turn.status.clone().into());
@@ -646,7 +710,10 @@ pub fn run() {
     {
         let weak = ui.as_weak();
         let mic_ok = platform::has_mic_permission();
-        let model_ok = stt::model_installed();
+        // Pick up the model the user chose last time.
+        let index = stt::selected();
+        ui.set_selected_model(index as i32);
+        let model_ok = stt::model_installed(index);
         let overlay_ok = platform::can_draw_overlays();
         ui.set_mic_ok(mic_ok);
         ui.set_model_installed(model_ok);
@@ -669,7 +736,13 @@ pub fn run() {
 ///
 /// `health` is the recorder's input health: a clipped or dead microphone
 /// is reported as such instead of producing a bogus transcript.
-fn transcribe(samples: Vec<f32>, health: u8, pending: &Arc<Mutex<Option<PendingTurn>>>) {
+/// `model` is the index of the whisper model to run.
+fn transcribe(
+    samples: Vec<f32>,
+    health: u8,
+    model: usize,
+    pending: &Arc<Mutex<Option<PendingTurn>>>,
+) {
     let seconds = (samples.len() as f32 / audio::SAMPLE_RATE as f32).ceil() as i32;
     let fail = |status: String| {
         if let Ok(mut slot) = pending.lock() {
@@ -710,7 +783,7 @@ fn transcribe(samples: Vec<f32>, health: u8, pending: &Arc<Mutex<Option<PendingT
     let wav = std::env::temp_dir().join("quickstt-turn.wav");
     let result = audio::write_wav(&wav, &samples, audio::SAMPLE_RATE as u32)
         .map_err(|e| e.to_string())
-        .and_then(|_| stt::transcribe(&wav));
+        .and_then(|_| stt::transcribe(&wav, model));
     if let Ok(mut slot) = pending.lock() {
         *slot = Some(match result {
             Ok(text) if !text.trim().is_empty() => PendingTurn {

@@ -29,12 +29,212 @@ use jni::JavaVM;
 #[cfg(target_os = "android")]
 use slint::android::AndroidApp;
 
+/// True when the app's own window has the focus (i.e. QuickSTT is the app in
+/// front). When it does not, another app is focused and that is where a
+/// transcript can be typed.
+pub fn has_window_focus() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let res: jint = env
+                .call_method(activity, "hasWindowFocus", "()Z", &[])
+                .ok()?
+                .i()
+                .ok()?;
+            Some(res != 0)
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    false
+}
+
+/// Type text into the app that currently has the focus.
+///
+/// This is the lowest level input API an app can use: real `KeyEvent`s
+/// (built by `KeyCharacterMap.getEvents`, so capitals and punctuation come
+/// out right) are pushed into the input stack with
+/// `InputManager.injectInputEvent` — the same mechanism the system uses for
+/// hardware keyboards.
+///
+/// It needs the `INJECT_EVENTS` permission, which is a system permission: it
+/// only works on a rooted phone, on a userdebug/eng build, or when the appop
+/// is enabled with
+/// `adb shell appops set ai.quickstt.app android:inject_event allow`.
+/// When it is not allowed the call fails and the caller falls back to the
+/// clipboard.
+#[cfg(target_os = "android")]
+pub fn inject_text(text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let app = app().ok_or("the app is not running")?;
+    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }.map_err(|e| e.to_string())?;
+    let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
+
+    let result = (|| -> Result<(), String> {
+        // The input manager: it is a hidden class, but the system hands it
+        // out through the regular getSystemService() call.
+        let service = env
+            .new_string("input")
+            .map_err(|e| e.to_string())?;
+        let manager = env
+            .call_method(
+                &activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::from(&service)],
+            )
+            .map_err(|e| e.to_string())?
+            .l()
+            .map_err(|e| e.to_string())?;
+
+        // The virtual keyboard's character map: it turns a character into the
+        // key events (with the right shift/meta state) a real keyboard sends.
+        let kcm_cls = env
+            .find_class("android/view/KeyCharacterMap")
+            .map_err(|e| e.to_string())?;
+        let keymap = env
+            .call_static_method(
+                kcm_cls,
+                "load",
+                "(I)Landroid/view/KeyCharacterMap;",
+                &[JValue::from(-1i32)],
+            )
+            .map_err(|e| e.to_string())?
+            .l()
+            .map_err(|e| e.to_string())?;
+
+        for ch in text.chars() {
+            // UTF-16 units (a surrogate pair is two units).
+            let mut units = [0u16; 2];
+            let units = ch.encode_utf16(&mut units).to_vec();
+            let array = env
+                .new_char_array(units.len() as i32)
+                .map_err(|e| e.to_string())?;
+            env.set_char_array_region(&array, 0, &units)
+                .map_err(|e| e.to_string())?;
+            let events = env
+                .call_method(
+                    &keymap,
+                    "getEvents",
+                    "([C)[Landroid/view/KeyEvent;",
+                    &[JValue::from(&array)],
+                )
+                .map_err(|e| e.to_string())?
+                .l()
+                .map_err(|e| e.to_string())?;
+            let events = jni::objects::JObjectArray::from(events);
+            let len = env.get_array_length(&events).map_err(|e| e.to_string())?;
+            for index in 0..len {
+                let event = env
+                    .get_object_array_element(&events, index)
+                    .map_err(|e| e.to_string())?;
+                env.call_method(
+                    &manager,
+                    "injectInputEvent",
+                    "(Landroid/view/InputEvent;I)V",
+                    &[JValue::from(&event), JValue::from(INJECT_MODE_WAIT_FOR_FINISH)],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    })();
+
+    // A refused injection leaves a Java exception pending; clear it so the
+    // thread stays usable and report what happened.
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+        return Err("Android refused the input (the INJECT_EVENTS permission is missing)".into());
+    }
+    std::mem::forget(activity);
+    result.map_err(|e| e)
+}
+
+/// Desktop preview: there is no input stack to type into.
+#[cfg(not(target_os = "android"))]
+pub fn inject_text(_text: &str) -> Result<(), String> {
+    Err("typing into other apps is only possible on Android".into())
+}
+
+/// Offer the text to other apps through the system share sheet. This always
+/// works and needs no permission — it is the fallback when direct key
+/// injection is not allowed.
+pub fn share_text(text: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        let ok = with_activity(|env, activity| {
+            let intent_cls = env.find_class("android/content/Intent").ok()?;
+            let intent = env.new_object(&intent_cls, "()V", &[]).ok()?;
+            let action = env.new_string("android.intent.action.SEND").ok()?;
+            env.call_method(
+                &intent,
+                "setAction",
+                "(Ljava/lang/String;)Landroid/content/Intent;",
+                &[JValue::from(&action)],
+            )
+            .ok()?;
+            let mime = env.new_string("text/plain").ok()?;
+            env.call_method(
+                &intent,
+                "setType",
+                "(Ljava/lang/String;)Landroid/content/Intent;",
+                &[JValue::from(&mime)],
+            )
+            .ok()?;
+            let body = env.new_string(text).ok()?;
+            env.call_method(
+                &intent,
+                "putExtra",
+                "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+                &[JValue::from(&env.new_string("android.intent.extra.TEXT").ok()?), JValue::from(&body)],
+            )
+            .ok()?;
+            let chooser = env
+                .call_static_method(
+                    &intent_cls,
+                    "createChooser",
+                    "(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;",
+                    &[JValue::from(&intent), JValue::from(&env.new_string("Send with").ok()?)],
+                )
+                .ok()?
+                .l()
+                .ok()?;
+            env.call_method(
+                activity,
+                "startActivity",
+                "(Landroid/content/Intent;)V",
+                &[JValue::from(&chooser)],
+            )
+            .ok()?;
+            Some(true)
+        })
+        .unwrap_or(false);
+        if !ok {
+            log("could not open the share sheet");
+        }
+        ok
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = text;
+        false
+    }
+}
+
 /// The overlay view + its layout params, kept alive between updates.
 #[cfg(target_os = "android")]
 struct OverlayHandle {
     view: jni::objects::GlobalRef,
     params: jni::objects::GlobalRef,
 }
+
+/// `InputManager.INJECT_INPUT_EVENT_MODE_WAIT_FOR_FINISH` — the injected event
+/// is fully processed before the call returns.
+#[cfg(target_os = "android")]
+const INJECT_MODE_WAIT_FOR_FINISH: i32 = 2;
 
 /// The Android app handle. It owns the Activity instance and the Java UI
 /// thread, both of which we need.

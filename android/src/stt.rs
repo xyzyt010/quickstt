@@ -1,12 +1,14 @@
-// Android speech-to-text: the whisper.cpp engine (aarch64) + the GGML model.
+// Android speech-to-text: the whisper.cpp engine (aarch64) + the GGML models.
 //
 // The engine binary is built from the same whisper.cpp sources as the desktop
 // build (portable x86-64 baseline) but cross-compiled for arm64-v8a with the
 // Android NDK. It is embedded in the APK and written to the app's private
 // directory on first run, then executed once per utterance.
 //
-// The model is NOT bundled: it is downloaded in-app (32 MB) from the same
-// HuggingFace source the desktop app uses.
+// The models are NOT bundled: they are downloaded in-app from the same
+// HuggingFace source the desktop app uses. Every entry in `MODELS` is a
+// whisper.cpp GGML file that the bundled engine really can load, so the
+// Models tab only ever lists engines that work on the phone.
 
 #[cfg(target_os = "android")]
 use std::io::Read;
@@ -16,11 +18,59 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "android")]
 const WHISPER_CLI: &[u8] = include_bytes!("../prebuilt/whisper-cli-arm64-v8a");
 
-#[cfg(target_os = "android")]
-const MODEL_URL: &str =
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin";
-const MODEL_FILE: &str = "ggml-tiny.en-q5_1.bin";
-const MODEL_MIN_BYTES: u64 = 30_000_000;
+/// A speech model that really runs on Android.
+pub struct ModelSpec {
+    /// Name shown in the app.
+    pub name: &'static str,
+    /// File name inside the model directory.
+    pub file: &'static str,
+    /// Where it is downloaded from.
+    pub url: &'static str,
+    /// Human readable size.
+    pub size: &'static str,
+    /// A download smaller than this is broken (a truncated file).
+    pub min_bytes: u64,
+    /// One line explaining the trade-off.
+    pub detail: &'static str,
+}
+
+/// The Android model catalog. All three are English-only whisper.cpp models —
+/// the phone build has no multilingual engine, so the app never claims
+/// auto-detection or languages it cannot do.
+pub const MODELS: &[ModelSpec] = &[
+    ModelSpec {
+        name: "Whisper Tiny EN",
+        file: "ggml-tiny.en-q5_1.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin",
+        size: "32 MB",
+        min_bytes: 30_000_000,
+        detail: "English · fastest · least battery",
+    },
+    ModelSpec {
+        name: "Whisper Base EN",
+        file: "ggml-base.en-q5_1.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin",
+        size: "57 MB",
+        min_bytes: 55_000_000,
+        detail: "English · balanced accuracy and speed",
+    },
+    ModelSpec {
+        name: "Whisper Small EN",
+        file: "ggml-small.en-q5_1.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en-q5_1.bin",
+        size: "181 MB",
+        min_bytes: 180_000_000,
+        detail: "English · most accurate · slowest",
+    },
+];
+
+/// The model used when nothing else was picked.
+pub const DEFAULT_MODEL: usize = 0;
+
+/// A model by index (falls back to the default).
+pub fn model(index: usize) -> &'static ModelSpec {
+    MODELS.get(index).unwrap_or(&MODELS[DEFAULT_MODEL])
+}
 
 /// Directory for the engine + models (the app's private files dir).
 fn work_dir() -> Option<PathBuf> {
@@ -57,28 +107,46 @@ pub fn ensure_engine() -> Result<PathBuf, String> {
     Err("the Android engine is only available on Android".into())
 }
 
-/// Path of the downloaded GGML model.
-pub fn model_path() -> Option<PathBuf> {
-    work_dir().map(|d| d.join("models").join(MODEL_FILE))
+/// Path of a downloaded GGML model.
+pub fn model_path(index: usize) -> Option<PathBuf> {
+    work_dir().map(|d| d.join("models").join(model(index).file))
 }
 
 /// True when the model is already downloaded.
-pub fn model_installed() -> bool {
-    model_path()
+pub fn model_installed(index: usize) -> bool {
+    let spec = model(index);
+    model_path(index)
         .and_then(|p| std::fs::metadata(p).ok())
-        .map(|m| m.len() > MODEL_MIN_BYTES)
+        .map(|m| m.len() > spec.min_bytes)
         .unwrap_or(false)
 }
 
-/// Download the model, reporting progress (done, total) in bytes.
+/// Remember the model the user picked (the app restarts with it).
+pub fn save_selected(index: usize) {
+    if let Some(dir) = work_dir() {
+        let _ = std::fs::write(dir.join("selected_model"), index.to_string());
+    }
+}
+
+/// The model the user picked (defaults to the fastest one).
+pub fn selected() -> usize {
+    work_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("selected_model")).ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|i| *i < MODELS.len())
+        .unwrap_or(DEFAULT_MODEL)
+}
+
+/// Download a model, reporting progress (done, total) in bytes.
 #[cfg(target_os = "android")]
-pub fn download_model<F: FnMut(u64, u64)>(mut progress: F) -> Result<(), String> {
-    let path = model_path().ok_or("no writable app directory")?;
+pub fn download_model<F: FnMut(u64, u64)>(index: usize, mut progress: F) -> Result<(), String> {
+    let spec = model(index);
+    let path = model_path(index).ok_or("no writable app directory")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let part = path.with_extension("part");
-    let resp = ureq::get(MODEL_URL)
+    let resp = ureq::get(spec.url)
         .call()
         .map_err(|e| format!("download failed: {e}"))?;
     let total: u64 = resp
@@ -99,22 +167,36 @@ pub fn download_model<F: FnMut(u64, u64)>(mut progress: F) -> Result<(), String>
         progress(done, total);
     }
     drop(file);
+    // A truncated download is worse than none: the engine would fail on it.
+    let written = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    if written < spec.min_bytes {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!(
+            "the download was incomplete ({written} of {total} bytes)"
+        ));
+    }
     std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn download_model<F: FnMut(u64, u64)>(_progress: F) -> Result<(), String> {
+pub fn download_model<F: FnMut(u64, u64)>(_index: usize, _progress: F) -> Result<(), String> {
     Err("model downloads are only available on Android".into())
 }
 
 /// Transcribe a 16 kHz mono WAV with the bundled engine.
-pub fn transcribe(wav: &Path) -> Result<String, String> {
+///
+/// The engine gets a hard timeout: a model that hangs must not freeze the
+/// app, and the user always gets an answer (or a clear error).
+pub fn transcribe(wav: &Path, index: usize) -> Result<String, String> {
     let cli = ensure_engine()?;
-    let model = model_path().ok_or("no model downloaded")?;
-    let output = std::process::Command::new(&cli)
+    let model_file = model_path(index).ok_or("no model downloaded")?;
+    if !model_installed(index) {
+        return Err("the speech model is not downloaded yet".into());
+    }
+    let mut child = std::process::Command::new(&cli)
         .arg("-m")
-        .arg(&model)
+        .arg(&model_file)
         .arg("-f")
         .arg(wav)
         .arg("-l")
@@ -125,13 +207,61 @@ pub fn transcribe(wav: &Path) -> Result<String, String> {
         .arg("0.85")
         .arg("-t")
         .arg("4")
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("could not run the engine: {e}"))?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("engine failed: {err}"));
+
+    // Read both pipes on their own threads so a full pipe cannot deadlock
+    // the engine, then wait with a deadline.
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let out_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut s) = stdout.take() {
+            use std::io::Read as _;
+            let _ = s.read_to_string(&mut buf);
+        }
+        buf
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut s) = stderr.take() {
+            use std::io::Read as _;
+            let _ = s.read_to_string(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("the engine could not be waited for: {e}")),
+        }
+    };
+    let stdout = out_handle.join().unwrap_or_default();
+    let stderr = err_handle.join().unwrap_or_default();
+
+    let Some(status) = status else {
+        return Err("the engine did not finish in time".into());
+    };
+    if !status.success() {
+        let err = stderr.trim();
+        return Err(if err.is_empty() {
+            format!("the engine failed ({status})")
+        } else {
+            format!("the engine failed: {err}")
+        });
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(clean_transcript(&stdout))
 }
 

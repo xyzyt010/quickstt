@@ -1,6 +1,6 @@
 ﻿[package]
 name = "quickstt-android"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 publish = false
 
@@ -80,6 +80,13 @@ name = "android.permission.VIBRATE"
 [[package.metadata.android.uses_permission]]
 name = "android.permission.SYSTEM_ALERT_WINDOW"
 
+# Type into the app in front with real key events. It is a system
+# permission, so it only becomes usable on a rooted phone or a userdebug
+# build ("adb shell pm grant ai.quickstt.app android.permission.INJECT_EVENTS");
+# without it the app falls back to the clipboard.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INJECT_EVENTS"
+
 [[package.metadata.android.uses_feature]]
 name = "android.hardware.microphone"
 required = true
@@ -103,4 +110,5 @@ config_changes = "orientation|screenSize|screenLayout|keyboardHidden|uiMode|dens
 orientation = "fullUser"
 launch_mode = "singleTask"
 exported = true
+
 
