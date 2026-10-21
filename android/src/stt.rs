@@ -394,51 +394,80 @@ pub fn transcribe(wav: &Path, index: usize) -> Result<String, String> {
     if !model_installed(index) {
         return Err("the speech model is not downloaded yet".into());
     }
-    let mut command = engine.command();
+    // The command line of the engine, collected first so it can be used for
+    // a second attempt (see below).
+    let mut args: Vec<std::ffi::OsString> = Vec::new();
     match spec.engine {
         "cactus" => {
             // Cactus needle: --model <file.cact> --audio <wav> [--audio-language en]
-            command
-                .arg("--model")
-                .arg(&model_file)
-                .arg("--audio")
-                .arg(wav)
-                .arg("--audio-language")
-                .arg("en");
+            args.push("--model".into());
+            args.push(model_file.clone().into_os_string());
+            args.push("--audio".into());
+            args.push(wav.as_os_str().to_owned());
+            args.push("--audio-language".into());
+            args.push("en".into());
         }
         "transcribe" => {
             // transcribe.cpp: the same command line the desktop build uses.
-            command
-                .arg("-m")
-                .arg(&model_file)
-                .arg("--language")
-                .arg("en")
-                .arg("--threads")
-                .arg("4")
-                .arg("--backend")
-                .arg("cpu")
-                .arg(wav);
+            args.push("-m".into());
+            args.push(model_file.clone().into_os_string());
+            args.push("--language".into());
+            args.push("en".into());
+            args.push("--threads".into());
+            args.push("4".into());
+            args.push("--backend".into());
+            args.push("cpu".into());
+            args.push(wav.as_os_str().to_owned());
         }
         _ => {
             // whisper.cpp: -m <model> -f <wav> -l en --no-timestamps ...
-            command
-                .arg("-m")
-                .arg(&model_file)
-                .arg("-f")
-                .arg(wav)
-                .arg("-l")
-                .arg("en")
-                .arg("--no-timestamps")
-                .arg("--suppress-nst")
-                .arg("-nth")
-                .arg("0.85")
-                .arg("-t")
-                .arg("4");
+            args.push("-m".into());
+            args.push(model_file.clone().into_os_string());
+            args.push("-f".into());
+            args.push(wav.as_os_str().to_owned());
+            args.push("-l".into());
+            args.push("en".into());
+            args.push("--no-timestamps".into());
+            args.push("--suppress-nst".into());
+            args.push("-nth".into());
+            args.push("0.85".into());
+            args.push("-t".into());
+            args.push("4".into());
         }
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("could not run the engine: {e}"))?;
+
+    // Start the engine. The native library directory is the only place where
+    // Android lets an app run a program — when the system still refuses it
+    // ("Permission denied"), the program is started through the system
+    // linker instead.
+    let start = |launcher: Option<&Path>| -> std::io::Result<std::process::Child> {
+        let mut command = match launcher {
+            Some(launcher) => {
+                let mut command = std::process::Command::new(launcher);
+                command.arg(&engine.binary);
+                command
+            }
+            None => std::process::Command::new(&engine.binary),
+        };
+        command.args(&args);
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+        command.spawn()
+    };
+    let mut child = match start(None) {
+        Ok(child) => child,
+        Err(first) => {
+            if engine.launcher.is_some() {
+                return Err(format!("could not run the engine: {first}"));
+            }
+            match crate::platform::linker64() {
+                Some(linker) => start(Some(&linker)).map_err(|second| {
+                    format!("could not run the engine: {first} (through the system linker: {second})")
+                })?,
+                None => return Err(format!("could not run the engine: {first}")),
+            }
+        }
+    };
 
     // Read both pipes on their own threads so a full pipe cannot deadlock
     // the engine, then wait with a deadline.
