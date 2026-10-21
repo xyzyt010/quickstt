@@ -254,6 +254,13 @@ jobs:
           ndk-version: r27c
       - name: Install cargo-apk
         run: cargo install cargo-apk --locked
+      - name: Install the Android platform and build tools
+        # The bubble helper is compiled against android.jar and the dex is
+        # built with d8, so both have to be in the SDK.
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(command -v sdkmanager || find "${{ steps.ndk.outputs.android-sdk }}" -name sdkmanager -type f | head -1)"
+          yes | "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" || true
       - name: Restore the release keystore
         # The keystore is not in the repo (see android/README.md). It comes
         # from the ANDROID_KEYSTORE_BASE64 secret so the published APK is
