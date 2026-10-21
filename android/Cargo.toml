@@ -1,6 +1,6 @@
 ﻿[package]
 name = "quickstt-android"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 publish = false
 
@@ -112,6 +112,12 @@ theme = "@android:style/Theme.Black.NoTitleBar.Fullscreen"
 # The floating bubble is built by a small Java helper (a View.OnClickListener
 # cannot be created from JNI), so the APK carries a dex.
 has_code = true
+# The speech engines ship in the APK's lib directory and have to be unpacked
+# into the app's native library directory: that is the only place where
+# Android lets an app run a program (the home directory is mounted noexec).
+# Without this flag the installer keeps the libraries inside the APK and the
+# engines can never be started.
+extract_native_libs = true
 
 # Local release signing (the keystore is NOT in the repo — see android/README.md).
 [package.metadata.android.signing.release]

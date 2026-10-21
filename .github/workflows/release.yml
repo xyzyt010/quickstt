@@ -367,9 +367,11 @@ jobs:
           mkdir -p target/dex/classes target/dex/dex
           javac --release 8 -nowarn -classpath "$PLATFORM/android.jar" \
             -d target/dex/classes \
-            java/ai/quickstt/app/Bubble.java java/ai/quickstt/app/Engine.java
+            java/ai/quickstt/app/Bubble.java java/ai/quickstt/app/Overlay.java \
+            java/ai/quickstt/app/Engine.java
           "$BUILD_TOOLS"/d8 --min-api 26 --output target/dex/dex \
             target/dex/classes/ai/quickstt/app/Bubble.class \
+            target/dex/classes/ai/quickstt/app/Overlay.class \
             target/dex/classes/ai/quickstt/app/Engine.class
           python3 - <<'PY'
           import zipfile

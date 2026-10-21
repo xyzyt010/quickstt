@@ -75,13 +75,16 @@ public final class Bubble {
         try {
             hide(context);
 
+            // The application context: the bubble has to survive the activity
+            // that created it (the user switches to another app all the time).
+            Context app = context.getApplicationContext();
             WindowManager manager = (WindowManager)
-                    context.getSystemService(Context.WINDOW_SERVICE);
+                    app.getSystemService(Context.WINDOW_SERVICE);
             if (manager == null) {
                 return "the window manager is not available";
             }
 
-            View view = build(context, state, transcript);
+            View view = build(app, state, transcript);
 
             WindowManager.LayoutParams params = new WindowManager.LayoutParams(
                     WindowManager.LayoutParams.WRAP_CONTENT,
@@ -166,10 +169,14 @@ public final class Bubble {
         background.setCornerRadius(dp(context, 18));
         background.setStroke(dp(context, 1), 0x33FFFFFF);
         row.setBackground(background);
+        row.setElevation(dp(context, 6));
 
-        // Drag the bubble anywhere on the screen. The buttons are children, so
-        // they get the touch first and the card is only dragged by its text.
-        row.setOnTouchListener(new View.OnTouchListener() {
+        // Drag the bubble anywhere on the screen.
+        //
+        // The listener sits on the *text*, not on the row: a touch listener
+        // on a view group swallows the events before they reach the child
+        // views, and the REC / TYPE / X buttons would never be pressed.
+        text.setOnTouchListener(new View.OnTouchListener() {
             private float downX;
             private float downY;
             private int startX;

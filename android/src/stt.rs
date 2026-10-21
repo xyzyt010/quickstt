@@ -26,6 +26,72 @@ pub const ENGINES: &[(&str, &str, &str)] = &[
     ("transcribe", "transcribe.cpp", "transcribe-cli"),
 ];
 
+/// The display name of an engine.
+pub fn engine_name(id: &str) -> &'static str {
+    ENGINES
+        .iter()
+        .find(|e| e.0 == id)
+        .map(|e| e.1)
+        .unwrap_or("unknown engine")
+}
+
+/// A size that a human can read.
+pub fn human_size(bytes: u64) -> String {
+    const MB: f64 = 1_048_576.0;
+    let mb = bytes as f64 / MB;
+    if mb >= 1.0 {
+        format!("{mb:.1} MB")
+    } else {
+        format!("{:.0} kB", bytes as f64 / 1024.0)
+    }
+}
+
+/// Where an engine's binary is and whether it is there at all.
+///
+/// This is what the self-test shows: the engine is either in the app's
+/// native library directory (where Android lets the app run it) or it is
+/// missing, and the user needs to know which.
+pub fn engine_info(id: &str) -> String {
+    match ensure_engine(id) {
+        Ok(engine) => {
+            let size = std::fs::metadata(&engine.binary).map(|m| m.len()).unwrap_or(0);
+            let via = if engine.launcher.is_some() {
+                " (through the system linker)"
+            } else {
+                ""
+            };
+            format!("{} · {}{via}", engine.binary.display(), human_size(size))
+        }
+        Err(e) => format!("not available ({e})"),
+    }
+}
+
+/// Where a model's file is and whether it is there.
+pub fn model_info(index: usize) -> String {
+    let spec = model(index);
+    match model_path(index).and_then(|p| std::fs::metadata(&p).ok()) {
+        Some(meta) => format!("{} · {}", meta_path(index), human_size(meta.len())),
+        None => format!("{} · not downloaded", spec.file),
+    }
+}
+
+/// The path of a model's file (for the report).
+fn meta_path(index: usize) -> String {
+    model_path(index)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "no path".to_string())
+}
+
+/// Transcribe a WAV and report how long the engine took.
+///
+/// The time matters as much as the text: it tells the user whether the
+/// model is fast enough on this phone.
+pub fn transcribe_timed(wav: &Path, index: usize) -> Result<(String, f32), String> {
+    let started = std::time::Instant::now();
+    let text = transcribe(wav, index)?;
+    Ok((text, started.elapsed().as_secs_f32()))
+}
+
 /// The file name of an engine's binary.
 fn engine_binary(id: &str) -> &'static str {
     ENGINES

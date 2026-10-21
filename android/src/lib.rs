@@ -120,6 +120,26 @@ fn bubble_action(action: i32) {
     });
 }
 
+/// Called by the Java overlay helper when the app comes back to the front.
+///
+/// The user leaves the app to grant the "display over other apps"
+/// permission in the system settings and comes back — this is the moment
+/// the app has to notice the new permission and put the bubble on the
+/// screen. Without it the user is left with a button that looks broken.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_ai_quickstt_app_Overlay_nativeActivityResumed(
+    _env: jni::JNIEnv,
+    _class: jni::sys::jclass,
+) {
+    let ui = BUBBLE_UI.lock().ok().and_then(|g| g.clone());
+    let Some(ui) = ui else { return };
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = ui.upgrade() else { return };
+        refresh_overlay_state(&ui);
+    });
+}
+
 /// The engines the Models tab lists.
 ///
 /// Only engines that really run on the phone are in here: the catalog is
@@ -139,6 +159,7 @@ fn model_catalog() -> Vec<ModelItem> {
                 installed: stt::model_installed(index),
                 downloading,
                 progress,
+                engine: stt::engine_name(spec.engine).into(),
             }
         })
         .collect()
@@ -201,6 +222,174 @@ fn bubble(
     if let Err(e) = platform::show_overlay(state, transcript) {
         note(ui, log, &format!("The bubble could not be shown: {e}"));
     }
+}
+
+/// Bring the floating bubble in line with the permission.
+///
+/// * the permission was granted → the bubble appears (when the user wants it)
+/// * the permission was withdrawn → the bubble disappears
+///
+/// The permission is granted in the system settings, i.e. while the app is
+/// in the background. This runs when the app comes back and once a second
+/// while it is in front, so the button and the bubble always tell the
+/// truth.
+fn refresh_overlay_state(ui: &AppWindow) {
+    let granted = platform::can_draw_overlays();
+    if granted == ui.get_overlay_ok() {
+        return;
+    }
+    ui.set_overlay_ok(granted);
+    if granted {
+        // The user asked for the bubble before the permission was there — it
+        // appears now, without another tap.
+        if platform::overlay_enabled() {
+            match platform::show_overlay("QuickSTT ready", "") {
+                Ok(()) => {
+                    ui.set_overlay_enabled(true);
+                    ui.set_status_text("Floating bubble on — it follows you across apps".into());
+                }
+                Err(e) => {
+                    ui.set_status_text(format!("The bubble could not be shown: {e}").into());
+                }
+            }
+        } else {
+            ui.set_status_text("“Display over other apps” is allowed — the bubble can be switched on"
+                .into());
+        }
+    } else {
+        platform::hide_overlay();
+        ui.set_overlay_enabled(false);
+        ui.set_status_text("The “display over other apps” permission was withdrawn".into());
+    }
+}
+
+/// The report of the last model test.
+static LAST_TEST: Mutex<String> = Mutex::new(String::new());
+
+/// Remember the result of the last model test.
+fn set_last_test(report: &str) {
+    if let Ok(mut slot) = LAST_TEST.lock() {
+        *slot = report.to_string();
+    }
+}
+
+/// The result of the last model test.
+fn last_test() -> String {
+    LAST_TEST.lock().ok().map(|s| s.clone()).unwrap_or_default()
+}
+
+/// Test a model end to end: four seconds of speech through the engine.
+///
+/// This is the only honest way to see that the microphone, the model file
+/// and the engine binary all work on this phone. The app then says what it
+/// found — in words, with the paths and the time the engine needed.
+fn run_model_test(index: usize, weak: slint::Weak<AppWindow>, log: Arc<Mutex<Vec<String>>>) {
+    let spec = stt::model(index);
+    let name = spec.name.to_string();
+    let engine_name = stt::engine_name(spec.engine).to_string();
+    std::thread::spawn(move || {
+        let mut lines = vec![
+            format!("{name} · {engine_name}"),
+            format!("Engine: {}", stt::engine_info(spec.engine)),
+            format!("Model: {}", stt::model_info(index)),
+        ];
+        if !stt::model_installed(index) {
+            lines.push("Result: the model file is not downloaded yet".to_string());
+            finish_test(lines.join("\n"), weak, log);
+            return;
+        }
+        // Record four seconds of speech.
+        let mut recorder = audio::Recorder::new();
+        if let Err(e) = recorder.start() {
+            lines.push(format!("Result: the microphone could not be opened — {e}"));
+            finish_test(lines.join("\n"), weak, log);
+            return;
+        }
+        let mut samples: Vec<f32> = Vec::new();
+        let mut chunk = vec![0f32; 1600];
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        while std::time::Instant::now() < deadline {
+            let n = recorder.read(&mut chunk);
+            if n > 0 {
+                samples.extend_from_slice(&chunk[..n]);
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        recorder.stop();
+        let seconds = (samples.len() as f32 / audio::SAMPLE_RATE as f32).ceil() as i32;
+        lines.push(format!("Recorded: {seconds} s"));
+
+        let wav = std::env::temp_dir().join("quickstt-test.wav");
+        let result = audio::write_wav(&wav, &samples, audio::SAMPLE_RATE as u32)
+            .map_err(|e| e.to_string())
+            .and_then(|_| stt::transcribe_timed(&wav, index));
+        match result {
+            Ok((text, took)) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    lines.push("Result: the engine returned nothing (no speech was heard)".to_string());
+                } else {
+                    lines.push(format!("Result: “{text}”"));
+                }
+                lines.push(format!("Took: {:.1} s", took));
+            }
+            Err(e) => lines.push(format!("Result: FAILED — {e}")),
+        }
+        finish_test(lines.join("\n"), weak, log);
+    });
+}
+
+/// Put the result of a test into the app.
+fn finish_test(report: String, weak: slint::Weak<AppWindow>, log: Arc<Mutex<Vec<String>>>) {
+    set_last_test(&report);
+    platform::log(&report);
+    let ui_weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_test_result(report.clone().into());
+            ui.set_test_running(false);
+        }
+    });
+    note(&weak, &log, "The model test finished — the result is in the test card.");
+}
+
+/// Everything the app can see about itself.
+///
+/// This is the report the user asks for when something does not work: the
+/// permissions, every engine and every model file, with their paths.
+fn diagnostics_report(index: usize) -> String {
+    let mut lines = vec![
+        format!("QuickSTT {} · ai.quickstt.app", env!("CARGO_PKG_VERSION")),
+        format!(
+            "Microphone: {}",
+            if platform::has_mic_permission() {
+                "granted"
+            } else {
+                "missing"
+            }
+        ),
+        format!(
+            "Overlay: {}",
+            if platform::can_draw_overlays() {
+                "granted"
+            } else {
+                "missing"
+            }
+        ),
+    ];
+    for (id, name, _) in stt::ENGINES {
+        lines.push(format!("Engine {name}: {}", stt::engine_info(id)));
+    }
+    let spec = stt::model(index);
+    lines.push(format!("Model {}: {}", spec.name, stt::model_info(index)));
+    let test = last_test();
+    if test.is_empty() {
+        lines.push("Last test: not run yet".to_string());
+    } else {
+        lines.push(format!("Last test:\n{test}"));
+    }
+    lines.join("\n")
 }
 
 /// Wire callbacks and run the event loop.
@@ -358,10 +547,19 @@ pub fn run() {
         let weak = ui.as_weak();
         let log = log.clone();
         ui.on_open_overlay_settings(move || {
-            note(&weak, &log, "Opening the “display over other apps” settings…");
-            platform::open_overlay_settings();
-            if let Some(ui) = weak.upgrade() {
-                ui.set_status_text("Enable “Display over other apps”, then come back".into());
+            note(&weak, &log, "Opening QuickSTT's page in the system settings…");
+            let Some(ui) = weak.upgrade() else { return };
+            match platform::open_overlay_settings() {
+                Ok(()) => {
+                    ui.set_status_text(
+                        "Allow “display over other apps”, then come back — the bubble appears by itself"
+                            .into(),
+                    );
+                }
+                Err(e) => {
+                    note(&weak, &log, &format!("The settings page could not be opened: {e}"));
+                    ui.set_status_text(format!("The settings page could not be opened: {e}").into());
+                }
             }
         });
     }
@@ -371,37 +569,43 @@ pub fn run() {
         ui.on_toggle_overlay(move || {
             let Some(ui) = weak.upgrade() else { return };
             let wanted = !ui.get_overlay_enabled();
-            if wanted && !platform::can_draw_overlays() {
-                note(
-                    &weak,
-                    &log,
-                    "Android needs the “display over other apps” permission for the bubble.",
-                );
-                ui.set_status_text("Allow “display over other apps” first".into());
-                platform::open_overlay_settings();
-                return;
-            }
-            if wanted {
-                match platform::show_overlay("QuickSTT ready", "") {
-                    Ok(()) => {
-                        ui.set_overlay_enabled(true);
-                        platform::save_overlay_enabled(true);
-                        note(&weak, &log, "Floating bubble on — it follows you across apps.");
-                        ui.set_status_text("Floating bubble on".into());
-                    }
-                    Err(e) => {
-                        ui.set_overlay_enabled(false);
-                        platform::save_overlay_enabled(false);
-                        note(&weak, &log, &format!("The bubble could not be shown: {e}"));
-                        ui.set_status_text(format!("The bubble could not be shown: {e}").into());
-                    }
-                }
-            } else {
+            if !wanted {
                 platform::hide_overlay();
                 ui.set_overlay_enabled(false);
                 platform::save_overlay_enabled(false);
                 note(&weak, &log, "Floating bubble off.");
                 ui.set_status_text("Floating bubble off".into());
+                return;
+            }
+            // The wish is remembered even when the permission is missing —
+            // the bubble appears by itself as soon as the permission is
+            // granted, without the user having to press the button again.
+            platform::save_overlay_enabled(true);
+            if !platform::can_draw_overlays() {
+                note(
+                    &weak,
+                    &log,
+                    "Android needs the “display over other apps” permission for the bubble. Opening QuickSTT's page in the system settings — the bubble appears by itself once you allow it.",
+                );
+                ui.set_status_text("Allow “display over other apps”, then come back".into());
+                if let Err(e) = platform::open_overlay_settings() {
+                    note(&weak, &log, &format!("The settings page could not be opened: {e}"));
+                    ui.set_status_text(format!("The settings page could not be opened: {e}").into());
+                }
+                return;
+            }
+            match platform::show_overlay("QuickSTT ready", "") {
+                Ok(()) => {
+                    ui.set_overlay_enabled(true);
+                    note(&weak, &log, "Floating bubble on — it follows you across apps.");
+                    ui.set_status_text("Floating bubble on".into());
+                }
+                Err(e) => {
+                    ui.set_overlay_enabled(false);
+                    platform::save_overlay_enabled(false);
+                    note(&weak, &log, &format!("The bubble could not be shown: {e}"));
+                    ui.set_status_text(format!("The bubble could not be shown: {e}").into());
+                }
             }
         });
     }
@@ -687,6 +891,71 @@ pub fn run() {
         });
     }
 
+    // Test a model: four seconds of speech through the engine. This is the
+    // only way to see that the model, the engine and the microphone really
+    // work on this phone.
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
+        ui.on_test_model(move |idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_test_running() {
+                note(&weak, &log, "A test is already running.");
+                return;
+            }
+            let index = idx.max(0) as usize;
+            ui.set_selected_model(index as i32);
+            stt::save_selected(index);
+            if !platform::has_mic_permission() {
+                note(
+                    &weak,
+                    &log,
+                    "The microphone permission is missing — the test needs it.",
+                );
+                platform::request_mic_permission();
+                ui.set_status_text("Microphone permission needed".into());
+                return;
+            }
+            ui.set_test_running(true);
+            ui.set_test_result("Recording 4 seconds — speak a short phrase now…".into());
+            ui.set_status_text("Testing the model…".into());
+            note(&weak, &log, "Testing the model — speak a short phrase now…");
+            run_model_test(index, weak.clone(), log.clone());
+        });
+    }
+
+    // The self-test: what is installed, what is missing, what the last test
+    // said. This is the report the user asks for when something misbehaves.
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
+        ui.on_run_diagnostics(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let index = ui.get_selected_model().max(0) as usize;
+            let report = diagnostics_report(index);
+            platform::log(&report);
+            ui.set_diagnostics(report.into());
+            ui.set_status_text("The self-test finished — the report is in Diagnostics".into());
+            note(&weak, &log, "The self-test finished.");
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
+        ui.on_copy_diagnostics(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let index = ui.get_selected_model().max(0) as usize;
+            let report = if ui.get_diagnostics().is_empty() {
+                diagnostics_report(index)
+            } else {
+                ui.get_diagnostics().to_string()
+            };
+            platform::copy_to_clipboard(&report);
+            ui.set_status_text("The report was copied to the clipboard".into());
+            note(&weak, &log, "The report was copied to the clipboard.");
+        });
+    }
+
     // Type the last transcript into the app in front, with real key events.
     {
         let weak_a = ui.as_weak();
@@ -792,12 +1061,11 @@ pub fn run() {
                     ui.window()
                         .set_size(slint::LogicalSize::new(412.0, 760.0));
                 }
-                if ticks % 40 == 0 {
-                    let overlay = platform::can_draw_overlays();
-                    if overlay != ui.get_overlay_ok() {
-                        ui.set_overlay_ok(overlay);
-                        note(&weak, &log, "Floating bubble permission updated.");
-                    }
+                if ticks % 20 == 0 {
+                    // The permission can be granted in the system settings
+                    // while the app is in the background: pick it up and
+                    // put the bubble on the screen.
+                    refresh_overlay_state(&ui);
                     // The model may have been downloaded in the background.
                     let index = ui.get_selected_model().max(0) as usize;
                     let installed = stt::model_installed(index);
@@ -885,11 +1153,15 @@ pub fn run() {
 
         // The bubble stays on if the user left it on: put it back on the
         // screen so it is there in every app, not only inside QuickSTT.
-        let bubble_on = platform::overlay_enabled() && overlay_ok;
-        ui.set_overlay_enabled(bubble_on);
-        if bubble_on {
+        let bubble_on = platform::overlay_enabled();
+        ui.set_overlay_enabled(bubble_on && overlay_ok);
+        if bubble_on && overlay_ok {
             bubble("QuickSTT ready", "", &weak, &log);
         }
+
+        // Notice when the user comes back from the system settings: that is
+        // when the "display over other apps" permission is granted.
+        platform::watch_overlay_permission();
     }
 
     ui.run().expect("Slint event loop failed");

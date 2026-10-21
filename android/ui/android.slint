@@ -39,6 +39,8 @@ export struct ModelItem {
     downloading: bool,
     // How far the download got (0..1).
     progress: float,
+    // The engine that runs this model on the phone.
+    engine: string,
 }
 
 // ── Small building blocks ──────────────────────────────────────────────────
@@ -425,6 +427,14 @@ export component AppWindow inherits Window {
     // A short, human-readable activity log — the app tells the user what it
     // is doing instead of looking frozen.
     in-out property <string> log-text: "";
+    // The result of the last model test: what the engine said, how long it
+    // took and which files were used. This is how the user finds out whether
+    // the speech recognition really works on this phone.
+    in-out property <string> test-result: "";
+    // True while a model test is running.
+    in-out property <bool> test-running: false;
+    // The self-test report: permissions, engines, model files.
+    in-out property <string> diagnostics: "";
     in property <[string]> tabs: ["Listen", "History", "Models", "Settings"];
 
     in-out property <[Turn]> turns: [];
@@ -436,6 +446,11 @@ export component AppWindow inherits Window {
     // Microphone self-test: opens the mic for a second and reports the
     // level and the input health (clipped / no signal).
     callback test-mic();
+    // Model test: records four seconds and runs them through the engine.
+    callback test-model(int);
+    // The self-test: what is installed and what is missing.
+    callback run-diagnostics();
+    callback copy-diagnostics();
     // Setup actions (wired in Rust).
     callback grant-mic();
     callback download-model();
@@ -786,14 +801,14 @@ export component AppWindow inherits Window {
                                     number: "3";
                                     title: "Floating bubble";
                                     detail: root.overlay-ok
-                                        ? "On — the mic bubble shows above other apps."
-                                        : "Shows the mic state above other apps.";
-                                    done: root.overlay-ok;
-                                    action-label: root.overlay-ok ? "Hide" : "Enable";
-                                    action-primary: false;
-                                    action => {
-                                        if root.overlay-ok { root.toggle-overlay(); } else { root.open-overlay-settings(); }
-                                    }
+                                        ? (root.overlay-enabled
+                                            ? "On — the mic bubble shows above every other app."
+                                            : "Allowed. Switch it on to get the bubble in every app.")
+                                        : "Android needs the “display over other apps” permission. The button opens QuickSTT's own page in the system settings — the bubble appears by itself once you allow it.";
+                                    done: root.overlay-enabled;
+                                    action-label: root.overlay-enabled ? "Disable" : "Enable";
+                                    action-primary: !root.overlay-enabled;
+                                    action => { root.toggle-overlay(); }
                                 }
                             }
                         }
@@ -926,6 +941,32 @@ export component AppWindow inherits Window {
                             color: #6B6B6B;
                         }
 
+                        // The test card: the honest answer to "does the
+                        // speech recognition work on this phone?".
+                        Card {
+                            background: #0F1A13;
+                            border-color: #2E6B47;
+
+                            VerticalLayout {
+                                width: parent.width;
+                                padding: 14px;
+                                spacing: 8px;
+
+                                SectionLabel {
+                                    text: "TEST THE MODEL";
+                                    color: #4ADE80;
+                                }
+
+                                Body {
+                                    text: root.test-result != ""
+                                        ? root.test-result
+                                        : "Pick a model and press “Test”. QuickSTT records four seconds, runs them through the engine and shows exactly what came out — and how long it took.";
+                                    font-size: 12px;
+                                    color: #9FE8BA;
+                                }
+                            }
+                        }
+
                         for m[i] in root.models : Card {
                             background: root.selected-model == i ? #0F1A13 : #0B0B0B;
                             border-color: root.selected-model == i ? #2E6B47 : #1E1E1E;
@@ -1048,6 +1089,17 @@ export component AppWindow inherits Window {
                                         enabled: root.selected-model != i;
                                         clicked => { root.pick-model(i); }
                                     }
+                                }
+
+                                // Test this model: four seconds of speech
+                                // through the engine, with the result shown
+                                // in the test card above.
+                                if m.installed : ActionButton {
+                                    height: 38px;
+                                    label: root.test-running ? "Testing…" : "Test this model";
+                                    primary: false;
+                                    enabled: !root.test-running;
+                                    clicked => { root.test-model(i); }
                                 }
                             }
                         }
@@ -1239,7 +1291,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 if !root.overlay-ok : ActionButton {
-                                    label: "Open the settings";
+                                    label: "Grant the permission";
                                     primary: false;
                                     clicked => { root.open-overlay-settings(); }
                                 }
@@ -1282,6 +1334,49 @@ export component AppWindow inherits Window {
                                     text: root.log-text != "" ? root.log-text : "Nothing yet.";
                                     font-size: 12px;
                                     color: #6B6B6B;
+                                }
+                            }
+                        }
+
+                        // The self-test: the permissions, the engines and the
+                        // model files — with their paths, so a problem can be
+                        // found without guessing.
+                        Card {
+                            VerticalLayout {
+                                width: parent.width;
+                                padding: 14px;
+                                spacing: 8px;
+
+                                SectionLabel { text: "SELF-TEST"; }
+
+                                Body {
+                                    text: root.diagnostics != ""
+                                        ? root.diagnostics
+                                        : "Runs a check of everything this build needs: the microphone and overlay permissions, the three speech engines and the downloaded model files.";
+                                    font-size: 11px;
+                                    color: #6B6B6B;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    cross-axis-alignment: center;
+
+                                    ActionButton {
+                                        horizontal-stretch: 1;
+                                        height: 40px;
+                                        label: "Run the self-test";
+                                        primary: false;
+                                        clicked => { root.run-diagnostics(); }
+                                    }
+
+                                    ActionButton {
+                                        horizontal-stretch: 1;
+                                        height: 40px;
+                                        label: "Copy";
+                                        primary: false;
+                                        enabled: root.diagnostics != "";
+                                        clicked => { root.copy-diagnostics(); }
+                                    }
                                 }
                             }
                         }

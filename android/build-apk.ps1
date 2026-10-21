@@ -41,13 +41,15 @@ New-Item -ItemType Directory -Force "$work\dex" | Out-Null
 
 Write-Host "==> compiling the bubble helper"
 & javac --release 8 -nowarn -classpath $androidJar -d "$work\classes" `
-    "java\ai\quickstt\app\Bubble.java" "java\ai\quickstt\app\Engine.java"
+    "java\ai\quickstt\app\Bubble.java" "java\ai\quickstt\app\Overlay.java" `
+    "java\ai\quickstt\app\Engine.java"
 if ($LASTEXITCODE -ne 0) { throw "javac failed" }
 
 Write-Host "==> dexing"
 $d8 = Get-ChildItem "$buildTools" -Filter "d8*" | Select-Object -First 1
 & $d8.FullName --min-api 26 --output "$work\dex" `
-    "$work\classes\ai\quickstt\app\Bubble.class" "$work\classes\ai\quickstt\app\Engine.class"
+    "$work\classes\ai\quickstt\app\Bubble.class" "$work\classes\ai\quickstt\app\Overlay.class" `
+    "$work\classes\ai\quickstt\app\Engine.class"
 if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
 if (-not (Test-Path "$work\dex\classes.dex")) { throw "d8 produced no classes.dex" }
 

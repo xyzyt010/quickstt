@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 #[cfg(target_os = "android")]
-use jni::objects::{JObject, JString, JValue};
+use jni::objects::{JClass, JObject, JString, JValue};
 #[cfg(target_os = "android")]
 use jni::sys::{jint, jobject};
 #[cfg(target_os = "android")]
@@ -293,6 +293,10 @@ pub fn save_overlay_enabled(enabled: bool) {
 }
 
 /// Should the floating bubble be on?
+///
+/// This is the *wish*: it is remembered even when the permission is still
+/// missing, so the bubble can appear by itself as soon as the user grants
+/// the permission in the system settings.
 pub fn overlay_enabled() -> bool {
     #[cfg(target_os = "android")]
     {
@@ -368,6 +372,68 @@ where
     // Never delete a reference we do not own.
     std::mem::forget(activity);
     out
+}
+
+/// Find one of the app's own Java classes.
+///
+/// `FindClass` uses the **system** class loader on a thread that was attached
+/// with `AttachCurrentThread`, so the app's own classes (the bubble helper)
+/// are invisible to it — the call fails with `ClassNotFoundException` and the
+/// bubble silently falls back to a plain read-out. The Activity's class
+/// loader can see them, so it is used instead.
+#[cfg(target_os = "android")]
+fn app_class<'local>(
+    env: &mut jni::JNIEnv<'local>,
+    activity: &JObject<'_>,
+    name: &str,
+) -> Option<JClass<'local>> {
+    let class = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    let loader = env
+        .call_method(&class, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    let text = env.new_string(name).ok()?;
+    let loaded = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::from(&text)],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+    // A `java.lang.Class` *is* a jclass.
+    Some(JClass::from(loaded))
+}
+
+/// Call a static method of one of the app's own Java classes.
+///
+/// Returns None when the class or the method is not there.
+#[cfg(target_os = "android")]
+fn call_app_static<'local>(
+    env: &mut jni::JNIEnv<'local>,
+    activity: &JObject<'_>,
+    class_name: &str,
+    method: &str,
+    sig: &str,
+    args: &[JValue],
+) -> Option<jni::objects::JValueOwned<'local>> {
+    let cls = app_class(env, activity, class_name)?;
+    env.call_static_method(cls, method, sig, args).ok()
+}
+
+/// Read a Java string out of a JNI value.
+#[cfg(target_os = "android")]
+fn jni_string(env: &mut jni::JNIEnv<'_>, value: jni::objects::JValueOwned<'_>) -> Option<String> {
+    let object = value.l().ok()?;
+    let text: String = env.get_string(&JString::from(object)).ok()?.into();
+    Some(text)
 }
 
 /// The app's private files directory (persists across launches).
@@ -586,9 +652,28 @@ pub fn request_mic_permission() {
 }
 
 /// True when the app may draw over other apps.
+///
+/// The check runs through the Java helper (`ai.quickstt.app.Overlay`),
+/// because it also knows the app-op that some phone makers use instead of
+/// the setting. The framework call is the fallback when the helper is not
+/// there.
 pub fn can_draw_overlays() -> bool {
     #[cfg(target_os = "android")]
     {
+        let via_helper = with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "granted",
+                "(Landroid/content/Context;)Z",
+                &[JValue::from(activity)],
+            )?;
+            Some(value.i().ok()? != 0)
+        });
+        if let Some(granted) = via_helper {
+            return granted;
+        }
         with_activity(|env, activity| {
             let cls = env.find_class("android/provider/Settings").ok()?;
             let res: jint = env
@@ -610,59 +695,58 @@ pub fn can_draw_overlays() -> bool {
 }
 
 /// Open the system page where the user grants "display over other apps".
-pub fn open_overlay_settings() {
+///
+/// The page is QuickSTT's own entry, so the user only has to flip one
+/// switch. When the phone does not know that action, the helper falls back
+/// to the list of all apps and then to the app-info page.
+///
+/// Returns the reason when no page could be opened — the app shows it
+/// instead of pretending the button worked.
+pub fn open_overlay_settings() -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         log("opening the overlay settings");
-        on_java_thread(|| {
-            let _ = with_activity(|env, activity| {
-                let pkg = env
-                    .call_method(activity, "getPackageName", "()Ljava/lang/String;", &[])
-                    .ok()?
-                    .l()
-                    .ok()?;
-                let pkg_str: String = env.get_string(&JString::from(pkg)).ok()?.into();
-                let uri_str = format!("package:{pkg_str}");
-                let intent_cls = env.find_class("android/content/Intent").ok()?;
-                let uri_cls = env.find_class("android/net/Uri").ok()?;
-                let uri_text = env.new_string(&uri_str).ok()?;
-                let uri = env
-                    .call_static_method(
-                        uri_cls,
-                        "parse",
-                        "(Ljava/lang/String;)Landroid/net/Uri;",
-                        &[JValue::from(&uri_text)],
-                    )
-                    .ok()?
-                    .l()
-                    .ok()?;
-                let intent = env.new_object(intent_cls, "()V", &[]).ok()?;
-                let action = env
-                    .new_string("android.settings.action.MANAGE_OVERLAY_PERMISSION")
-                    .ok()?;
-                env.call_method(
-                    &intent,
-                    "setAction",
-                    "(Ljava/lang/String;)Landroid/content/Intent;",
-                    &[JValue::from(&action)],
-                )
-                .ok()?;
-                env.call_method(
-                    &intent,
-                    "setData",
-                    "(Landroid/net/Uri;)Landroid/content/Intent;",
-                    &[JValue::from(&uri)],
-                )
-                .ok()?;
-                env.call_method(
-                    activity,
-                    "startActivity",
-                    "(Landroid/content/Intent;)V",
-                    &[JValue::from(&intent)],
-                )
-                .ok()?;
-                Some(())
-            });
+        let outcome = with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "openSettings",
+                "(Landroid/content/Context;)Ljava/lang/String;",
+                &[JValue::from(activity)],
+            )?;
+            jni_string(env, value)
+        });
+        match outcome {
+            Some(message) if message.is_empty() => Ok(()),
+            Some(message) => Err(message),
+            None => Err("the system settings could not be opened".into()),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Err("the overlay settings only exist on Android".into())
+    }
+}
+
+/// Let the Java helper tell us when the app comes back to the front.
+///
+/// That is the moment the user returns from the system settings after
+/// granting the permission — the app picks it up and shows the bubble
+/// without the user having to press anything.
+pub fn watch_overlay_permission() {
+    #[cfg(target_os = "android")]
+    {
+        let _ = with_activity(|env, activity| {
+            call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "watch",
+                "(Landroid/content/Context;)V",
+                &[JValue::from(activity)],
+            )?;
+            Some(())
         });
     }
 }
@@ -683,24 +767,21 @@ fn call_bubble_helper(
     state: &str,
     transcript: &str,
 ) -> Option<Result<(), String>> {
-    let cls = env.find_class("ai/quickstt/app/Bubble").ok()?;
     let state_text = env.new_string(state).ok()?;
     let body = env.new_string(transcript).ok()?;
-    let result = env
-        .call_static_method(
-            cls,
-            method,
-            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-            &[
-                JValue::from(activity),
-                JValue::from(&state_text),
-                JValue::from(&body),
-            ],
-        )
-        .ok()?
-        .l()
-        .ok()?;
-    let message: String = env.get_string(&JString::from(result)).ok()?.into();
+    let result = call_app_static(
+        env,
+        activity,
+        "ai/quickstt/app/Overlay",
+        method,
+        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+        &[
+            JValue::from(activity),
+            JValue::from(&state_text),
+            JValue::from(&body),
+        ],
+    )?;
+    let message = jni_string(env, result)?;
     if message.is_empty() {
         Some(Ok(()))
     } else {
@@ -871,13 +952,15 @@ fn add_overlay_view(
     view: JObject<'_>,
 ) -> Option<()> {
     // Layout params: wrap content, top-start, no focus, translucent.
-    // The 9-arg LayoutParams ctor is
-    // (w, h, type, flags, format, gravity, x, y, windowAnimations).
+    //
+    // Only the public five-argument constructor exists
+    // (width, height, type, flags, format) — the longer one is hidden in
+    // the framework, so the position is set afterwards.
     let lp_cls = env.find_class("android/view/WindowManager$LayoutParams").ok()?;
     let lp = env
         .new_object(
             lp_cls,
-            "(IIIIIIIF)V",
+            "(IIIII)V",
             &[
                 JValue::from(-2i32),  // width  = WRAP_CONTENT
                 JValue::from(-2i32),  // height = WRAP_CONTENT
@@ -886,13 +969,14 @@ fn add_overlay_view(
                 // keyboard focus and taps outside the bubble still reach it.
                 JValue::from(0x00000008i32 | 0x00000010i32),
                 JValue::from(-3i32),  // format = TRANSLUCENT
-                JValue::from(0x00000001i32 | 0x00000030i32), // gravity = TOP | START
-                JValue::from(24i32),  // x
-                JValue::from(120i32), // y
-                JValue::from(0.0f32), // windowAnimations
             ],
         )
         .ok()?;
+    // gravity = TOP | START, and the position.
+    env.set_field(&lp, "gravity", "I", JValue::from(0x00000001i32 | 0x00000030i32))
+        .ok()?;
+    env.set_field(&lp, "x", "I", JValue::from(24i32)).ok()?;
+    env.set_field(&lp, "y", "I", JValue::from(120i32)).ok()?;
     let wm = window_manager(env, activity)?;
     env.call_method(
         &wm,
