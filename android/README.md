@@ -30,13 +30,25 @@ record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window
 ## The engines are real
 
 Three engines are cross-compiled for `arm64-v8a` with the Android NDK and
-shipped inside the APK:
+ship **inside the APK**, in the APK's `lib/arm64-v8a/` directory:
 
-| Engine | Binary | Models it runs |
+| Engine | Binary in the APK | Models it runs |
 |---|---|---|
-| whisper.cpp | `prebuilt/whisper-cli-arm64-v8a` (2.1 MB) | Whisper Tiny EN |
-| Cactus `needle` | `prebuilt/needle-arm64-v8a` (1.6 MB) | Cactus Whistle 16M |
-| transcribe.cpp | `prebuilt/transcribe-cli-arm64-v8a` (3.0 MB) | the GGUF family |
+| whisper.cpp | `libwhisper-cli.so` (2.1 MB) | Whisper Tiny EN |
+| Cactus `needle` | `libneedle.so` (1.6 MB) | Cactus Whistle 16M |
+| transcribe.cpp | `libtranscribe-cli.so` (3.0 MB) | the GGUF family |
+
+They are named `lib*.so` and stored compressed on purpose: that is what the
+Android installer looks for, and it extracts them into the app's **native
+library directory** with the execute permission. That directory is
+read-only but exec-mounted — the only place where a modern Android lets an
+app run a program. (The app's home directory is mounted `noexec` for apps
+that target API 29+, so a binary unpacked there cannot be started at all —
+that is why the engines are *not* written out at runtime.)
+
+If the installer did not extract an engine, the app copies it out of the APK
+(`ai.quickstt.app.Engine`) and starts it through the system linker
+(`/system/bin/linker64`), which is the other way around the W^X rule.
 
 ## The models are real
 
@@ -136,9 +148,11 @@ All of them were found by reading the platform crates and fixed in
 4. **The app's home directory is `noexec`.** Since Android 10 the files
    directory of an app that targets API 29+ is mounted `noexec`, so an
    engine binary unpacked there cannot be started ("Permission denied").
-   The engines are therefore unpacked into the app's **native library
-   directory** (`getNativeLibraryDir()`), which belongs to the app and is
-   exec-mounted.
+   The engines are therefore *shipped* in the APK's `lib/arm64-v8a/`
+   directory: the installer extracts them into the app's **native library
+   directory**, which is read-only but exec-mounted. (Unpacking them at
+   runtime into the files directory would have produced exactly the
+   "Permission denied" the transcription kept failing with.)
 
 The app also polls `checkSelfPermission` while a dialog is open, so the setup
 card advances to "Test mic" as soon as the user grants the permission — and
@@ -159,11 +173,11 @@ settings.
    The **"Test mic"** button in the setup card opens the mic for a second
    and reports the level, so the user can check the input without
    recording.
-3. **Transcribe** — the engine for the chosen model is unpacked into the
-   native library directory and executed once per turn (with a 120 s
-   deadline, so a broken model cannot freeze the app). A silent take is
-   rejected *before* the engine runs (whisper hallucinates short words on
-   noise-only audio).
+3. **Transcribe** — the engine for the chosen model runs out of the app's
+   native library directory (where the installer put it) and is executed
+   once per turn, with a 120 s deadline, so a broken model cannot freeze the
+   app. A silent take is rejected *before* the engine runs (whisper
+   hallucinates short words on noise-only audio).
 4. **Model** — never bundled. The Models tab lists the models the phone can
    run and downloads the chosen one from the same HuggingFace source the
    desktop app uses, with a progress bar per row. The choice is remembered

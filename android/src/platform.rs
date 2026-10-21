@@ -417,6 +417,66 @@ pub fn native_lib_dir() -> Option<PathBuf> {
     None
 }
 
+/// The system linker (`/system/bin/linker64`).
+///
+/// Starting a program through the linker works around the SELinux rule that
+/// stops an app from executing a file out of its own (writable) home
+/// directory: the linker maps the program instead of the kernel executing
+/// it. It is the fallback for the engines when the installer did not extract
+/// them into the native library directory.
+pub fn linker64() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        let path = PathBuf::from("/system/bin/linker64");
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Copy a file out of the APK into the app's data directory.
+///
+/// The engines are shipped in the APK's `lib/<abi>` directory. The Java
+/// helper reads the entry out of the APK (Java can read a zip entry without
+/// any help), so the app can still get the engine if the installer did not
+/// extract it.
+pub fn stage_from_apk(entry: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        let path = with_activity(|env, activity| {
+            let cls = env.find_class("ai/quickstt/app/Engine").ok()?;
+            let name = env.new_string(entry).ok()?;
+            let result = env
+                .call_static_method(
+                    cls,
+                    "extract",
+                    "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+                    &[JValue::from(activity), JValue::from(&name)],
+                )
+                .ok()?
+                .l()
+                .ok()?;
+            let text: String = env.get_string(&JString::from(result)).ok()?.into();
+            Some(text)
+        })?;
+        if path.is_empty() {
+            return None;
+        }
+        let path = PathBuf::from(path);
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = entry;
+        None
+    }
+}
+
 /// Copy text to the system clipboard (so it can be pasted into any app).
 pub fn copy_to_clipboard(text: &str) -> bool {
     #[cfg(target_os = "android")]

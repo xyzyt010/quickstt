@@ -1,12 +1,13 @@
-// Android speech-to-text: the engines (whisper.cpp, Cactus needle) + the
-// GGML/CACT models.
+// Android speech-to-text: the engines (whisper.cpp, Cactus needle,
+// transcribe.cpp) + the GGML/CACT/GGUF models.
 //
-// The engine binaries are built for arm64-v8a and shipped inside the APK.
-// They are unpacked into the app's *native library directory* on first run:
-// since Android 10 the app's home directory is mounted noexec for apps that
-// target API 29 or newer, so a binary unpacked into the files directory
-// cannot be started ("Permission denied"). The native library directory
-// belongs to the app, is writable by it and is exec-mounted.
+// The engine binaries are built for arm64-v8a and shipped inside the APK, in
+// the APK's `lib/arm64-v8a/` directory, named `lib<engine>.so` — that is the
+// name the installer looks for. It extracts them into the app's *native
+// library directory*, which is read-only but **exec-mounted**: the only
+// place where a modern Android lets an app run a program. (The app's home
+// directory is mounted noexec for apps that target API 29 or newer, so a
+// binary unpacked there cannot be started at all.)
 //
 // The models are NOT bundled: they are downloaded in-app from the same
 // HuggingFace sources the desktop app uses. Every entry in `MODELS` is a
@@ -17,16 +18,6 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// whisper-cli built for aarch64-linux-android (NDK 27, portable baseline).
-#[cfg(target_os = "android")]
-const WHISPER_CLI: &[u8] = include_bytes!("../prebuilt/whisper-cli-arm64-v8a");
-/// Cactus `needle` (Apache-2.0), the Cactus Compute CPU engine.
-#[cfg(target_os = "android")]
-const CACTUS_NEEDLE: &[u8] = include_bytes!("../prebuilt/needle-arm64-v8a");
-/// transcribe.cpp's CLI (the engine behind the GGUF model family).
-#[cfg(target_os = "android")]
-const TRANSCRIBE_CLI: &[u8] = include_bytes!("../prebuilt/transcribe-cli-arm64-v8a");
-
 /// The engines that run on the phone.
 pub const ENGINES: &[(&str, &str, &str)] = &[
     // id, display name, binary file name
@@ -35,22 +26,6 @@ pub const ENGINES: &[(&str, &str, &str)] = &[
     ("transcribe", "transcribe.cpp", "transcribe-cli"),
 ];
 
-/// The engine bytes for an id (Android only).
-#[cfg(target_os = "android")]
-fn engine_bytes(id: &str) -> Option<&'static [u8]> {
-    match id {
-        "whisper" => Some(WHISPER_CLI),
-        "cactus" => Some(CACTUS_NEEDLE),
-        "transcribe" => Some(TRANSCRIBE_CLI),
-        _ => None,
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-fn engine_bytes(_id: &str) -> Option<&'static [u8]> {
-    None
-}
-
 /// The file name of an engine's binary.
 fn engine_binary(id: &str) -> &'static str {
     ENGINES
@@ -58,6 +33,40 @@ fn engine_binary(id: &str) -> &'static str {
         .find(|e| e.0 == id)
         .map(|e| e.2)
         .unwrap_or("whisper-cli")
+}
+
+/// The name the engine has inside the APK's lib directory.
+///
+/// The installer only extracts files that are named `lib*.so`, so the
+/// engines use that convention.
+fn engine_entry(id: &str) -> String {
+    format!("lib{}.so", engine_binary(id))
+}
+
+/// A ready-to-run engine.
+pub struct Engine {
+    /// The engine binary.
+    pub binary: PathBuf,
+    /// A program that starts the engine (the system linker), when the
+    /// binary itself cannot be started.
+    pub launcher: Option<PathBuf>,
+}
+
+impl Engine {
+    /// The command that runs the engine.
+    pub fn command(&self) -> std::process::Command {
+        let mut command = match &self.launcher {
+            Some(launcher) => {
+                let mut command = std::process::Command::new(launcher);
+                command.arg(&self.binary);
+                command
+            }
+            None => std::process::Command::new(&self.binary),
+        };
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+        command
+    }
 }
 
 /// A speech model that really runs on Android.
@@ -175,53 +184,51 @@ fn work_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Where the engine binaries are unpacked.
+/// Make sure the engine is there and can be started.
 ///
-/// The native library directory is exec-mounted and writable by the app; the
-/// files directory is *not* executable on Android 10+.
-fn engine_dir() -> Option<PathBuf> {
+/// The installer extracts the engines from the APK into the app's native
+/// library directory — that is where they can be run. If that did not
+/// happen, the engine is copied out of the APK into the app's data
+/// directory and started through the system linker (the home directory
+/// itself is mounted noexec).
+pub fn ensure_engine(id: &str) -> Result<Engine, String> {
     #[cfg(target_os = "android")]
     {
+        let entry = engine_entry(id);
         if let Some(dir) = crate::platform::native_lib_dir() {
-            if std::fs::create_dir_all(&dir).is_ok() {
+            let path = dir.join(&entry);
+            if path.exists() {
                 crate::platform::log(&format!(
-                    "the engines run from the native library directory: {}",
-                    dir.display()
+                    "the {id} engine runs from {}",
+                    path.display()
                 ));
-                return Some(dir);
+                return Ok(Engine {
+                    binary: path,
+                    launcher: None,
+                });
             }
-            crate::platform::log("the native library directory is not writable");
         }
+        // Fallback: a copy in the app's data directory, started through the
+        // system linker.
+        if let Some(path) = crate::platform::stage_from_apk(&entry) {
+            if let Some(linker) = crate::platform::linker64() {
+                crate::platform::log(&format!(
+                    "the {id} engine runs from {} (through the system linker)",
+                    path.display()
+                ));
+                return Ok(Engine {
+                    binary: path,
+                    launcher: Some(linker),
+                });
+            }
+        }
+        Err(format!("the {id} engine is missing from the app"))
     }
-    work_dir()
-}
-
-/// Write the embedded engine binary to disk and make it executable.
-#[cfg(target_os = "android")]
-pub fn ensure_engine(id: &str) -> Result<PathBuf, String> {
-    let bytes = engine_bytes(id).ok_or("unknown engine")?;
-    let dir = engine_dir().ok_or("no writable app directory")?;
-    let path = dir.join(engine_binary(id));
-    let current = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    if current != bytes.len() as u64 {
-        std::fs::write(&path, bytes)
-            .map_err(|e| format!("could not unpack the {id} engine: {e}"))?;
-    }
-    #[cfg(unix)]
+    #[cfg(not(target_os = "android"))]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&path)
-            .map_err(|e| e.to_string())?
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).map_err(|e| e.to_string())?;
+        let _ = id;
+        Err("the Android engines are only available on Android".into())
     }
-    Ok(path)
-}
-
-#[cfg(not(target_os = "android"))]
-pub fn ensure_engine(_id: &str) -> Result<PathBuf, String> {
-    Err("the Android engines are only available on Android".into())
 }
 
 /// Path of a downloaded model.
@@ -316,12 +323,12 @@ pub fn download_model<F: FnMut(u64, u64)>(_index: usize, _progress: F) -> Result
 /// app, and the user always gets an answer (or a clear error).
 pub fn transcribe(wav: &Path, index: usize) -> Result<String, String> {
     let spec = model(index);
-    let cli = ensure_engine(spec.engine)?;
+    let engine = ensure_engine(spec.engine)?;
     let model_file = model_path(index).ok_or("no model downloaded")?;
     if !model_installed(index) {
         return Err("the speech model is not downloaded yet".into());
     }
-    let mut command = std::process::Command::new(&cli);
+    let mut command = engine.command();
     match spec.engine {
         "cactus" => {
             // Cactus needle: --model <file.cact> --audio <wav> [--audio-language en]
@@ -364,8 +371,6 @@ pub fn transcribe(wav: &Path, index: usize) -> Result<String, String> {
         }
     }
     let mut child = command
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("could not run the engine: {e}"))?;
 
@@ -593,14 +598,7 @@ mod tests {
             );
             assert!(spec.min_bytes > 0, "{} has no size check", spec.name);
             assert!(!spec.size.is_empty(), "{} has no size label", spec.name);
-            // The engine binaries only exist in the Android build.
-            #[cfg(target_os = "android")]
-            assert!(
-                engine_bytes(spec.engine).is_some(),
-                "{} has no engine",
-                spec.name
-            );
-            #[cfg(not(target_os = "android"))]
+            // Every model needs an engine that really runs on the phone.
             assert!(
                 ENGINES.iter().any(|e| e.0 == spec.engine),
                 "{} has no engine",
