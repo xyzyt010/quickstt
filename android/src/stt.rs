@@ -289,3 +289,39 @@ fn clean_transcript(raw: &str) -> String {
         .trim()
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The transcript is what ends up in the other app, so the noise lines
+    /// whisper adds for silence have to be gone.
+    #[test]
+    fn transcript_drops_the_noise_markers() {
+        let raw = "\n[BLANK_AUDIO]\n  hello there  \n(inaudible)\nhow are you\n";
+        assert_eq!(clean_transcript(raw), "hello there how are you");
+    }
+
+    /// A model the engine cannot load is worse than no model at all, so the
+    /// catalog must only contain sane, distinct entries.
+    #[test]
+    fn model_catalog_is_real() {
+        assert!(!MODELS.is_empty());
+        let mut files: Vec<&str> = Vec::new();
+        for spec in MODELS {
+            assert!(spec.file.ends_with(".bin"), "{} is not a ggml file", spec.name);
+            assert!(
+                spec.url.ends_with(spec.file),
+                "{} is downloaded from a different file",
+                spec.name
+            );
+            assert!(spec.min_bytes > 0, "{} has no size check", spec.name);
+            assert!(!spec.size.is_empty(), "{} has no size label", spec.name);
+            assert!(!files.contains(&spec.file), "{} is listed twice", spec.name);
+            files.push(spec.file);
+        }
+        // The default model is the fastest one and it must exist.
+        assert!(MODELS.get(DEFAULT_MODEL).is_some());
+        assert_eq!(model(999).file, MODELS[DEFAULT_MODEL].file);
+    }
+}

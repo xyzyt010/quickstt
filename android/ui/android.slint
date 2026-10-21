@@ -513,10 +513,15 @@ export component AppWindow inherits Window {
                 if root.tab == 0 : ScrollView {
                     VerticalLayout {
                         width: 100%;
+                        alignment: start;
                         padding-left: 16px;
                         padding-right: 16px;
                         padding-top: 4px;
                         padding-bottom: 20px;
+                        // A layout without a stretched child shares the leftover
+                        // space equally, which would stretch the cards. This
+                        // sponge takes it instead.
+                        Rectangle { vertical-stretch: 1; }
                         spacing: 14px;
 
                         // Status card: what the app is doing right now.
@@ -826,10 +831,15 @@ export component AppWindow inherits Window {
                 if root.tab == 1 : ScrollView {
                     VerticalLayout {
                         width: 100%;
+                        alignment: start;
                         padding-left: 16px;
                         padding-right: 16px;
                         padding-top: 4px;
                         padding-bottom: 20px;
+                        // A layout without a stretched child shares the leftover
+                        // space equally, which would stretch the cards. This
+                        // sponge takes it instead.
+                        Rectangle { vertical-stretch: 1; }
                         spacing: 12px;
 
                         Text {
@@ -884,10 +894,15 @@ export component AppWindow inherits Window {
                 if root.tab == 2 : ScrollView {
                     VerticalLayout {
                         width: 100%;
+                        alignment: start;
                         padding-left: 16px;
                         padding-right: 16px;
                         padding-top: 4px;
                         padding-bottom: 20px;
+                        // A layout without a stretched child shares the leftover
+                        // space equally, which would stretch the cards. This
+                        // sponge takes it instead.
+                        Rectangle { vertical-stretch: 1; }
                         spacing: 12px;
 
                         Text {
@@ -996,10 +1011,15 @@ export component AppWindow inherits Window {
                 if root.tab == 3 : ScrollView {
                     VerticalLayout {
                         width: 100%;
+                        alignment: start;
                         padding-left: 16px;
                         padding-right: 16px;
                         padding-top: 4px;
                         padding-bottom: 20px;
+                        // A layout without a stretched child shares the leftover
+                        // space equally, which would stretch the cards. This
+                        // sponge takes it instead.
+                        Rectangle { vertical-stretch: 1; }
                         spacing: 12px;
 
                         Text {
@@ -1246,4 +1266,6 @@ export component AppWindow inherits Window {
         }
     }
 }
+
+
 

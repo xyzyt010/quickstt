@@ -731,6 +731,24 @@ pub fn run() {
     ui.run().expect("Slint event loop failed");
 }
 
+/// Is this take silent?
+///
+/// The thresholds are the desktop app's proven ones (`wav_is_silent`),
+/// converted to the f32 scale: a peak floor of 600/32768, an rms floor of
+/// 50/32768 and a minimum length of 0.25 s. Whisper hallucinates short
+/// words ("you", "yeah") on noise-only audio, so a silent take must never
+/// reach the engine.
+fn is_silent(samples: &[f32]) -> bool {
+    if samples.is_empty() {
+        return true;
+    }
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    let sum: f32 = samples.iter().map(|s| s * s).sum();
+    let rms = (sum / samples.len() as f32).sqrt();
+    let secs = samples.len() as f32 / audio::SAMPLE_RATE as f32;
+    secs < 0.25 || peak < 600.0 / 32768.0 || rms < 50.0 / 32768.0
+}
+
 /// Transcribe the recorded audio (worker thread) and hand the result to the
 /// UI thread.
 ///
@@ -769,14 +787,8 @@ fn transcribe(
         return;
     }
     // Silence gate: never hand a silent take to whisper — it hallucinates
-    // short words ("you", "yeah") on noise-only audio. The thresholds are
-    // the desktop's proven ones (wav_is_silent), converted to the f32
-    // scale: peak floor 600/32768, rms floor 50/32768, 0.25 s minimum.
-    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-    let sum: f32 = samples.iter().map(|s| s * s).sum();
-    let rms = (sum / samples.len().max(1) as f32).sqrt();
-    let secs = samples.len() as f32 / audio::SAMPLE_RATE as f32;
-    if secs < 0.25 || peak < 600.0 / 32768.0 || rms < 50.0 / 32768.0 {
+    // short words ("you", "yeah") on noise-only audio.
+    if is_silent(&samples) {
         fail("No speech detected".into());
         return;
     }
@@ -809,3 +821,31 @@ fn transcribe(
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Silence must be caught before the engine sees it — whisper answers
+    /// "you" or "yeah" to noise, which is worse than no answer.
+    #[test]
+    fn silence_gate_rejects_noise_only_audio() {
+        assert!(is_silent(&[]));
+        // A very short take is not worth transcribing.
+        assert!(is_silent(&vec![0.2; 100]));
+        // Steady noise far below the speech floor.
+        let noise: Vec<f32> = (0..16_000)
+            .map(|i| ((i as f32) * 0.01).sin() * 0.001)
+            .collect();
+        assert!(is_silent(&noise));
+    }
+
+    /// Real speech passes the gate.
+    #[test]
+    fn silence_gate_lets_speech_through() {
+        let speech: Vec<f32> = (0..16_000)
+            .map(|i| ((i as f32) * 0.05).sin() * 0.2)
+            .collect();
+        assert!(!is_silent(&speech));
+    }
+}

@@ -220,6 +220,11 @@ the wrong place, cards hanging off the screen):
 - A layout's `alignment` is the **main axis**: for a `HorizontalLayout` that
   is horizontal, so `alignment: center` centres the row. Use
   `cross-axis-alignment: center` to centre the items vertically.
+- A layout whose children all have `vertical-stretch: 0` **shares the leftover
+  space equally between them** — a short page would blow its cards up to
+  full height. Every scrolling page therefore ends with a
+  `Rectangle { vertical-stretch: 1; }` sponge, and the page itself uses
+  `alignment: start` so the content starts at the top.
 - Long texts wrap or elide — a long text must never widen the layout.
 
 

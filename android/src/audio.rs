@@ -204,3 +204,52 @@ pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> std::io::Res
     }
     std::fs::write(path, bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The WAV has to be exactly what whisper.cpp expects: 16 kHz, mono,
+    /// 16-bit PCM. A wrong header makes the engine fail on every take.
+    #[test]
+    fn wav_header_is_16k_mono_pcm16() {
+        let samples: Vec<f32> = (0..1600)
+            .map(|i| ((i as f32) / 1600.0).sin() * 0.5)
+            .collect();
+        let path = std::env::temp_dir().join("quickstt-test.wav");
+        write_wav(&path, &samples, 16_000).expect("the wav must be writable");
+        let bytes = std::fs::read(&path).expect("the wav must exist");
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(&bytes[12..16], b"fmt ");
+        assert_eq!(&bytes[20..22], &1u16.to_le_bytes(), "format = PCM");
+        assert_eq!(&bytes[22..24], &1u16.to_le_bytes(), "channels = mono");
+        assert_eq!(
+            &bytes[24..28],
+            &16_000u32.to_le_bytes(),
+            "sample rate = 16 kHz"
+        );
+        assert_eq!(&bytes[34..36], &16u16.to_le_bytes(), "bits per sample");
+        assert_eq!(&bytes[36..40], b"data");
+        assert_eq!(
+            &bytes[40..44],
+            &((samples.len() * 2) as u32).to_le_bytes(),
+            "data length"
+        );
+        assert_eq!(bytes.len(), 44 + samples.len() * 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Samples outside [-1, 1] must not wrap around into the opposite sign.
+    #[test]
+    fn wav_clamps_out_of_range_samples() {
+        let path = std::env::temp_dir().join("quickstt-test-clamp.wav");
+        write_wav(&path, &[2.0, -2.0, 0.0], 16_000).expect("the wav must be writable");
+        let bytes = std::fs::read(&path).expect("the wav must exist");
+        let first = i16::from_le_bytes([bytes[44], bytes[45]]);
+        let second = i16::from_le_bytes([bytes[46], bytes[47]]);
+        assert_eq!(first, 32767);
+        assert_eq!(second, -32767);
+        let _ = std::fs::remove_file(&path);
+    }
+}
