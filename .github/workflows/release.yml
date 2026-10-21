@@ -213,11 +213,16 @@ jobs:
         run: cargo build -p quickstt-slint --release
       - name: CMake Configure
         shell: pwsh
+        # `dir <wildcard>` throws when nothing matches, and the runner runs
+        # pwsh with $ErrorActionPreference = 'stop' — that alone failed the
+        # step (and with it the whole Windows job).
         run: |
           cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release || echo "Qt not available, skipping"
           cmake --build build --target QuickSTT_App -j 4 || echo "Qt build skipped"
           cmake --build build --target stt_service_native -j 4 || echo "stt_service build skipped"
-          dir build\*.exe 2>$null; dir QuickSTT_App\*.exe 2>$null
+          Get-ChildItem build\*.exe -ErrorAction SilentlyContinue | Select-Object Name,Length
+          Get-ChildItem QuickSTT_App\*.exe -ErrorAction SilentlyContinue | Select-Object Name,Length
+          exit 0
       - name: Build Portable
         shell: pwsh
         if: always()
