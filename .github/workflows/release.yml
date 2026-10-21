@@ -261,14 +261,42 @@ jobs:
         # The bubble helper is compiled against android.jar and the dex is
         # built with d8, so both have to be in the SDK. The runner image
         # usually ships them already; this only adds them when it does not.
+        #
+        # The SDK root is detected here and exported through GITHUB_ENV:
+        # cargo-apk reads ANDROID_HOME and fails with
+        #   Error: Path `"build-tools"` doesn't exist.
+        # when it is empty. (The setup-ndk action has no `android-sdk`
+        # output, so it must not be used for this.)
         run: |
+          set -euo pipefail
+          SDK=""
+          for c in "${ANDROID_SDK_ROOT:-}" "${ANDROID_HOME:-}" \
+                   /usr/local/lib/android/sdk "$HOME/Android/Sdk" /opt/android-sdk; do
+            if [ -n "$c" ] && [ -d "$c/build-tools" ] && [ -d "$c/platforms" ]; then SDK="$c"; break; fi
+          done
+          if [ -z "$SDK" ]; then
+            for c in "${ANDROID_SDK_ROOT:-}" "${ANDROID_HOME:-}" \
+                     /usr/local/lib/android/sdk "$HOME/Android/Sdk" /opt/android-sdk; do
+              if [ -n "$c" ] && [ -d "$c" ]; then SDK="$c"; break; fi
+            done
+          fi
+          echo "sdk: ${SDK:-NOT FOUND}"
           SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ] && [ -n "$SDK" ]; then
+            for c in "$SDK"/cmdline-tools/*/bin/sdkmanager "$SDK"/tools/bin/sdkmanager; do
+              if [ -x "$c" ]; then SDKMANAGER="$c"; break; fi
+            done
+          fi
           echo "sdkmanager: ${SDKMANAGER:-not found}"
           if [ -n "$SDKMANAGER" ]; then
-            yes | "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" || true
+            yes | "$SDKMANAGER" --sdk_root="$SDK" "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || true
           fi
-          ls -d "${{ steps.ndk.outputs.android-sdk }}/platforms"/* 2>/dev/null || true
-          ls -d "${{ steps.ndk.outputs.android-sdk }}/build-tools"/* 2>/dev/null || true
+          ls -d "$SDK"/platforms/* 2>/dev/null || true
+          ls -d "$SDK"/build-tools/* 2>/dev/null || true
+          {
+            echo "ANDROID_HOME=$SDK"
+            echo "ANDROID_SDK_ROOT=$SDK"
+          } >> "$GITHUB_ENV"
       - name: Restore the release keystore
         # The keystore is not in the repo (see android/README.md). It comes
         # from the ANDROID_KEYSTORE_BASE64 secret so the published APK is
@@ -290,28 +318,43 @@ jobs:
       - name: Build the APK
         working-directory: android
         env:
-          ANDROID_HOME: ${{ steps.ndk.outputs.android-sdk }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-          ANDROID_SDK_ROOT: ${{ steps.ndk.outputs.android-sdk }}
           RUST_BACKTRACE: full
         run: |
           set -euo pipefail
-          echo "cargo-apk: $(cargo apk --version 2>&1 || true)"
           echo "cargo: $(cargo --version)"
           echo "rustc: $(rustc --version)"
-          echo "sdk: $ANDROID_HOME"
-          echo "ndk: $ANDROID_NDK_ROOT"
-          echo "platforms: $(ls $ANDROID_HOME/platforms 2>/dev/null || echo NONE)"
-          echo "build-tools: $(ls $ANDROID_HOME/build-tools 2>/dev/null || echo NONE)"
-          cargo check --release --target aarch64-linux-android 2>&1 | tail -40
+          echo "sdk: ${ANDROID_HOME:-NOT SET}"
+          echo "ndk: ${ANDROID_NDK_ROOT:-NOT SET}"
+          # The C shim (AAudio) is compiled by the `cc` crate, which only
+          # looks for the compiler on PATH — the NDK's clang is not there by
+          # default and the build dies with
+          #   failed to find tool "aarch64-linux-android-clang".
+          # So the NDK toolchain is put on PATH and handed to the cc crate
+          # directly.
+          NDK_BIN=""
+          for host in linux-x86_64 darwin-x86_64; do
+            d="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$host/bin"
+            if [ -d "$d" ]; then NDK_BIN="$d"; break; fi
+          done
+          if [ -z "$NDK_BIN" ]; then
+            NDK_BIN="$(dirname "$(find "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt" -name 'aarch64-linux-android*-clang' -type f | head -1)")"
+          fi
+          echo "ndk bin: $NDK_BIN"
+          export PATH="$NDK_BIN:$PATH"
+          CLANG="$(ls "$NDK_BIN"/aarch64-linux-android26-clang 2>/dev/null || true)"
+          if [ -z "$CLANG" ]; then
+            CLANG="$(ls "$NDK_BIN"/aarch64-linux-android*-clang 2>/dev/null | sort -V | tail -1)"
+          fi
+          export CC_aarch64_linux_android="$CLANG"
+          export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+          echo "cc: $CC_aarch64_linux_android"
           cargo apk build --release --target aarch64-linux-android --lib
       - name: Add the bubble helper and sign the APK
         # cargo-apk cannot put a dex into an APK, so the floating bubble's
         # Java class is compiled here and the APK is finished by hand:
         # classes.dex + the speech engines -> zipalign -> apksigner.
         working-directory: android
-        env:
-          ANDROID_HOME: ${{ steps.ndk.outputs.android-sdk }}
         run: |
           set -euo pipefail
           BUILD_TOOLS="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)"

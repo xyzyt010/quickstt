@@ -53,9 +53,22 @@ if (-not (Test-Path "$work\dex\classes.dex")) { throw "d8 produced no classes.de
 
 Write-Host "==> building the Rust library"
 $env:ANDROID_HOME = $sdk
+$env:ANDROID_SDK_ROOT = $sdk
 if (-not $env:ANDROID_NDK_ROOT) {
     $ndk = (Get-ChildItem "$sdk\ndk" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
     $env:ANDROID_NDK_ROOT = $ndk
+}
+# The `cc` crate compiles the AAudio shim and only finds the compiler on PATH
+# ("aarch64-linux-android21-clang"); the NDK is not there by default.
+$ndkHost = if ($IsWindows) { "windows-x86_64" } else { "linux-x86_64" }
+$ndkBin = Join-Path $env:ANDROID_NDK_ROOT "toolchains\llvm\prebuilt\$ndkHost\bin"
+if (Test-Path $ndkBin) {
+    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $ndkBin })) {
+        $env:PATH = "$ndkBin;$env:PATH"
+    }
+    Write-Host "    ndk toolchain: $ndkBin"
+} else {
+    Write-Host "    WARNING: no NDK toolchain at $ndkBin"
 }
 if ($Debug) {
     cargo apk build --target aarch64-linux-android --lib
