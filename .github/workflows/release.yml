@@ -413,7 +413,12 @@ jobs:
           wget -O /tmp/quickstt.apk https://github.com/${{ github.repository }}/releases/download/${VER}/quickstt-android-release.apk
           adb install -r /tmp/quickstt.apk
           \`\`\`
-          The touch app dictates for real: the microphone is captured with the NDK AAudio API, whisper.cpp (arm64-v8a, shipped inside the APK) transcribes on-device, the text is copied to the clipboard and a floating bubble shows the mic state above other apps. The Listen tab walks through the three setup steps (microphone permission → model download → overlay permission) and has a **Test mic** button. The 32 MB model is downloaded in-app, never bundled.
+          The touch app dictates for real: the microphone is captured with the NDK AAudio API, **three engines** (whisper.cpp, the Cactus \`needle\` and transcribe.cpp — all cross-compiled for arm64-v8a and shipped inside the APK) transcribe on-device, the text is copied to the clipboard and typed into the app in front with real key events, and a floating bubble with **REC** / **TYPE** buttons follows you across apps.
+
+          * **The download works.** The manifest declares \`INTERNET\`, the download runs off the UI thread and every model row shows a progress bar.
+          * **Eight real models**, all of them the same files the desktop app uses: Whisper Tiny EN, Cactus Whistle 16M, Moonshine Base EN, SenseVoice Small, Canary 180M Flash, Parakeet Unified EN 0.6B, **Nemotron 3.5 ASR Streaming 0.6B** and Qwen3-ASR 0.6B. Nothing is bundled: a model is downloaded once and then works offline.
+          * **The bubble is a control, not a read-out** — REC records, TYPE types the last transcript into the app in front, and it can be dragged anywhere. It needs the "display over other apps" permission (the app opens that settings page for you).
+          * The Listen tab walks through the three setup steps (microphone permission → model download → overlay permission) and has a **Test mic** button.
           NOTES
           cat /tmp/notes.md
       - name: Create Release
