@@ -75,8 +75,29 @@ delivers the announced size.
 ## The floating bubble
 
 The bubble is a `WindowManager` overlay (`TYPE_APPLICATION_OVERLAY`), so it
-floats above **every** app once the user grants "Display over other apps"
-(the Settings tab has a button that opens exactly that system page).
+floats above **every** app once the user grants "Display over other apps".
+
+### The permission
+
+The **Enable** button opens the system page for QuickSTT itself
+(`Settings.ACTION_MANAGE_OVERLAY_PERMISSION` with a `package:` URI). The
+Java helper (`java/ai/quickstt/app/Overlay.java`) falls back to the list of
+all apps and then to the app-info page, because several phone makers do not
+implement that action the same way — and it returns the reason when no page
+could be opened, so the app never pretends that a button worked.
+
+The permission is granted *in another app*, so the app has to notice it
+coming back:
+
+* the Java helper registers an `ActivityLifecycleCallbacks` and tells Rust
+  when the activity is resumed,
+* and the permission is polled once a second as a fallback.
+
+The moment the permission appears, the bubble is shown — without the user
+having to press the button a second time. The button itself shows the state
+of the bubble (**Enable** / **Disable**), not the state of the permission.
+
+### The bubble itself
 
 It is built by a small Java helper (`java/ai/quickstt/app/Bubble.java`),
 because a `View.OnClickListener` cannot be created from JNI. The helper:
@@ -84,9 +105,16 @@ because a `View.OnClickListener` cannot be created from JNI. The helper:
 * draws a compact card with the mic state and the last transcript,
 * has three buttons — **REC** (start/stop a recording), **TYPE** (type the
   last transcript into the app in front) and **X** (hide it),
-* can be **dragged** anywhere on the screen,
+* can be **dragged** anywhere on the screen (by its text — a touch listener
+  on the row would swallow the taps before they reach the buttons),
+* uses the *application* context, so it survives the activity that made it,
 * reports every failure back to Rust, so the app can say what went wrong
   instead of showing a bubble that is not there.
+
+The helper is looked up through the **Activity's class loader**, not with
+`FindClass`: on a thread that was attached with `AttachCurrentThread`,
+`FindClass` uses the *system* class loader and the app's own classes are
+invisible to it.
 
 The class is compiled with `javac`, turned into a `classes.dex` with `d8` and
 added to the APK by `build-apk.ps1` (cargo-apk cannot put a dex into an APK).
@@ -96,6 +124,28 @@ missing, the app falls back to a plain read-out bubble — it never breaks.
 The bubble is *persistent*: the Settings tab has a switch that keeps it on
 across apps and across launches. It is also shown automatically while a
 recording runs and when the transcript arrives.
+
+## Testing it on the phone
+
+The app has to be able to prove that it works, otherwise "it looks fine" is
+the only thing that can be said about it.
+
+* **Models → Test this model** records four seconds, runs them through the
+  selected engine and shows the transcript, the engine binary, the model
+  file and the time the engine needed. When it fails, the reason is shown.
+* **Settings → Run the self-test** reports the microphone and overlay
+  permissions, all three engines and the model files with their paths.
+  **Copy** puts the report on the clipboard.
+
+Both write to logcat as well (`adb logcat | grep QuickSTT`).
+
+The engines have to be *runnable* for any of this to work: they live in the
+APK's `lib/arm64-v8a/` directory and the installer unpacks them into the
+app's native library directory — the only place where Android lets an app
+run a program. That needs `android:extractNativeLibs="true"` in the
+manifest (it is false by default for apps that target API 23 or newer, and
+then the engines stay inside the APK and can never be started). When the
+installer did not unpack them, `Engine.java` unpacks one itself.
 
 ## Typing into other apps
 

@@ -246,7 +246,23 @@ carry the Java helper for the floating bubble and the speech engines in its
 `lib/arm64-v8a/` directory — cargo-apk can do neither.
 
 The Listen tab walks through the three setup steps (microphone permission →
-model download → overlay permission).
+model download → overlay permission). The **Enable** button for the floating
+bubble opens QuickSTT's own page in the system settings; come back and the
+bubble appears by itself.
+
+### Checking that it works — on the phone
+
+The app can prove itself, because "it looks fine" is not the same as "it
+works":
+
+* **Models → Test this model** records four seconds, runs them through the
+  selected engine and shows the transcript, the engine binary, the model
+  file and the time the engine needed. A failure says *why*.
+* **Settings → Run the self-test** reports the microphone and overlay
+  permissions, all three engines and the downloaded model files with their
+  paths. **Copy** puts the report on the clipboard.
+
+Both write to logcat as well (`adb logcat | grep QuickSTT`).
 
 Preview the exact same scene on Windows/Linux without a device:
 
