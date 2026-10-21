@@ -5,10 +5,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/quickstt/quickstt/actions/workflows/ci.yml"><img src="https://github.com/quickstt/quickstt/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
-  <a href="https://github.com/quickstt/quickstt/releases"><img src="https://img.shields.io/github/v/release/quickstt/quickstt?label=release&color=blue" alt="Release"/></a>
+  <a href="https://github.com/xyzyt010/quickstt/actions/workflows/ci.yml"><img src="https://github.com/xyzyt010/quickstt/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
+  <a href="https://github.com/xyzyt010/quickstt/releases"><img src="https://img.shields.io/github/v/release/xyzyt010/quickstt?label=release&color=blue" alt="Release"/></a>
+  <a href="https://github.com/xyzyt010/quickstt/releases/latest"><img src="https://img.shields.io/badge/download-APK%20%2B%20Linux%20%2B%20Windows-blue" alt="Download"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT"/></a>
-  <a href="#platform-support"><img src="https://img.shields.io/badge/platform-Windows%20%7C%20Ubuntu%2022.04%2B%20%7C%20Debian%2012%20%7C%20Linux%20Mint%2021%2B-lightgrey" alt="Platform"/></a>
+  <a href="#downloads"><img src="https://img.shields.io/badge/platform-Windows%20%7C%20Ubuntu%2022.04%2B%20%7C%20Debian%2012%20%7C%20Linux%20Mint%2021%2B%20%7C%20Android-lightgrey" alt="Platform"/></a>
   <img src="https://img.shields.io/badge/memory-%3C5MB%20idle-9cf" alt="Memory"/>
   <img src="https://img.shields.io/badge/offline-100%25%20local-success" alt="Offline"/>
 </p>
@@ -19,12 +20,40 @@ QuickSTT is a **native** Linux + Windows app with two complementary stacks: a le
 
 ---
 
+## Downloads
+
+Everything is published on the [GitHub release page](https://github.com/xyzyt010/quickstt/releases/latest) — the APK, the Linux tarball, the Debian package and the checksums.
+
+| What | Platform | Link |
+|---|---|---|
+| **`quickstt-android-release.apk`** (11.2 MB) | Android 8.0+ (arm64-v8a) | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt-android-release.apk) |
+| `quickstt-v2.0.0-alpha.18-x86_64.tar.gz` (29 MB) | Ubuntu 22.04+ / Debian 12 / Mint 21+ | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt-v2.0.0-alpha.18-x86_64.tar.gz) |
+| `quickstt_2.0.0.alpha.18-1_amd64.deb` (20 MB) | Debian / Ubuntu / Mint | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt_2.0.0.alpha.18-1_amd64.deb) |
+| `SHA256SUMS` | — | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/SHA256SUMS) |
+
+Install the phone app:
+
+```bash
+wget -O quickstt.apk https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt-android-release.apk
+adb install -r quickstt.apk
+```
+
+The APK is signed with the release key, so it installs over the earlier
+builds. The models are **not** in the APK: the app downloads the one you
+pick (Whisper Tiny EN, Cactus Whistle, Moonshine, SenseVoice, Canary,
+Parakeet, Nemotron 3.5 ASR Streaming 0.6B, Qwen3-ASR) and then works
+offline.
+
+---
+
 ## Table of Contents
 
 - [Features](#features)
+- [Downloads](#downloads) ← **the APK, the tarball, the .deb**
 - [Quick Start — Linux Mint](#quick-start--linux-mint) ← **exact copy-paste command**
 - [Quick Start — Ubuntu / Debian](#quick-start--ubuntu--debian)
 - [Quick Start — Windows](#quick-start--windows)
+- [Quick Start — Android](#quick-start--android)
 - [Screenshots](#screenshots)
 - [Architecture](#architecture)
 - [Models](#models)
@@ -189,22 +218,35 @@ cargo build -p quickstt-gui --release
 The Android build is a **new** touch-first GUI — bottom navigation, a
 thumb-reachable record orb, 48 DIP minimum targets — not a scaled-down copy of
 the desktop window. It dictates for real: the microphone is captured through
-the NDK AAudio API, whisper.cpp (cross-compiled for arm64-v8a, shipped inside
-the APK) transcribes on-device, the text is copied to the clipboard, and a
-floating bubble above other apps shows the mic state and the last transcript.
-The Listen tab walks through the three setup steps (microphone permission →
-model download → overlay permission).
+the NDK AAudio API, three engines (whisper.cpp, the Cactus `needle` and
+transcribe.cpp — all cross-compiled for arm64-v8a and shipped inside the APK)
+transcribe on-device, the text is copied to the clipboard, typed into the app
+in front with real key events, and a floating bubble with REC / TYPE buttons
+follows you across apps.
+
+The fastest way to get it is the release APK (11.2 MB, signed):
+
+```bash
+wget -O quickstt.apk https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt-android-release.apk
+adb install -r quickstt.apk
+```
+
+Build it yourself:
 
 ```powershell
 $env:ANDROID_HOME     = "$env:LOCALAPPDATA\Android\Sdk"
 $env:ANDROID_NDK_ROOT = "$env:LOCALAPPDATA\Android\Sdk\ndk\27.3.13750724"
 cd android
-cargo apk build --release --target aarch64-linux-android --lib
+.\build-apk.ps1          # javac + d8 + cargo apk + dex + engines + sign
 adb install -r target\release\apk\quickstt-android.apk
 ```
 
-Prebuilt APKs: `dist/quickstt-android-release.apk` (3.4 MB, signed) and
-`dist/quickstt-android-debug.apk`.
+`build-apk.ps1` is needed (not plain `cargo apk build`) because the APK has to
+carry the Java helper for the floating bubble and the speech engines in its
+`lib/arm64-v8a/` directory — cargo-apk can do neither.
+
+The Listen tab walks through the three setup steps (microphone permission →
+model download → overlay permission).
 
 Preview the exact same scene on Windows/Linux without a device:
 
@@ -273,6 +315,23 @@ See `docs/ARCHITECTURE.md` for the full constraints.
 The pill dropdown shows `●` installed / `○` not installed + size (`catalog::display_name`). Download via Dashboard `Models` or manually place as above. Nemotron GGUF is fetched via `tools/nemotron/fetch_and_convert.py` (Handy-compatible).
 
 More at `docs/MODELS.md`.
+
+### The phone build
+
+The Android app ships **three** engines and lists the models they can really
+run — the same model files as the desktop build, so one download serves
+both:
+
+| Model | Engine (in the APK) | Size |
+|---|---|---|
+| Whisper Tiny EN | `libwhisper-cli.so` (whisper.cpp) | 32 MB |
+| Cactus Whistle 16M | `libneedle.so` (Cactus Compute) | 16.9 MB |
+| Moonshine Base EN | `libtranscribe-cli.so` (transcribe.cpp) | 74 MB |
+| SenseVoice Small | `libtranscribe-cli.so` | 139 MB |
+| Canary 180M Flash | `libtranscribe-cli.so` | 151 MB |
+| Parakeet Unified EN 0.6B | `libtranscribe-cli.so` | 455 MB |
+| **Nemotron 3.5 ASR Streaming 0.6B** | `libtranscribe-cli.so` | 473 MB |
+| Qwen3-ASR 0.6B | `libtranscribe-cli.so` | 562 MB |
 
 ---
 
