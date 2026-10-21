@@ -253,7 +253,10 @@ jobs:
         with:
           ndk-version: r27c
       - name: Install cargo-apk
-        run: cargo install cargo-apk --locked
+        # Pinned: the APK metadata (the dex, the signing block) is tied to
+        # this version, and a newer cargo-apk can change the manifest it
+        # generates.
+        run: cargo install cargo-apk --locked --version 0.10.0
       - name: Install the Android platform and build tools
         # The bubble helper is compiled against android.jar and the dex is
         # built with d8, so both have to be in the SDK. The runner image
@@ -290,7 +293,18 @@ jobs:
           ANDROID_HOME: ${{ steps.ndk.outputs.android-sdk }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_SDK_ROOT: ${{ steps.ndk.outputs.android-sdk }}
-        run: cargo apk build --release --target aarch64-linux-android --lib
+          RUST_BACKTRACE: full
+        run: |
+          set -euo pipefail
+          echo "cargo-apk: $(cargo apk --version 2>&1 || true)"
+          echo "cargo: $(cargo --version)"
+          echo "rustc: $(rustc --version)"
+          echo "sdk: $ANDROID_HOME"
+          echo "ndk: $ANDROID_NDK_ROOT"
+          echo "platforms: $(ls $ANDROID_HOME/platforms 2>/dev/null || echo NONE)"
+          echo "build-tools: $(ls $ANDROID_HOME/build-tools 2>/dev/null || echo NONE)"
+          cargo check --release --target aarch64-linux-android 2>&1 | tail -40
+          cargo apk build --release --target aarch64-linux-android --lib
       - name: Add the bubble helper and sign the APK
         # cargo-apk cannot put a dex into an APK, so the floating bubble's
         # Java class is compiled here and the APK is finished by hand:
