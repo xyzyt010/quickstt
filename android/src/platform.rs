@@ -245,6 +245,67 @@ static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
 #[cfg(target_os = "android")]
 static OVERLAY: Mutex<Option<OverlayHandle>> = Mutex::new(None);
 
+/// The last problem with the floating bubble.
+///
+/// The overlay is built on the Java UI thread, so the caller cannot get the
+/// result directly; the error is parked here and the UI picks it up.
+#[cfg(target_os = "android")]
+static OVERLAY_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// Remember (and log) why the bubble could not be shown.
+#[cfg(target_os = "android")]
+fn set_overlay_error(message: &str) {
+    log(message);
+    if let Ok(mut slot) = OVERLAY_ERROR.lock() {
+        *slot = Some(message.to_string());
+    }
+}
+
+/// Take the last bubble error (the UI shows it to the user).
+pub fn take_overlay_error() -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        OVERLAY_ERROR.lock().ok().and_then(|mut slot| slot.take())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        None
+    }
+}
+
+/// Remember whether the floating bubble should be on.
+pub fn save_overlay_enabled(enabled: bool) {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(dir) = files_dir() {
+            let dir = dir.join("quickstt");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(
+                dir.join("bubble"),
+                if enabled { "1" } else { "0" },
+            );
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = enabled;
+    }
+}
+
+/// Should the floating bubble be on?
+pub fn overlay_enabled() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        files_dir()
+            .map(|dir| dir.join("quickstt").join("bubble"))
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    false
+}
+
 /// Print to logcat (stdout/stderr are forwarded to logcat by android-activity).
 #[cfg(target_os = "android")]
 pub fn log(message: &str) {
@@ -326,6 +387,30 @@ pub fn files_dir() -> Option<PathBuf> {
                 .ok()?;
             let s: String = env.get_string(&JString::from(path)).ok()?.into();
             Some(PathBuf::from(s))
+        })
+    }
+    #[cfg(not(target_os = "android"))]
+    None
+}
+
+/// The app's native library directory.
+///
+/// This is where an executable has to live: since Android 10 the app's home
+/// directory is mounted **noexec** for apps that target API 29 or newer, so
+/// a binary unpacked into the files directory cannot be started
+/// ("Permission denied"). The native library directory belongs to the app,
+/// is writable by it and is exec-mounted.
+pub fn native_lib_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let dir = env
+                .call_method(activity, "getNativeLibraryDir", "()Ljava/lang/String;", &[])
+                .ok()?
+                .l()
+                .ok()?;
+            let path: String = env.get_string(&JString::from(dir)).ok()?.into();
+            Some(PathBuf::from(path))
         })
     }
     #[cfg(not(target_os = "android"))]
@@ -522,133 +607,157 @@ pub fn open_overlay_settings() {
     }
 }
 
+/// Call a static method of the Java bubble helper.
+///
+/// The helper lives in `java/ai/quickstt/app/Bubble.java` and is compiled
+/// into a dex that is added to the APK. Without it the app falls back to a
+/// plain read-out bubble.
+///
+/// `Ok(Ok(()))` means the helper did the job, `Ok(Err(message))` means it
+/// refused (the message says why) and `None` means the helper is not there.
+#[cfg(target_os = "android")]
+fn call_bubble_helper(
+    env: &mut jni::JNIEnv<'_>,
+    activity: &JObject,
+    method: &str,
+    state: &str,
+    transcript: &str,
+) -> Option<Result<(), String>> {
+    let cls = env.find_class("ai/quickstt/app/Bubble").ok()?;
+    let state_text = env.new_string(state).ok()?;
+    let body = env.new_string(transcript).ok()?;
+    let result = env
+        .call_static_method(
+            cls,
+            method,
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+            &[
+                JValue::from(activity),
+                JValue::from(&state_text),
+                JValue::from(&body),
+            ],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+    let message: String = env.get_string(&JString::from(result)).ok()?.into();
+    if message.is_empty() {
+        Some(Ok(()))
+    } else {
+        Some(Err(message))
+    }
+}
+
+/// The fallback bubble: a TextView on a rounded translucent background.
+#[cfg(target_os = "android")]
+fn create_plain_bubble<'local>(
+    env: &mut jni::JNIEnv<'local>,
+    activity: &JObject,
+    state: &str,
+    transcript: &str,
+) -> Option<JObject<'local>> {
+    let body = if transcript.trim().is_empty() {
+        state.to_string()
+    } else {
+        format!("{state}\n{}", transcript.trim())
+    };
+    let tv_cls = env.find_class("android/widget/TextView").ok()?;
+    let view = env
+        .new_object(
+            tv_cls,
+            "(Landroid/content/Context;)V",
+            &[JValue::from(activity)],
+        )
+        .ok()?;
+    let text = env.new_string(&body).ok()?;
+    env.call_method(
+        &view,
+        "setText",
+        "(Ljava/lang/CharSequence;)V",
+        &[JValue::from(&text)],
+    )
+    .ok()?;
+    env.call_method(&view, "setTextColor", "(I)V", &[JValue::from(0xF0F6FCi32)])
+        .ok()?;
+    env.call_method(&view, "setTextSize", "(F)V", &[JValue::from(13.0f32)])
+        .ok()?;
+    env.call_method(
+        &view,
+        "setPadding",
+        "(IIII)V",
+        &[
+            JValue::from(36i32),
+            JValue::from(24i32),
+            JValue::from(36i32),
+            JValue::from(24i32),
+        ],
+    )
+    .ok()?;
+    let gd_cls = env.find_class("android/graphics/drawable/GradientDrawable").ok()?;
+    let bg = env.new_object(gd_cls, "()V", &[]).ok()?;
+    env.call_method(&bg, "setColor", "(I)V", &[JValue::from(0xE6121418u32 as i32)])
+        .ok()?;
+    env.call_method(&bg, "setCornerRadius", "(F)V", &[JValue::from(48.0f32)])
+        .ok()?;
+    env.call_method(
+        &view,
+        "setBackground",
+        "(Landroid/graphics/drawable/Drawable;)V",
+        &[JValue::from(&bg)],
+    )
+    .ok()?;
+    Some(view)
+}
+
+/// Take the current bubble off the screen.
+#[cfg(target_os = "android")]
+fn remove_overlay_view(env: &mut jni::JNIEnv<'_>, activity: &JObject) {
+    let handle = OVERLAY.lock().ok().and_then(|mut g| g.take());
+    let Some(handle) = handle else { return };
+    let view = handle.view.as_obj();
+    if let Some(wm) = window_manager(env, activity) {
+        let _ = env.call_method(
+            &wm,
+            "removeView",
+            "(Landroid/view/View;)V",
+            &[JValue::from(view)],
+        );
+    }
+}
+
 /// Show (or update) the floating bubble above other apps.
-pub fn show_overlay(state: &str, transcript: &str) -> bool {
+///
+/// The bubble is built by the Java helper (`ai.quickstt.app.Bubble`) so it
+/// can have buttons and be dragged around. When the helper is not available
+/// the app falls back to a plain read-out bubble, so the overlay always
+/// works.
+///
+/// The work happens on the Java UI thread (Android requires that for
+/// window-manager calls), so a failure is reported through
+/// `take_overlay_error()` instead of the return value.
+pub fn show_overlay(state: &str, transcript: &str) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        let body = if transcript.trim().is_empty() {
-            state.to_string()
-        } else {
-            format!("{state}\n{}", transcript.trim())
-        };
-        // WindowManager calls must happen on the UI thread.
+        if !can_draw_overlays() {
+            let message =
+                "the “display over other apps” permission is missing — the bubble cannot be shown".to_string();
+            set_overlay_error(&message);
+            return Err(message);
+        }
+        let state = state.to_string();
+        let transcript = transcript.trim().to_string();
         on_java_thread(move || {
             let _ = with_activity(|env, activity| {
-                // Reuse the existing view when we already have one.
-                let existing = OVERLAY.lock().ok().and_then(|mut g| g.take());
-                if let Some(handle) = existing {
-                    let view = handle.view.as_obj();
-                    let params = handle.params.as_obj();
-                    let text = env.new_string(&body).ok()?;
-                    env.call_method(
-                        view,
-                        "setText",
-                        "(Ljava/lang/CharSequence;)V",
-                        &[JValue::from(&text)],
-                    )
-                    .ok()?;
-                    let wm = window_manager(env, activity)?;
-                    env.call_method(
-                        &wm,
-                        "updateViewLayout",
-                        "(Landroid/view/View;Landroid/view/WindowManager$LayoutParams;)V",
-                        &[JValue::from(view), JValue::from(params)],
-                    )
-                    .ok()?;
-                    if let Ok(mut g) = OVERLAY.lock() {
-                        *g = Some(handle);
-                    }
-                    return Some(true);
-                }
-
-                // Fresh bubble: TextView on a rounded translucent background.
-                let tv_cls = env.find_class("android/widget/TextView").ok()?;
-                let view = env
-                    .new_object(tv_cls, "(Landroid/content/Context;)V", &[JValue::from(activity)])
-                    .ok()?;
-                let text = env.new_string(&body).ok()?;
-                env.call_method(
-                    &view,
-                    "setText",
-                    "(Ljava/lang/CharSequence;)V",
-                    &[JValue::from(&text)],
-                )
-                .ok()?;
-                env.call_method(&view, "setTextColor", "(I)V", &[JValue::from(0xF0F6FCi32)])
-                    .ok()?;
-                env.call_method(&view, "setTextSize", "(F)V", &[JValue::from(13.0f32)])
-                    .ok()?;
-                env.call_method(
-                    &view,
-                    "setPadding",
-                    "(IIII)V",
-                    &[
-                        JValue::from(36i32),
-                        JValue::from(24i32),
-                        JValue::from(36i32),
-                        JValue::from(24i32),
-                    ],
-                )
-                .ok()?;
-                // Rounded dark background.
-                let gd_cls = env.find_class("android/graphics/drawable/GradientDrawable").ok()?;
-                let bg = env.new_object(gd_cls, "()V", &[]).ok()?;
-                env.call_method(&bg, "setColor", "(I)V", &[JValue::from(0x6101418i32)])
-                    .ok()?;
-                env.call_method(&bg, "setCornerRadius", "(F)V", &[JValue::from(48.0f32)])
-                    .ok()?;
-                env.call_method(
-                    &view,
-                    "setBackground",
-                    "(Landroid/graphics/drawable/Drawable;)V",
-                    &[JValue::from(&bg)],
-                )
-                .ok()?;
-                // Layout params: wrap content, top-start, no focus, translucent.
-                // The 9-arg LayoutParams ctor is
-                // (w, h, type, flags, format, gravity, x, y, windowAnimations).
-                let lp_cls = env.find_class("android/view/WindowManager$LayoutParams").ok()?;
-                let lp = env
-                    .new_object(
-                        lp_cls,
-                        "(IIIIIIIF)V",
-                        &[
-                            JValue::from(-2i32),  // width  = WRAP_CONTENT
-                            JValue::from(-2i32),  // height = WRAP_CONTENT
-                            JValue::from(2038i32), // type  = TYPE_APPLICATION_OVERLAY
-                            JValue::from(0x00000008i32 | 0x00000200i32), // NOT_FOCUSABLE | NOT_TOUCHABLE
-                            JValue::from(-3i32),  // format = TRANSLUCENT
-                            JValue::from(0x00000001i32 | 0x00000030i32), // gravity = TOP | START
-                            JValue::from(24i32),  // x
-                            JValue::from(160i32), // y
-                            JValue::from(0.0f32), // windowAnimations
-                        ],
-                    )
-                    .ok()?;
-                // A touchable bubble would swallow taps from other apps, so it
-                // is explicitly non-touchable: the bubble is a status readout.
-                let wm = window_manager(env, activity)?;
-                env.call_method(
-                    &wm,
-                    "addView",
-                    "(Landroid/view/View;Landroid/view/WindowManager$LayoutParams;)V",
-                    &[JValue::from(&view), JValue::from(&lp)],
-                )
-                .ok()?;
-                let view = env.new_global_ref(view).ok()?;
-                let params = env.new_global_ref(lp).ok()?;
-                if let Ok(mut g) = OVERLAY.lock() {
-                    *g = Some(OverlayHandle { view, params });
-                }
-                Some(true)
+                show_bubble(env, activity, &state, &transcript);
+                Some(())
             });
         });
-        true
+        Ok(())
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = (state, transcript);
-        false
+        Ok(())
     }
 }
 
@@ -656,24 +765,88 @@ pub fn show_overlay(state: &str, transcript: &str) -> bool {
 pub fn hide_overlay() {
     #[cfg(target_os = "android")]
     {
-        let handle = OVERLAY.lock().ok().and_then(|mut g| g.take());
-        if let Some(handle) = handle {
-            on_java_thread(move || {
-                let _ = with_activity(|env, activity| {
-                    let view = handle.view.as_obj();
-                    let wm = window_manager(env, activity)?;
-                    env.call_method(
-                        &wm,
-                        "removeView",
-                        "(Landroid/view/View;)V",
-                        &[JValue::from(view)],
-                    )
-                    .ok()?;
-                    Some(())
-                });
+        on_java_thread(|| {
+            let _ = with_activity(|env, activity| {
+                // The Java helper removes its own bubble.
+                if let Some(Err(message)) = call_bubble_helper(env, activity, "hide", "", "") {
+                    set_overlay_error(&message);
+                }
+                // …and this removes the fallback bubble.
+                remove_overlay_view(env, activity);
+                Some(())
             });
+        });
+    }
+}
+
+/// Put the bubble on the screen (Java helper first, plain view as fallback).
+#[cfg(target_os = "android")]
+fn show_bubble(env: &mut jni::JNIEnv<'_>, activity: &JObject, state: &str, transcript: &str) {
+    match call_bubble_helper(env, activity, "show", state, transcript) {
+        Some(Ok(())) => return,
+        Some(Err(message)) => {
+            // The helper refused (most likely the overlay permission is
+            // missing): fall back to the plain bubble, but say what happened.
+            set_overlay_error(&format!("the bubble helper failed: {message}"));
+        }
+        None => {
+            // No helper class: the plain bubble is all we have.
+            log("the bubble helper is missing — using the plain bubble");
         }
     }
+    let Some(view) = create_plain_bubble(env, activity, state, transcript) else {
+        set_overlay_error("the bubble could not be built");
+        return;
+    };
+    if add_overlay_view(env, activity, view).is_none() {
+        set_overlay_error("the bubble could not be added to the screen");
+    }
+}
+
+/// Add a view to the window manager as a floating overlay.
+#[cfg(target_os = "android")]
+fn add_overlay_view(
+    env: &mut jni::JNIEnv<'_>,
+    activity: &JObject,
+    view: JObject<'_>,
+) -> Option<()> {
+    // Layout params: wrap content, top-start, no focus, translucent.
+    // The 9-arg LayoutParams ctor is
+    // (w, h, type, flags, format, gravity, x, y, windowAnimations).
+    let lp_cls = env.find_class("android/view/WindowManager$LayoutParams").ok()?;
+    let lp = env
+        .new_object(
+            lp_cls,
+            "(IIIIIIIF)V",
+            &[
+                JValue::from(-2i32),  // width  = WRAP_CONTENT
+                JValue::from(-2i32),  // height = WRAP_CONTENT
+                JValue::from(2038i32), // type  = TYPE_APPLICATION_OVERLAY
+                // NOT_FOCUSABLE | NOT_TOUCH_MODAL: the app in front keeps the
+                // keyboard focus and taps outside the bubble still reach it.
+                JValue::from(0x00000008i32 | 0x00000010i32),
+                JValue::from(-3i32),  // format = TRANSLUCENT
+                JValue::from(0x00000001i32 | 0x00000030i32), // gravity = TOP | START
+                JValue::from(24i32),  // x
+                JValue::from(120i32), // y
+                JValue::from(0.0f32), // windowAnimations
+            ],
+        )
+        .ok()?;
+    let wm = window_manager(env, activity)?;
+    env.call_method(
+        &wm,
+        "addView",
+        "(Landroid/view/View;Landroid/view/WindowManager$LayoutParams;)V",
+        &[JValue::from(&view), JValue::from(&lp)],
+    )
+    .ok()?;
+    let view = env.new_global_ref(view).ok()?;
+    let params = env.new_global_ref(lp).ok()?;
+    if let Ok(mut g) = OVERLAY.lock() {
+        *g = Some(OverlayHandle { view, params });
+    }
+    Some(())
 }
 
 #[cfg(target_os = "android")]

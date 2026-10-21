@@ -279,6 +279,42 @@ jobs:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_SDK_ROOT: ${{ steps.ndk.outputs.android-sdk }}
         run: cargo apk build --release --target aarch64-linux-android --lib
+      - name: Add the bubble helper and sign the APK
+        # cargo-apk cannot put a dex into an APK, so the floating bubble's
+        # Java class is compiled here and the APK is finished by hand:
+        # classes.dex -> zipalign -> apksigner.
+        working-directory: android
+        env:
+          ANDROID_HOME: ${{ steps.ndk.outputs.android-sdk }}
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)"
+          PLATFORM="$(ls -d "$ANDROID_HOME"/platforms/android-* | sort -V | tail -1)"
+          mkdir -p target/dex/classes target/dex/dex
+          javac --release 8 -nowarn -classpath "$PLATFORM/android.jar" \
+            -d target/dex/classes java/ai/quickstt/app/Bubble.java
+          "$BUILD_TOOLS"/d8 --min-api 26 --output target/dex/dex \
+            target/dex/classes/ai/quickstt/app/Bubble.class
+          python3 - <<'PY'
+          import zipfile
+          src = "target/release/apk/quickstt-android.apk"
+          dst = "target/dex/with-dex.apk"
+          with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
+              for item in zin.infolist():
+                  data = zin.read(item.filename)
+                  info = zipfile.ZipInfo(item.filename, date_time=item.date_time)
+                  info.compress_type = item.compress_type
+                  info.external_attr = item.external_attr
+                  info.create_system = item.create_system
+                  zout.writestr(info, data)
+              zout.write("target/dex/dex/classes.dex", "classes.dex")
+          PY
+          "$BUILD_TOOLS"/zipalign -f -p 4 target/dex/with-dex.apk target/dex/aligned.apk
+          "$BUILD_TOOLS"/apksigner sign --ks quickstt-release.jks --ks-key-alias quickstt \
+            --ks-pass pass:quickstt --key-pass pass:quickstt \
+            --out target/release/apk/quickstt-android.apk target/dex/aligned.apk
+          "$BUILD_TOOLS"/apksigner verify target/release/apk/quickstt-android.apk
+          "$BUILD_TOOLS"/aapt2 dump badging target/release/apk/quickstt-android.apk | head -5
       - name: Upload the APK
         uses: actions/upload-artifact@v4
         with:

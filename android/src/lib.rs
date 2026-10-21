@@ -31,7 +31,6 @@ mod stt;
 slint::include_modules!();
 
 use slint::ComponentHandle;
-use slint::Model;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -87,24 +86,93 @@ pub fn android_main(app: slint::android::AndroidApp) {
     run();
 }
 
+/// The UI the floating bubble talks to. The bubble is a Java view, so it
+/// calls back into Rust through a native method.
+static BUBBLE_UI: Mutex<Option<slint::Weak<AppWindow>>> = Mutex::new(None);
+
+/// Called by the Java bubble when the user taps one of its buttons.
+///
+/// * 1 = start/stop the recording
+/// * 2 = type the last transcript into the app in front
+/// * 3 = hide the bubble
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_ai_quickstt_app_Bubble_nativeBubbleAction(
+    _env: jni::JNIEnv,
+    _class: jni::sys::jclass,
+    action: jni::sys::jint,
+) {
+    bubble_action(action as i32);
+}
+
+/// Run a bubble action on the Slint event loop.
+fn bubble_action(action: i32) {
+    let ui = BUBBLE_UI.lock().ok().and_then(|g| g.clone());
+    let Some(ui) = ui else { return };
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = ui.upgrade() else { return };
+        match action {
+            1 => ui.invoke_toggle_record(),
+            2 => ui.invoke_type_into_app(),
+            3 => platform::hide_overlay(),
+            _ => {}
+        }
+    });
+}
+
 /// The engines the Models tab lists.
 ///
 /// Only engines that really run on the phone are in here: the catalog is
-/// built from `stt::MODELS` (whisper.cpp models the bundled engine can
-/// load) and each entry carries its *real* download state. Nothing in the
-/// list is a placeholder, and nothing promises a language or a feature the
-/// phone build cannot do.
+/// built from `stt::MODELS` and each entry carries its *real* download
+/// state. Nothing in the list is a placeholder, and nothing promises a
+/// language or a feature the phone build cannot do.
 fn model_catalog() -> Vec<ModelItem> {
     stt::MODELS
         .iter()
         .enumerate()
-        .map(|(index, spec)| ModelItem {
-            name: spec.name.into(),
-            detail: spec.detail.into(),
-            size: spec.size.into(),
-            installed: stt::model_installed(index),
+        .map(|(index, spec)| {
+            let (downloading, progress) = download_state(index);
+            ModelItem {
+                name: spec.name.into(),
+                detail: spec.detail.into(),
+                size: spec.size.into(),
+                installed: stt::model_installed(index),
+                downloading,
+                progress,
+            }
         })
         .collect()
+}
+
+/// The download state of every model: (downloading, progress).
+///
+/// The download runs on a worker thread, so the state lives here and the UI
+/// reads it when it rebuilds the model list.
+static DOWNLOADS: Mutex<Vec<(bool, f32)>> = Mutex::new(Vec::new());
+
+/// Remember what a model's download is doing.
+fn set_download_state(index: usize, downloading: bool, progress: f32) {
+    let Ok(mut list) = DOWNLOADS.lock() else { return };
+    if list.len() < stt::MODELS.len() {
+        list.resize(stt::MODELS.len(), (false, 0.0));
+    }
+    if let Some(slot) = list.get_mut(index) {
+        *slot = (downloading, progress);
+    }
+}
+
+/// What a model's download is doing.
+fn download_state(index: usize) -> (bool, f32) {
+    let Ok(list) = DOWNLOADS.lock() else { return (false, 0.0) };
+    list.get(index).copied().unwrap_or((false, 0.0))
+}
+
+/// Run something on the UI thread.
+///
+/// Slint properties may only be set from the event-loop thread, so every
+/// update from a worker thread goes through here.
+fn on_ui<F: FnOnce() + Send + 'static>(f: F) {
+    let _ = slint::invoke_from_event_loop(f);
 }
 
 /// Push a line into the activity log (shown in the UI and in logcat).
@@ -120,6 +188,18 @@ fn note(ui: &slint::Weak<AppWindow>, log: &Arc<Mutex<Vec<String>>>, message: &st
     };
     if let Some(ui) = ui.upgrade() {
         ui.set_log_text(text.into());
+    }
+}
+
+/// Show the floating bubble and say what went wrong if it fails.
+fn bubble(
+    state: &str,
+    transcript: &str,
+    ui: &slint::Weak<AppWindow>,
+    log: &Arc<Mutex<Vec<String>>>,
+) {
+    if let Err(e) = platform::show_overlay(state, transcript) {
+        note(ui, log, &format!("The bubble could not be shown: {e}"));
     }
 }
 
@@ -152,6 +232,11 @@ pub fn run() {
     // The activity log: the last few things the app did.
     let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
+    // The floating bubble calls back into the UI through this handle.
+    if let Ok(mut slot) = BUBBLE_UI.lock() {
+        *slot = Some(ui.as_weak());
+    }
+
     // Shared between the UI thread and the capture thread.
     let stop_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let pending: Arc<Mutex<Option<PendingTurn>>> = Arc::new(Mutex::new(None));
@@ -183,43 +268,83 @@ pub fn run() {
         ui.on_download_model(move || {
             let Some(ui) = weak.upgrade() else { return };
             let index = ui.get_selected_model().max(0) as usize;
+            if ui.get_model_downloading() {
+                note(&weak, &log, "A download is already running.");
+                return;
+            }
+            if stt::model_installed(index) {
+                note(&weak, &log, "That model is already installed.");
+                ui.set_status_text("That model is already downloaded".into());
+                return;
+            }
             let spec = stt::model(index);
+            ui.set_model_downloading(true);
+            ui.set_model_progress(0.0);
+            ui.set_status_text(format!("Downloading {}…", spec.name).into());
+            set_download_state(index, true, 0.0);
+            ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
+            note(&weak, &log, &format!("Downloading {} ({}).", spec.name, spec.size));
+
             let weak = weak.clone();
             let log = log.clone();
             // Download off the UI thread; the UI only receives progress.
             std::thread::spawn(move || {
-                note(&weak, &log, &format!("Downloading {} ({}…", spec.name, spec.size));
+                let mut last_update = std::time::Instant::now() - std::time::Duration::from_secs(1);
                 let result = stt::download_model(index, |done, total| {
+                    // The UI is refreshed at most ten times a second.
+                    if last_update.elapsed() < std::time::Duration::from_millis(100) {
+                        return;
+                    }
+                    last_update = std::time::Instant::now();
                     let frac = if total > 0 {
                         (done as f32 / total as f32).clamp(0.0, 1.0)
                     } else {
                         0.0
                     };
+                    let megabytes = done as f64 / 1_048_576.0;
+                    let percent = if total > 0 {
+                        format!("{}%", (frac * 100.0) as i32)
+                    } else {
+                        format!("{megabytes:.0} MB")
+                    };
+                    set_download_state(index, true, frac);
                     let progress_weak = weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
+                    let name = spec.name;
+                    on_ui(move || {
                         if let Some(ui) = progress_weak.upgrade() {
                             ui.set_model_progress(frac);
                             ui.set_model_downloading(true);
                             ui.set_status_text(
-                                format!("Downloading {}… {}%", spec.name, (frac * 100.0) as i32)
-                                    .into(),
+                                format!("Downloading {name}… {percent}").into(),
+                            );
+                            ui.set_models(
+                                Rc::new(slint::VecModel::from(model_catalog())).into(),
                             );
                         }
                     });
                 });
+                set_download_state(index, false, if result.is_ok() { 1.0 } else { 0.0 });
                 let done_weak = weak.clone();
                 let done_log = log.clone();
-                let _ = slint::invoke_from_event_loop(move || {
+                let name = spec.name;
+                let error = result.err();
+                on_ui(move || {
                     if let Some(ui) = done_weak.upgrade() {
                         ui.set_model_downloading(false);
-                        match result {
-                            Ok(()) => {
+                        match error {
+                            None => {
                                 ui.set_model_progress(1.0);
-                                ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
-                                ui.set_status_text("Model ready — tap the mic".into());
-                                note(&done_weak, &done_log, &format!("{} installed.", spec.name));
+                                ui.set_models(
+                                    Rc::new(slint::VecModel::from(model_catalog())).into(),
+                                );
+                                ui.set_status_text(format!("{name} is ready — tap the mic").into());
+                                note(&done_weak, &done_log, &format!("{name} installed."));
                             }
-                            Err(e) => {
+                            Some(e) => {
+                                ui.set_model_progress(0.0);
+                                ui.set_models(
+                                    Rc::new(slint::VecModel::from(model_catalog())).into(),
+                                );
                                 ui.set_status_text(format!("Download failed: {e}").into());
                                 note(&done_weak, &done_log, &format!("Download failed: {e}"));
                             }
@@ -244,16 +369,39 @@ pub fn run() {
         let weak = ui.as_weak();
         let log = log.clone();
         ui.on_toggle_overlay(move || {
-            let allowed = platform::can_draw_overlays();
-            if allowed {
-                platform::hide_overlay();
-                note(&weak, &log, "Floating bubble hidden.");
-            } else {
-                platform::show_overlay("QuickSTT ready", "");
-                note(&weak, &log, "Floating bubble shown.");
+            let Some(ui) = weak.upgrade() else { return };
+            let wanted = !ui.get_overlay_enabled();
+            if wanted && !platform::can_draw_overlays() {
+                note(
+                    &weak,
+                    &log,
+                    "Android needs the “display over other apps” permission for the bubble.",
+                );
+                ui.set_status_text("Allow “display over other apps” first".into());
+                platform::open_overlay_settings();
+                return;
             }
-            if let Some(ui) = weak.upgrade() {
-                ui.set_overlay_ok(allowed);
+            if wanted {
+                match platform::show_overlay("QuickSTT ready", "") {
+                    Ok(()) => {
+                        ui.set_overlay_enabled(true);
+                        platform::save_overlay_enabled(true);
+                        note(&weak, &log, "Floating bubble on — it follows you across apps.");
+                        ui.set_status_text("Floating bubble on".into());
+                    }
+                    Err(e) => {
+                        ui.set_overlay_enabled(false);
+                        platform::save_overlay_enabled(false);
+                        note(&weak, &log, &format!("The bubble could not be shown: {e}"));
+                        ui.set_status_text(format!("The bubble could not be shown: {e}").into());
+                    }
+                }
+            } else {
+                platform::hide_overlay();
+                ui.set_overlay_enabled(false);
+                platform::save_overlay_enabled(false);
+                note(&weak, &log, "Floating bubble off.");
+                ui.set_status_text("Floating bubble off".into());
             }
         });
     }
@@ -310,7 +458,7 @@ pub fn run() {
             ui.set_live_text("Listening… speak now.".into());
             ui.set_status_text("Recording".into());
             note(&weak, &log, "Recording started.");
-            platform::show_overlay("Listening…", "");
+            bubble("Listening…", "", &weak, &log);
 
             let weak = weak.clone();
             let stop_flag = stop_flag.clone();
@@ -556,13 +704,13 @@ pub fn run() {
                 Ok(()) => {
                     note(&weak_a, &log_a, "Typed into the app in front.");
                     ui.set_status_text("Typed into the app in front".into());
-                    platform::show_overlay("Typed", &text);
+                    bubble("Typed", &text, &weak_a, &log_a);
                 }
                 Err(e) => {
                     note(&weak_a, &log_a, &format!("Could not type: {e}"));
                     platform::copy_to_clipboard(&text);
                     ui.set_status_text("Typing is not allowed — copied instead".into());
-                    platform::show_overlay("Copied", &text);
+                    bubble("Copied", &text, &weak_a, &log_a);
                 }
             }
         });
@@ -625,6 +773,13 @@ pub fn run() {
                         ui.set_status_text("Microphone permission was not granted".into());
                         note(&weak, &log, "Microphone permission was not granted.");
                     }
+                }
+
+                // Did the floating bubble fail? Tell the user instead of
+                // pretending everything is fine.
+                if let Some(message) = platform::take_overlay_error() {
+                    note(&weak, &log, &message);
+                    ui.set_status_text(message.into());
                 }
 
                 // The overlay permission is granted in the system settings:
@@ -692,11 +847,11 @@ pub fn run() {
                             }
                         }
                         ui.set_status_text(status.clone().into());
-                        platform::show_overlay(&status, &turn.text);
+                        bubble(&status, &turn.text, &weak, &log);
                         note(&weak, &log, "Transcribed and copied to the clipboard.");
                     } else {
                         ui.set_status_text(turn.status.clone().into());
-                        platform::show_overlay(&turn.status, "");
+                        bubble(&turn.status, "", &weak, &log);
                         note(&weak, &log, &turn.status);
                     }
                 }
@@ -709,6 +864,7 @@ pub fn run() {
     // Initial setup state.
     {
         let weak = ui.as_weak();
+        let log = log.clone();
         let mic_ok = platform::has_mic_permission();
         // Pick up the model the user chose last time.
         let index = stt::selected();
@@ -726,6 +882,14 @@ pub fn run() {
             "Ready — tap the mic".into()
         });
         note(&weak, &log, "QuickSTT started.");
+
+        // The bubble stays on if the user left it on: put it back on the
+        // screen so it is there in every app, not only inside QuickSTT.
+        let bubble_on = platform::overlay_enabled() && overlay_ok;
+        ui.set_overlay_enabled(bubble_on);
+        if bubble_on {
+            bubble("QuickSTT ready", "", &weak, &log);
+        }
     }
 
     ui.run().expect("Slint event loop failed");

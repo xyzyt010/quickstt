@@ -35,6 +35,10 @@ export struct ModelItem {
     detail: string,
     size: string,
     installed: bool,
+    // True while this model is being downloaded.
+    downloading: bool,
+    // How far the download got (0..1).
+    progress: float,
 }
 
 // ── Small building blocks ──────────────────────────────────────────────────
@@ -409,6 +413,9 @@ export component AppWindow inherits Window {
     in-out property <bool> model-downloading: false;
     in-out property <float> model-progress: 0.0;
     in-out property <bool> overlay-ok: false;
+    // The floating bubble is switched on (it then follows the user across
+    // apps until it is switched off again).
+    in-out property <bool> overlay-enabled: false;
     in-out property <bool> busy: false;
     // True once there is a transcript that can be typed or shared.
     in-out property <bool> has-text: false;
@@ -765,8 +772,8 @@ export component AppWindow inherits Window {
                                     number: "2";
                                     title: "Download the speech model";
                                     detail: root.model-installed
-                                        ? "The model is installed (32 MB, works offline)."
-                                        : (root.model-downloading ? "Downloading…" : "Whisper Tiny EN · 32 MB · one-time");
+                                        ? (root.models.length > 0 ? root.models[root.selected-model].name + " is installed" : "The model is installed")
+                                        : (root.model-downloading ? "Downloading…" : (root.models.length > 0 ? root.models[root.selected-model].name + " · " + root.models[root.selected-model].size + " · one-time" : "No model"));
                                     done: root.model-installed;
                                     busy: root.model-downloading;
                                     progress: root.model-progress;
@@ -914,7 +921,7 @@ export component AppWindow inherits Window {
                         }
 
                         Body {
-                            text: "Every model below runs on this phone with the bundled engine. Nothing is bundled in the app — a model is downloaded once and then works offline.";
+                            text: "Every model below runs on this phone with the bundled engines — the same model files the desktop app uses. Nothing is bundled in the app: a model is downloaded once and then works offline.";
                             font-size: 13px;
                             color: #6B6B6B;
                         }
@@ -956,6 +963,34 @@ export component AppWindow inherits Window {
                                     color: #6B6B6B;
                                 }
 
+                                // The download bar of this model: it only
+                                // shows while this very model is downloading.
+                                if m.downloading : VerticalLayout {
+                                    width: 100%;
+                                    spacing: 6px;
+
+                                    Rectangle {
+                                        width: 100%;
+                                        height: 6px;
+                                        border-radius: 3px;
+                                        background: #1E1E1E;
+
+                                        Rectangle {
+                                            width: parent.width * m.progress;
+                                            height: 6px;
+                                            border-radius: 3px;
+                                            background: #4ADE80;
+                                        }
+                                    }
+
+                                    Text {
+                                        text: "Downloading… " + (m.progress * 100.0) + "%";
+                                        font-size: 11px;
+                                        color: #4ADE80;
+                                        horizontal-alignment: left;
+                                    }
+                                }
+
                                 HorizontalLayout {
                                     spacing: 10px;
                                     cross-axis-alignment: center;
@@ -978,13 +1013,31 @@ export component AppWindow inherits Window {
                                         }
                                     }
 
-                                    if !m.installed : ActionButton {
+                                    if !m.installed && !m.downloading : ActionButton {
                                         width: 140px;
                                         height: 38px;
-                                        label: root.model-downloading ? "Downloading…" : "Download";
+                                        label: "Download";
                                         primary: true;
                                         enabled: !root.model-downloading;
                                         clicked => { root.pick-model(i); root.download-model(); }
+                                    }
+
+                                    if m.downloading : Rectangle {
+                                        width: 140px;
+                                        height: 38px;
+                                        border-radius: 19px;
+                                        background: #12241A;
+                                        border-width: 1px;
+                                        border-color: #245C3B;
+
+                                        Text {
+                                            text: "Downloading…";
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            color: #9FE8BA;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
                                     }
 
                                     ActionButton {
@@ -1000,7 +1053,7 @@ export component AppWindow inherits Window {
                         }
 
                         Body {
-                            text: "The phone build is English only — the multilingual engines (SenseVoice, Parakeet, Qwen3-ASR) are part of the desktop app.";
+                            text: "A bigger model is more accurate but slower and needs more disk. The engine ships with the app; only the model file is downloaded.";
                             font-size: 11px;
                             color: #4A4A4A;
                         }
@@ -1143,18 +1196,52 @@ export component AppWindow inherits Window {
                                 SectionLabel { text: "FLOATING BUBBLE"; }
 
                                 Body {
-                                    text: root.overlay-ok
-                                        ? "On. A small bubble follows you across apps and shows the mic state and the last transcript."
-                                        : "Off. The bubble needs the “Display over other apps” permission.";
+                                    text: !root.overlay-ok
+                                        ? "Off. Android needs the “display over other apps” permission for the bubble."
+                                        : (root.overlay-enabled
+                                            ? "On. A small bubble follows you across every app: REC starts a recording, TYPE types the last transcript into the app in front, and you can drag it anywhere."
+                                            : "Off. Turn it on to get a small bubble in every app — it records and types without switching back to QuickSTT.");
                                     font-size: 12px;
                                     color: #6B6B6B;
                                 }
 
-                                ActionButton {                                    label: root.overlay-ok ? "Hide the bubble" : "Open the settings";
-                                    primary: false;
-                                    clicked => {
-                                        if root.overlay-ok { root.toggle-overlay(); } else { root.open-overlay-settings(); }
+                                if root.overlay-ok : Rectangle {
+                                    height: 60px;
+                                    background: transparent;
+
+                                    HorizontalLayout {
+                                        width: parent.width;
+                                        height: parent.height;
+                                        cross-axis-alignment: center;
+                                        spacing: 12px;
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 3px;
+
+                                            Body {
+                                                text: "Show the floating bubble";
+                                                font-size: 14px;
+                                            }
+
+                                            Body {
+                                                text: "It stays on top of every other app";
+                                                font-size: 11px;
+                                                color: #5E5E5E;
+                                            }
+                                        }
+
+                                        Toggle {
+                                            on: root.overlay-enabled;
+                                            toggled => { root.toggle-overlay(); }
+                                        }
                                     }
+                                }
+
+                                if !root.overlay-ok : ActionButton {
+                                    label: "Open the settings";
+                                    primary: false;
+                                    clicked => { root.open-overlay-settings(); }
                                 }
                             }
                         }

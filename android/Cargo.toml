@@ -1,6 +1,6 @@
 ﻿[package]
 name = "quickstt-android"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 publish = false
 
@@ -11,6 +11,11 @@ publish = false
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
+# The model download (HTTPS, pure Rust — works on Android). It is a normal
+# dependency (not Android-only) so the download path can be tested on the
+# desktop as well.
+ureq = "2.10"
+
 [target.'cfg(target_os = "android")'.dependencies]
 slint = { version = "1.17", default-features = false, features = [
     "std",
@@ -21,8 +26,6 @@ slint = { version = "1.17", default-features = false, features = [
 # JNI: clipboard, microphone permission, and the floating overlay bubble.
 jni = "0.21"
 ndk-context = "0.1"
-# Model download (HTTPS, pure Rust — works on Android).
-ureq = "2.10"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 slint = { version = "1.17", default-features = false, features = [
@@ -52,6 +55,14 @@ build_targets = ["aarch64-linux-android"]
 [package.metadata.android.sdk]
 min_sdk_version = 26
 target_sdk_version = 34
+
+# The model download. Without this the app cannot open a single socket, so
+# every download fails with a network error.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_NETWORK_STATE"
 
 # Microphone: the dictation engine.
 [[package.metadata.android.uses_permission]]
@@ -98,6 +109,9 @@ required = false
 [package.metadata.android.application]
 label = "QuickSTT"
 theme = "@android:style/Theme.Black.NoTitleBar.Fullscreen"
+# The floating bubble is built by a small Java helper (a View.OnClickListener
+# cannot be created from JNI), so the APK carries a dex.
+has_code = true
 
 # Local release signing (the keystore is NOT in the repo — see android/README.md).
 [package.metadata.android.signing.release]

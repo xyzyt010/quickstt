@@ -15,34 +15,75 @@ record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window
 | **Input conditioning** (DC removal, soft limiting, clip/dead watch) | ✅ implemented |
 | **Microphone self-test** ("Test mic" in the setup card) | ✅ implemented |
 | **Runtime permission flow** (system dialog + result pickup) | ✅ implemented |
-| **On-device transcription** (whisper.cpp for arm64-v8a) | ✅ implemented |
-| **Model download in-app** (Whisper Tiny/Base/Small EN) | ✅ implemented |
+| **On-device transcription** (three engines for arm64-v8a) | ✅ implemented |
+| **Model download in-app** (8 models, with a progress bar) | ✅ implemented |
 | **Clipboard copy** of the finished transcript | ✅ implemented |
-| **Floating bubble over other apps** (WindowManager overlay) | ✅ implemented (read-out bubble) |
+| **Floating bubble over other apps** (`TYPE_APPLICATION_OVERLAY`) | ✅ implemented |
+| **Interactive bubble** (REC / TYPE / close, draggable) | ✅ implemented (Java helper in a dex) |
 | **Typing into the app in front** (real KeyEvents) | ✅ implemented, needs the INJECT_EVENTS permission |
 | **Share sheet** for the last transcript | ✅ implemented |
 | Setup steps / how-to-use card in the Listen tab | ✅ implemented |
 | Activity log + status line (every action says what it did) | ✅ implemented |
 | Tab bar with real icons and an active marker | ✅ implemented |
-| Tap-to-record on the floating bubble | ⏳ needs a Java service (cargo-apk cannot declare one) |
 | Always-on wake word (background mic) | ⏳ needs a Java foreground service |
-| SenseVoice / Parakeet / Qwen3-ASR on device | ⏳ they are desktop-only; the phone build is English only |
+
+## The engines are real
+
+Three engines are cross-compiled for `arm64-v8a` with the Android NDK and
+shipped inside the APK:
+
+| Engine | Binary | Models it runs |
+|---|---|---|
+| whisper.cpp | `prebuilt/whisper-cli-arm64-v8a` (2.1 MB) | Whisper Tiny EN |
+| Cactus `needle` | `prebuilt/needle-arm64-v8a` (1.6 MB) | Cactus Whistle 16M |
+| transcribe.cpp | `prebuilt/transcribe-cli-arm64-v8a` (3.0 MB) | the GGUF family |
 
 ## The models are real
 
-`stt::MODELS` is the single source of truth and it only contains whisper.cpp
-models the bundled engine can really load on a phone:
+`stt::MODELS` is the single source of truth and it only contains models one of
+the bundled engines can really load on a phone:
 
-| Model | File | Size |
-|---|---|---|
-| Whisper Tiny EN | `ggml-tiny.en-q5_1.bin` | 32 MB |
-| Whisper Base EN | `ggml-base.en-q5_1.bin` | 57 MB |
-| Whisper Small EN | `ggml-small.en-q5_1.bin` | 181 MB |
+| Model | Engine | File | Size |
+|---|---|---|---|
+| Whisper Tiny EN | whisper.cpp | `ggml-tiny.en-q5_1.bin` | 32 MB |
+| Cactus Whistle 16M | Cactus needle | `whistle.cact` | 16.9 MB |
+| Moonshine Base EN | transcribe.cpp | `moonshine-base-Q8_0.gguf` | 74 MB |
+| SenseVoice Small | transcribe.cpp | `SenseVoiceSmall-Q4_K_M.gguf` | 139 MB |
+| Canary 180M Flash | transcribe.cpp | `canary-180m-flash-Q5_K_M.gguf` | 151 MB |
+| Parakeet Unified EN 0.6B | transcribe.cpp | `parakeet-unified-en-0.6b-Q4_K_M.gguf` | 455 MB |
+| Nemotron 3.5 ASR Streaming 0.6B | transcribe.cpp | `nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf` | 473 MB |
+| Qwen3-ASR 0.6B | transcribe.cpp | `Qwen3-ASR-0.6B-Q4_K_M.gguf` | 562 MB |
 
-The Models tab renders that list with the real download state — there is no
-placeholder row and no button that cannot work. The phone build is English
-only; the multilingual engines (SenseVoice, Parakeet, Qwen3-ASR) are part of
-the desktop app and are not pretended to exist here.
+The models are the same files the desktop app uses (the same HuggingFace
+sources), so one download serves both. The Models tab renders the list with
+the real download state — there is no placeholder row and no button that
+cannot work. `cargo test -- --ignored` checks that every URL is alive and
+delivers the announced size.
+
+## The floating bubble
+
+The bubble is a `WindowManager` overlay (`TYPE_APPLICATION_OVERLAY`), so it
+floats above **every** app once the user grants "Display over other apps"
+(the Settings tab has a button that opens exactly that system page).
+
+It is built by a small Java helper (`java/ai/quickstt/app/Bubble.java`),
+because a `View.OnClickListener` cannot be created from JNI. The helper:
+
+* draws a compact card with the mic state and the last transcript,
+* has three buttons — **REC** (start/stop a recording), **TYPE** (type the
+  last transcript into the app in front) and **X** (hide it),
+* can be **dragged** anywhere on the screen,
+* reports every failure back to Rust, so the app can say what went wrong
+  instead of showing a bubble that is not there.
+
+The class is compiled with `javac`, turned into a `classes.dex` with `d8` and
+added to the APK by `build-apk.ps1` (cargo-apk cannot put a dex into an APK).
+The manifest therefore needs `android:hasCode="true"`. When the dex is
+missing, the app falls back to a plain read-out bubble — it never breaks.
+
+The bubble is *persistent*: the Settings tab has a switch that keeps it on
+across apps and across launches. It is also shown automatically while a
+recording runs and when the transcript arrives.
 
 ## Typing into other apps
 
@@ -72,9 +113,10 @@ adb shell pm grant ai.quickstt.app android.permission.INJECT_EVENTS
 Without it the app falls back to the clipboard and says so — the Settings tab
 explains this as well.
 
-## Two traps that made every button look dead
+## Four traps that made every button look dead
 
-Both were found by reading the platform crates and fixed in `src/platform.rs`:
+All of them were found by reading the platform crates and fixed in
+`src/platform.rs` / `src/stt.rs`:
 
 1. **`ndk-context` hands out the `Application`, not the `Activity`.**
    `android-activity` 0.6 initialises the ndk context with
@@ -87,12 +129,21 @@ Both were found by reading the platform crates and fixed in `src/platform.rs`:
    The Slint event loop runs on android-activity's own `android_main` thread,
    not the Java UI thread. Every such call is dispatched with
    `AndroidApp::run_on_java_main_thread()`.
+3. **The manifest had no `INTERNET` permission.** Without it every socket
+   fails, so the model download could never start — the button looked dead
+   even though the code was right. It is declared in `Cargo.toml` now, next
+   to `ACCESS_NETWORK_STATE`.
+4. **The app's home directory is `noexec`.** Since Android 10 the files
+   directory of an app that targets API 29+ is mounted `noexec`, so an
+   engine binary unpacked there cannot be started ("Permission denied").
+   The engines are therefore unpacked into the app's **native library
+   directory** (`getNativeLibraryDir()`), which belongs to the app and is
+   exec-mounted.
 
 The app also polls `checkSelfPermission` while a dialog is open, so the setup
 card advances to "Test mic" as soon as the user grants the permission — and
 the overlay permission is picked up when the user comes back from the system
 settings.
-
 
 ## How it works
 
@@ -108,23 +159,19 @@ settings.
    The **"Test mic"** button in the setup card opens the mic for a second
    and reports the level, so the user can check the input without
    recording.
-3. **Transcribe** — whisper.cpp is cross-compiled for `arm64-v8a` with the
-   Android NDK (`cmake` + the NDK toolchain file, portable x86-64 baseline so
-   it never SIGILLs), stripped and shipped inside the APK
-   (`prebuilt/whisper-cli-arm64-v8a`). At first run it is written to the app's
-   private files directory and executed once per turn. A silent take is
+3. **Transcribe** — the engine for the chosen model is unpacked into the
+   native library directory and executed once per turn (with a 120 s
+   deadline, so a broken model cannot freeze the app). A silent take is
    rejected *before* the engine runs (whisper hallucinates short words on
    noise-only audio).
-4. **Model** — never bundled. The Models tab lists the whisper.cpp models the
-   phone can run (Tiny / Base / Small EN) and downloads the chosen one from
-   the same HuggingFace source the desktop app uses, with a progress bar. The
-   choice is remembered between launches.
+4. **Model** — never bundled. The Models tab lists the models the phone can
+   run and downloads the chosen one from the same HuggingFace source the
+   desktop app uses, with a progress bar per row. The choice is remembered
+   between launches.
 5. **Result** — the transcript is shown in the app, pushed into History and
    copied to the system clipboard, so it can be pasted into any app. If
    another app is in front, the text is also *typed* into it (see above).
-6. **Floating bubble** — a `WindowManager` overlay (`TYPE_APPLICATION_OVERLAY`)
-   shows the mic state and the last transcript above other apps. The user
-   grants "Display over other apps" in step 3 of the setup card.
+6. **Floating bubble** — the overlay described above.
 
 ## Build
 
@@ -135,15 +182,23 @@ Toolchain used and verified on this machine:
 - Rust targets: `aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android`
 - `cargo-apk 0.10`
 
-`ANDROID_HOME` must point at the **SDK root** (not `platform-tools`):
+### The release APK
+
+`build-apk.ps1` does the whole thing — cargo-apk cannot add a dex to the
+APK, so the APK is finished by hand:
 
 ```powershell
-$env:ANDROID_HOME     = "$env:LOCALAPPDATA\Android\Sdk"
-$env:ANDROID_NDK_ROOT = "$env:LOCALAPPDATA\Android\Sdk\ndk\27.3.13750724"
 cd android
-cargo apk build --target aarch64-linux-android --lib
-# → target\debug\apk\quickstt-android.apk (debug-signed)
+.\build-apk.ps1            # release APK, signed with quickstt-release.jks
+.\build-apk.ps1 -Debug     # debug build, unsigned
 ```
+
+The steps are: `javac` → `d8` → `cargo apk build` → add `classes.dex` →
+`zipalign -p 4` → `apksigner sign`.
+
+`ANDROID_HOME` must point at the **SDK root** (not `platform-tools`); the
+script finds the SDK itself and only uses the environment variable when it
+really is an SDK.
 
 `--lib` is required: the GUI is the cdylib's `android_main`, and cargo-apk
 otherwise also tries to package the desktop `examples/preview.rs`.
@@ -151,23 +206,14 @@ otherwise also tries to package the desktop `examples/preview.rs`.
 Install on a device (USB debugging):
 
 ```powershell
-adb install -r target\debug\apk\quickstt-android.apk
-```
-
-A **release** APK additionally needs a keystore (`cargo apk` refuses to sign
-release builds with the debug key):
-
-```toml
-[package.metadata.android.signing.release]
-path = "quickstt-release.jks"
-keystore_password = "…"
+adb install -r target\release\apk\quickstt-android.apk
 ```
 
 The manifest is generated from `[package.metadata.android]` in `Cargo.toml` —
-cargo-apk 0.10 ignores a hand-written `AndroidManifest.xml`. All nine
-permissions (mic, foreground service, overlay, notifications, wake lock,
-vibrate, input injection) are declared there and verified with
-`aapt dump permissions`.
+cargo-apk 0.10 ignores a hand-written `AndroidManifest.xml`. All eleven
+permissions (internet, mic, foreground service, overlay, notifications, wake
+lock, vibrate, input injection) are declared there and verified with
+`aapt2 dump badging`.
 
 Preview the exact same UI on Windows/Linux without a device:
 
@@ -176,24 +222,40 @@ cd android
 cargo run --example preview
 ```
 
-### Rebuilding the embedded engine
+### Rebuilding the embedded engines
 
-The APK ships `prebuilt/whisper-cli-arm64-v8a`. To rebuild it from a fresh
-whisper.cpp checkout (portable baseline, no `-march=native` — a native build
-crashes with SIGILL on many phones):
+The APK ships three binaries in `prebuilt/`. All of them are cross-compiled
+with the NDK toolchain file, with `GGML_NATIVE=OFF` (a native build crashes
+with SIGILL on many phones) and stripped.
 
 ```powershell
 $ndk = "$env:LOCALAPPDATA\Android\Sdk\ndk\27.3.13750724"
-git clone --depth 1 https://github.com/ggerganov/whisper.cpp $env:TEMP\whisper.cpp
+$toolchain = "$ndk/build/cmake/android.toolchain.cmake"
+
+# whisper.cpp (the Whisper models)
 cmake -S $env:TEMP\whisper.cpp -B $env:TEMP\whisper-android -G Ninja `
-  -DCMAKE_TOOLCHAIN_FILE="$($ndk -replace '\\','/')/build/cmake/android.toolchain.cmake" `
+  -DCMAKE_TOOLCHAIN_FILE=$toolchain `
   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release `
   -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DBUILD_SHARED_LIBS=OFF `
   -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF
 cmake --build $env:TEMP\whisper-android --target whisper-cli
-& "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe" --strip-all "$env:TEMP\whisper-android\bin\whisper-cli"
-Copy-Item "$env:TEMP\whisper-android\bin\whisper-cli" android\prebuilt\whisper-cli-arm64-v8a -Force
+
+# transcribe.cpp (the GGUF family) — the source lives in third_party/
+cmake -S ..\third_party\transcribe.cpp -B $env:TEMP\tc-android -G Ninja `
+  -DCMAKE_TOOLCHAIN_FILE=$toolchain `
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release `
+  -DGGML_NATIVE=OFF -DTRANSCRIBE_USE_OPENMP=OFF -DTRANSCRIBE_BUILD_TESTS=OFF `
+  -DTRANSCRIBE_BUILD_TOOLS=OFF -DTRANSCRIBE_VULKAN=OFF -DGGML_CURL=OFF
+cmake --build $env:TEMP\tc-android --target transcribe-cli
+
+# strip and copy
+$strip = "$ndk/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-strip.exe"
+& $strip --strip-all "$env:TEMP\whisper-android\bin\whisper-cli"
+& $strip --strip-all "$env:TEMP\tc-android\bin\transcribe-cli"
 ```
+
+The Cactus engine is downloaded from the Cactus Compute release
+(`Cactus-Compute/needle3`, `android-arm64/needle`).
 
 ## Why the UI differs from the desktop
 
@@ -230,16 +292,11 @@ the wrong place, cards hanging off the screen):
 
 ## Next steps (in order)
 
-1. **Tap-to-record on the floating bubble.** `cargo-apk` cannot declare a
-   `Service` (it only generates a single activity), so the bubble is currently
-   a read-out. Making it interactive needs a small Kotlin/Java service (or a
-   Gradle build instead of cargo-apk) that owns a `ForegroundService` and
-   forwards taps into the Rust cdylib.
-2. **ONNX Runtime for Android**: add `onnxruntime-android` (AAR) via Gradle, or
-   link the prebuilt `libonnxruntime.so` per ABI; point `ORT_DYLIB_PATH` at it.
-   SenseVoice and Parakeet/Phonon share this.
-3. **More models**: the engine layer is model-agnostic — adding the Qwen3-ASR
-   GGUF (via the Handy transcribe.cpp worker built for arm64) only needs a
-   second embedded binary and a catalog entry.
-4. **Offload**: mirror the desktop idle-unload (`auto_offload`, 60 s) by
+1. **Always-on wake word**: a Java foreground service that keeps the mic open
+   in the background. cargo-apk can only declare one activity, so the service
+   has to be added to the manifest by hand (the dex pipeline already makes
+   that possible).
+2. **More whisper models**: the engine is model-agnostic — adding Whisper Base
+   or the multilingual Whisper models only needs a catalog entry.
+3. **Offload**: mirror the desktop idle-unload (`auto_offload`, 60 s) by
    dropping the engine session when idle.
