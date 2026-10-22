@@ -694,6 +694,93 @@ mod tests {
             let mut head = [0u8; 4];
             let n = std::io::Read::read(&mut reader, &mut head).unwrap_or(0);
             assert!(n > 0, "{} delivered no data", spec.name);
+            // GGML ("ggml", stored little-endian), GGUF ("GGUF") and the
+            // Cactus container (0x84 0x2a 0xe1 0x05) are the three formats
+            // in the catalog. An HTML error page would fail this — and it
+            // is exactly what a wrong URL produces.
+            let magic = &head[..n];
+            let known = magic == b"ggml"
+                || magic == b"lmgg"
+                || magic == b"GGUF"
+                || magic == b"\x84\x2a\xe1\x05";
+            assert!(
+                known,
+                "{} does not start with a model header ({:?})",
+                spec.name,
+                String::from_utf8_lossy(magic)
+            );
+        }
+    }
+
+    /// The engines ship inside the APK, and the app passes them a fixed
+    /// command line. If one of those options does not exist in the binary,
+    /// the engine dies with "unknown argument" and the transcription is
+    /// empty — on the phone, with no way to see why.
+    ///
+    /// So the options the app uses are checked against the shipped
+    /// binaries. The Cactus engine builds its option names at runtime
+    /// ("audio-" + "language"), so it is checked in parts.
+    #[test]
+    fn the_shipped_engines_know_our_options() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("prebuilt");
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "whisper-cli-arm64-v8a",
+                &[
+                    "--model",
+                    "--file",
+                    "--language",
+                    "--no-timestamps",
+                    "--suppress-nst",
+                    "--no-speech-thold",
+                    "--threads",
+                ],
+            ),
+            (
+                "needle-arm64-v8a",
+                &["--model", "--audio", "--audio-", "language", "--threads"],
+            ),
+            (
+                "transcribe-cli-arm64-v8a",
+                &["--model", "--language", "--threads", "--backend"],
+            ),
+        ];
+        for (file, options) in cases {
+            let path = dir.join(file);
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("{} cannot be read: {e}", path.display()));
+            for option in *options {
+                let needle = option.as_bytes();
+                let found = bytes.windows(needle.len()).any(|w| w == needle);
+                assert!(
+                    found,
+                    "{} does not know the option {option} — the transcription would fail",
+                    file
+                );
+            }
+        }
+    }
+
+    /// The engines have to be Android programs: a Linux build cannot be
+    /// started on a phone (wrong linker, wrong libc).
+    #[test]
+    fn the_shipped_engines_are_android_binaries() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("prebuilt");
+        for file in ["whisper-cli-arm64-v8a", "needle-arm64-v8a", "transcribe-cli-arm64-v8a"] {
+            let path = dir.join(file);
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("{} cannot be read: {e}", path.display()));
+            // The ELF header of a 64-bit little-endian ARM program.
+            assert_eq!(&bytes[0..4], b"\x7fELF", "{} is not an ELF file", file);
+            assert_eq!(bytes[4], 2, "{} is not 64-bit", file);
+            assert_eq!(bytes[18], 0xB7, "{} is not an ARM64 program", file);
+            // The program interpreter: Android's own linker.
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                text.contains("/system/bin/linker64"),
+                "{} does not use the Android linker",
+                file
+            );
         }
     }
 }
