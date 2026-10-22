@@ -41,6 +41,35 @@ ship **inside the APK**, in the APK's `lib/arm64-v8a/` directory:
 | Cactus `needle` | `libneedle.so` (1.6 MB) | Cactus Whistle 16M |
 | transcribe.cpp | `libtranscribe-cli.so` (3.0 MB) | the GGUF family |
 
+### They were run, not assumed
+
+The desktop builds of the same three engines were run here with **the exact
+model files the app downloads** and **the exact command line the app
+passes**, on a spoken sample (`jfk.wav`):
+
+| Engine | Command | Result |
+|---|---|---|
+| whisper.cpp | `-m ggml-tiny.en-q5_1.bin -f jfk.wav -l en --no-timestamps --suppress-nst -nth 0.85 -t 4` | "And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country." (1.7 s) |
+| Cactus `needle` | `--model whistle.cact --audio jfk.wav --audio-language en` | the same sentence as JSON (4.1 s) |
+| transcribe.cpp | `-m moonshine-base-Q8_0.gguf --language en --threads 4 --backend cpu jfk.wav` | the same sentence (1.2 s) |
+
+The transcribe.cpp output is the metadata block the app skips plus the
+`text:` line the app takes — the two match exactly.
+
+Three tests keep it that way (`cargo test`):
+
+* `the_shipped_engines_know_our_options` — every option the app passes
+  has to exist in the shipped binary. An option that does not exist makes
+  the engine die with "unknown argument" and the transcript stays empty —
+  on the phone, with no way to see why.
+* `the_shipped_engines_are_android_binaries` — ELF64, ARM64 and the Android
+  linker. A Linux build can never be started on a phone.
+* `every_model_url_is_downloadable` (needs the network:
+  `cargo test -- --ignored`) — every model URL has to deliver a real model
+  file: the right size **and** the right header (GGML, GGUF or the Cactus
+  container), not an HTML error page.
+
+
 They are named `lib*.so` and stored compressed on purpose: that is what the
 Android installer looks for, and it extracts them into the app's **native
 library directory** with the execute permission. That directory is
