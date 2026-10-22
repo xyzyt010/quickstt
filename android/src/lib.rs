@@ -615,6 +615,12 @@ pub fn run() {
             match platform::show_overlay("QuickSTT ready", "") {
                 Ok(()) => {
                     ui.set_overlay_enabled(true);
+                    // The notification of the background service needs a
+                    // permission of its own on Android 13 and newer. It is
+                    // asked for here, where it belongs to the bubble.
+                    if !platform::can_post_notifications() {
+                        platform::request_permissions(&["android.permission.POST_NOTIFICATIONS"]);
+                    }
                     // The bubble has to survive the app being swiped away:
                     // a foreground service keeps the process alive.
                     match platform::start_service() {
@@ -1227,12 +1233,6 @@ pub fn run() {
         // The battery exemption: without it Android puts QuickSTT to sleep
         // in the background and the bubble stops working.
         ui.set_battery_ok(platform::ignoring_battery_optimizations());
-
-        // The notification of the foreground service needs a permission of
-        // its own on Android 13 and newer.
-        if !platform::can_post_notifications() {
-            platform::request_permissions(&["android.permission.POST_NOTIFICATIONS"]);
-        }
 
         // Notice when the user comes back from the system settings: that is
         // when the "display over other apps" permission is granted.
