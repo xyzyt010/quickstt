@@ -1,6 +1,6 @@
 ﻿[package]
 name = "quickstt-android"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 publish = false
 
@@ -10,10 +10,14 @@ publish = false
 [lib]
 crate-type = ["cdylib", "lib"]
 
-[dependencies]
-# The model download (HTTPS, pure Rust — works on Android). It is a normal
-# dependency (not Android-only) so the download path can be tested on the
-# desktop as well.
+# The model download is done by the Android HTTP stack (the Java helper
+# `ai.quickstt.app.ModelDownloader`), so there is no HTTP dependency in the
+# app: the phone's own stack is the one that always works.
+#
+# The test that checks that every model URL is still reachable does need an
+# HTTP client, and it is the only one — a dev-dependency is not part of the
+# APK.
+[dev-dependencies]
 ureq = "2.10"
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -86,6 +90,11 @@ name = "android.permission.WAKE_LOCK"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.VIBRATE"
+
+# Do not let the system put QuickSTT to sleep in the background: the bubble
+# has to keep working while the user works in another app.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
 
 # Draw the mic pill above other apps (the user grants this in Settings).
 [[package.metadata.android.uses_permission]]

@@ -435,6 +435,12 @@ export component AppWindow inherits Window {
     in-out property <bool> test-running: false;
     // The self-test report: permissions, engines, model files.
     in-out property <string> diagnostics: "";
+    // True while the foreground service keeps QuickSTT alive in the
+    // background (it is started with the floating bubble).
+    in-out property <bool> background-ok: false;
+    // True when the app is exempt from the battery restrictions — without
+    // that Android puts it to sleep and the bubble stops working.
+    in-out property <bool> battery-ok: false;
     in property <[string]> tabs: ["Listen", "History", "Models", "Settings"];
 
     in-out property <[Turn]> turns: [];
@@ -451,6 +457,8 @@ export component AppWindow inherits Window {
     // The self-test: what is installed and what is missing.
     callback run-diagnostics();
     callback copy-diagnostics();
+    // Keep QuickSTT alive in the background: the battery exemption.
+    callback request-battery-exemption();
     // Setup actions (wired in Rust).
     callback grant-mic();
     callback download-model();
@@ -802,11 +810,11 @@ export component AppWindow inherits Window {
                                     title: "Floating bubble";
                                     detail: root.overlay-ok
                                         ? (root.overlay-enabled
-                                            ? "On — the mic bubble shows above every other app."
+                                            ? "On — the mic bubble shows above every other app, and QuickSTT keeps running in the background."
                                             : "Allowed. Switch it on to get the bubble in every app.")
                                         : "Android needs the “display over other apps” permission. The button opens QuickSTT's own page in the system settings — the bubble appears by itself once you allow it.";
                                     done: root.overlay-enabled;
-                                    action-label: root.overlay-enabled ? "Disable" : "Enable";
+                                    action-label: root.overlay-enabled ? "Disable" : (root.overlay-ok ? "Enable" : "Allow");
                                     action-primary: !root.overlay-enabled;
                                     action => { root.toggle-overlay(); }
                                 }
@@ -1294,6 +1302,36 @@ export component AppWindow inherits Window {
                                     label: "Grant the permission";
                                     primary: false;
                                     clicked => { root.open-overlay-settings(); }
+                                }
+                            }
+                        }
+
+                        // Running in the background — the foreground service and
+                        // the battery exemption. Without them Android puts
+                        // QuickSTT to sleep and the bubble stops working.
+                        Card {
+                            background: #141A21;
+                            border-color: #2A3644;
+
+                            VerticalLayout {
+                                width: parent.width;
+                                padding: 14px;
+                                spacing: 8px;
+
+                                SectionLabel { text: "RUNNING IN THE BACKGROUND"; }
+
+                                Body {
+                                    text: root.battery-ok
+                                        ? "QuickSTT may run in the background. The floating bubble is started together with a foreground service, so it stays above your other apps."
+                                        : "Android puts QuickSTT to sleep in the background. The floating bubble needs the “don’t restrict” permission, otherwise it disappears as soon as you switch to another app.";
+                                    font-size: 12px;
+                                    color: #6B6B6B;
+                                }
+
+                                if !root.battery-ok : ActionButton {
+                                    label: "Allow QuickSTT to run in the background";
+                                    primary: false;
+                                    clicked => { root.request-battery-exemption(); }
                                 }
                             }
                         }

@@ -377,6 +377,22 @@ fn diagnostics_report(index: usize) -> String {
                 "missing"
             }
         ),
+        format!(
+            "Background service: {}",
+            if platform::ignoring_battery_optimizations() {
+                "running, battery optimisation lifted"
+            } else {
+                "the app is put to sleep in the background"
+            }
+        ),
+        format!(
+            "Notifications: {}",
+            if platform::can_post_notifications() {
+                "allowed"
+            } else {
+                "not allowed"
+            }
+        ),
     ];
     for (id, name, _) in stt::ENGINES {
         lines.push(format!("Engine {name}: {}", stt::engine_info(id)));
@@ -479,7 +495,9 @@ pub fn run() {
             // Download off the UI thread; the UI only receives progress.
             std::thread::spawn(move || {
                 let mut last_update = std::time::Instant::now() - std::time::Duration::from_secs(1);
-                let result = stt::download_model(index, |done, total| {
+                let progress_weak = weak.clone();
+                let name = spec.name;
+                let result = stt::download_model(index, move |done, total| {
                     // The UI is refreshed at most ten times a second.
                     if last_update.elapsed() < std::time::Duration::from_millis(100) {
                         return;
@@ -497,8 +515,7 @@ pub fn run() {
                         format!("{megabytes:.0} MB")
                     };
                     set_download_state(index, true, frac);
-                    let progress_weak = weak.clone();
-                    let name = spec.name;
+                    let progress_weak = progress_weak.clone();
                     on_ui(move || {
                         if let Some(ui) = progress_weak.upgrade() {
                             ui.set_model_progress(frac);
@@ -571,6 +588,7 @@ pub fn run() {
             let wanted = !ui.get_overlay_enabled();
             if !wanted {
                 platform::hide_overlay();
+                platform::stop_service();
                 ui.set_overlay_enabled(false);
                 platform::save_overlay_enabled(false);
                 note(&weak, &log, "Floating bubble off.");
@@ -597,7 +615,25 @@ pub fn run() {
             match platform::show_overlay("QuickSTT ready", "") {
                 Ok(()) => {
                     ui.set_overlay_enabled(true);
-                    note(&weak, &log, "Floating bubble on — it follows you across apps.");
+                    // The bubble has to survive the app being swiped away:
+                    // a foreground service keeps the process alive.
+                    match platform::start_service() {
+                        Ok(()) => {
+                            ui.set_background_ok(true);
+                            note(
+                                &weak,
+                                &log,
+                                "Floating bubble on — it follows you across apps, and QuickSTT keeps running in the background.",
+                            );
+                        }
+                        Err(e) => {
+                            note(
+                                &weak,
+                                &log,
+                                &format!("The bubble is on, but the background service failed: {e}"),
+                            );
+                        }
+                    }
                     ui.set_status_text("Floating bubble on".into());
                 }
                 Err(e) => {
@@ -956,6 +992,30 @@ pub fn run() {
         });
     }
 
+    // Keep QuickSTT alive in the background: without the exemption Android
+    // puts the app to sleep and the bubble stops working.
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
+        ui.on_request_battery_exemption(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            match platform::request_battery_exemption() {
+                Ok(()) => {
+                    note(
+                        &weak,
+                        &log,
+                        "Opening the battery settings — allow QuickSTT to run in the background, then come back.",
+                    );
+                    ui.set_status_text("Allow QuickSTT to run in the background, then come back".into());
+                }
+                Err(e) => {
+                    note(&weak, &log, &format!("The battery settings could not be opened: {e}"));
+                    ui.set_status_text(format!("The battery settings could not be opened: {e}").into());
+                }
+            }
+        });
+    }
+
     // Type the last transcript into the app in front, with real key events.
     {
         let weak_a = ui.as_weak();
@@ -1157,6 +1217,21 @@ pub fn run() {
         ui.set_overlay_enabled(bubble_on && overlay_ok);
         if bubble_on && overlay_ok {
             bubble("QuickSTT ready", "", &weak, &log);
+            // The foreground service keeps the process (and the bubble)
+            // alive while the user works in another app.
+            match platform::start_service() {
+                Ok(()) => ui.set_background_ok(true),
+                Err(e) => note(&weak, &log, &format!("The background service failed: {e}")),
+            }
+        }
+        // The battery exemption: without it Android puts QuickSTT to sleep
+        // in the background and the bubble stops working.
+        ui.set_battery_ok(platform::ignoring_battery_optimizations());
+
+        // The notification of the foreground service needs a permission of
+        // its own on Android 13 and newer.
+        if !platform::can_post_notifications() {
+            platform::request_permissions(&["android.permission.POST_NOTIFICATIONS"]);
         }
 
         // Notice when the user comes back from the system settings: that is

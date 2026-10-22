@@ -624,17 +624,29 @@ pub fn has_mic_permission() -> bool {
 /// the only combination Android accepts, and it is also why this used to be a
 /// silent no-op.
 pub fn request_mic_permission() {
+    request_permissions(&["android.permission.RECORD_AUDIO"]);
+}
+
+/// Ask the user for a runtime permission (the system dialog).
+///
+/// The request has to be raised from the Activity on the UI thread: that is
+/// the only combination Android accepts.
+pub fn request_permissions(permissions: &[&str]) {
     #[cfg(target_os = "android")]
     {
-        log("asking for the microphone permission");
-        on_java_thread(|| {
+        // The closure has to outlive this call, so the names are copied.
+        let names: Vec<String> = permissions.iter().map(|p| p.to_string()).collect();
+        log(&format!("asking for {names:?}"));
+        on_java_thread(move || {
             let result = with_activity(|env, activity| {
-                let perm = env.new_string("android.permission.RECORD_AUDIO").ok()?;
                 let string_cls = env.find_class("java.lang.String").ok()?;
                 let arr = env
-                    .new_object_array(1, &string_cls, JObject::null())
+                    .new_object_array(names.len() as i32, &string_cls, JObject::null())
                     .ok()?;
-                env.set_object_array_element(&arr, 0, &perm).ok()?;
+                for (i, permission) in names.iter().enumerate() {
+                    let perm = env.new_string(permission).ok()?;
+                    env.set_object_array_element(&arr, i as i32, &perm).ok()?;
+                }
                 env.call_method(
                     activity,
                     "requestPermissions",
@@ -649,7 +661,222 @@ pub fn request_mic_permission() {
             }
         });
     }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = permissions;
+    }
 }
+
+/// Start the foreground service that keeps QuickSTT alive in the background.
+///
+/// Without it Android kills the app as soon as it is not visible — and the
+/// floating bubble would go with it. The service shows a small notification
+/// that says what it is for.
+pub fn start_service() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let outcome = with_activity(|env, activity| {
+            call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/SpeechService",
+                "start",
+                "(Landroid/content/Context;)V",
+                &[JValue::from(activity)],
+            )?;
+            Some(())
+        });
+        match outcome {
+            Some(()) => {
+                log("the background service is running");
+                Ok(())
+            }
+            None => Err("the background service could not be started".into()),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Err("the background service only exists on Android".into())
+    }
+}
+
+/// Stop the background service again.
+pub fn stop_service() {
+    #[cfg(target_os = "android")]
+    {
+        let _ = with_activity(|env, activity| {
+            call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/SpeechService",
+                "stop",
+                "(Landroid/content/Context;)V",
+                &[JValue::from(activity)],
+            )?;
+            Some(())
+        });
+        log("the background service was stopped");
+    }
+}
+
+/// Is the app exempt from the battery restrictions?
+///
+/// Without the exemption Android puts the app to sleep in the background
+/// and the bubble stops working.
+pub fn ignoring_battery_optimizations() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "ignoringBatteryOptimizations",
+                "(Landroid/content/Context;)Z",
+                &[JValue::from(activity)],
+            )?;
+            Some(value.i().ok()? != 0)
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    false
+}
+
+/// Ask the system to let QuickSTT run in the background.
+///
+/// The app's own page first, the list of all apps as the fallback.
+pub fn request_battery_exemption() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        log("asking for the battery optimisation exemption");
+        let outcome = with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "requestBatteryExemption",
+                "(Landroid/content/Context;)Ljava/lang/String;",
+                &[JValue::from(activity)],
+            )?;
+            jni_string(env, value)
+        });
+        match outcome {
+            Some(message) if message.is_empty() => Ok(()),
+            Some(message) => Err(message),
+            None => Err("the battery settings could not be opened".into()),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Err("the battery settings only exist on Android".into())
+    }
+}
+
+/// May the app show its notification? (Android 13+ asks for it.)
+pub fn can_post_notifications() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "canPostNotifications",
+                "(Landroid/content/Context;)Z",
+                &[JValue::from(activity)],
+            )?;
+            Some(value.i().ok()? != 0)
+        })
+        .unwrap_or(true)
+    }
+    #[cfg(not(target_os = "android"))]
+    true
+}
+
+// The progress of the download that is running on this thread.
+//
+// The Java downloader calls back into Rust on the thread that started it,
+// so a thread-local is all that is needed to get the number of bytes that
+// really arrived into the app.
+#[cfg(target_os = "android")]
+thread_local! {
+    static DOWNLOAD_PROGRESS: std::cell::RefCell<Option<Box<dyn FnMut(u64, u64)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Called by the Java downloader with the bytes that arrived.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_ai_quickstt_app_ModelDownloader_nativeProgress(
+    _env: jni::JNIEnv,
+    _class: jni::sys::jclass,
+    done: jni::sys::jlong,
+    total: jni::sys::jlong,
+) {
+    DOWNLOAD_PROGRESS.with(|slot| {
+        let hook = slot.borrow_mut().take();
+        if let Some(mut hook) = hook {
+            hook(done as u64, total as u64);
+            slot.borrow_mut().replace(hook);
+        }
+    });
+}
+
+/// Download a file with the Android HTTP stack.
+///
+/// The Java helper does the work — it is the HTTP stack the phone trusts —
+/// and reports the bytes that arrived. The file is only moved into place
+/// when it is complete.
+#[cfg(target_os = "android")]
+pub fn download_file_with_progress<F: FnMut(u64, u64) + 'static>(
+    url: &str,
+    dest: &std::path::Path,
+    min_bytes: u64,
+    progress: F,
+) -> Result<(), String> {
+    let dest_text = dest.to_string_lossy().to_string();
+    DOWNLOAD_PROGRESS.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(progress));
+    });
+    let outcome = with_activity(|env, activity| {
+        let url_text = env.new_string(url).ok()?;
+        let dest_string = env.new_string(&dest_text).ok()?;
+        let value = call_app_static(
+            env,
+            activity,
+            "ai/quickstt/app/ModelDownloader",
+            "download",
+            "(Ljava/lang/String;Ljava/lang/String;J)Ljava/lang/String;",
+            &[
+                JValue::from(&url_text),
+                JValue::from(&dest_string),
+                JValue::from(min_bytes as i64),
+            ],
+        )?;
+        jni_string(env, value)
+    });
+    DOWNLOAD_PROGRESS.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+    match outcome {
+        Some(message) if message.is_empty() => Ok(()),
+        Some(message) => Err(message),
+        None => Err("the download could not be started".into()),
+    }
+}
+
+/// Download a file (the desktop build has no HTTP stack to speak of).
+#[cfg(not(target_os = "android"))]
+pub fn download_file_with_progress<F: FnMut(u64, u64) + 'static>(
+    _url: &str,
+    _dest: &std::path::Path,
+    _min_bytes: u64,
+    _progress: F,
+) -> Result<(), String> {
+    Err("model downloads are only available on Android".into())
+}
+
 
 /// True when the app may draw over other apps.
 ///

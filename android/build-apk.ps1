@@ -39,19 +39,47 @@ Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$work\classes" | Out-Null
 New-Item -ItemType Directory -Force "$work\dex" | Out-Null
 
-Write-Host "==> compiling the bubble helper"
+Write-Host "==> compiling the Java helpers"
 & javac --release 8 -nowarn -classpath $androidJar -d "$work\classes" `
     "java\ai\quickstt\app\Bubble.java" "java\ai\quickstt\app\Overlay.java" `
-    "java\ai\quickstt\app\Engine.java"
+    "java\ai\quickstt\app\Engine.java" "java\ai\quickstt\app\SpeechService.java" `
+    "java\ai\quickstt\app\ModelDownloader.java"
 if ($LASTEXITCODE -ne 0) { throw "javac failed" }
 
 Write-Host "==> dexing"
 $d8 = Get-ChildItem "$buildTools" -Filter "d8*" | Select-Object -First 1
 & $d8.FullName --min-api 26 --output "$work\dex" `
     "$work\classes\ai\quickstt\app\Bubble.class" "$work\classes\ai\quickstt\app\Overlay.class" `
-    "$work\classes\ai\quickstt\app\Engine.class"
+    "$work\classes\ai\quickstt\app\Engine.class" "$work\classes\ai\quickstt\app\SpeechService.class" `
+    "$work\classes\ai\quickstt\app\ModelDownloader.class"
 if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
 if (-not (Test-Path "$work\dex\classes.dex")) { throw "d8 produced no classes.dex" }
+
+# The manifest. cargo-apk generates one that can only describe an activity;
+# QuickSTT needs a foreground service (the bubble has to keep working while
+# the user works in another app), so the manifest is compiled here with
+# aapt2 and put into the APK afterwards.
+Write-Host "==> compiling the manifest"
+$cargoToml = Get-Content "$root\Cargo.toml" -Raw
+$version = "0.1.0"
+$versionCode = 16777216
+if ($cargoToml -match 'version\s*=\s*"(\d+)\.(\d+)\.(\d+)"') {
+    $major = [int]$Matches[1]
+    $minor = [int]$Matches[2]
+    $patch = [int]$Matches[3]
+    $version = "$major.$minor.$patch"
+    # The same scheme cargo-apk uses, so the version code keeps growing.
+    $versionCode = 0x1000000 + ($minor * 256) + $patch
+}
+$manifestWork = Join-Path $root "target\manifest"
+Remove-Item $manifestWork -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $manifestWork | Out-Null
+& "$buildTools\aapt2.exe" link -I $androidJar --manifest "$root\AndroidManifest.xml" `
+    --auto-add-overlay --min-sdk-version 26 --target-sdk-version 34 `
+    --version-code $versionCode --version-name $version `
+    -o "$manifestWork\manifest.apk"
+if ($LASTEXITCODE -ne 0) { throw "aapt2 link failed" }
+if (-not (Test-Path "$manifestWork\manifest.apk")) { throw "aapt2 produced no manifest" }
 
 Write-Host "==> building the Rust library"
 $env:ANDROID_HOME = $sdk
@@ -83,23 +111,36 @@ $apk = Join-Path $root "target\release\apk\quickstt-android.apk"
 if (-not (Test-Path $apk)) { $apk = Join-Path $root "target\debug\apk\quickstt-android.apk" }
 if (-not (Test-Path $apk)) { throw "cargo apk did not produce an APK" }
 
-Write-Host "==> adding the dex and the engines"
+Write-Host "==> adding the dex, the manifest and the engines"
 $merged = Join-Path $work "with-dex.apk"
 $python = Get-Command python -ErrorAction SilentlyContinue
 if ($python) {
     @'
 import sys, zipfile
-src, dst, dex = sys.argv[1], sys.argv[2], sys.argv[3]
+src, dst, dex, manifest_apk = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 # The engines: the file name in the APK and the binary to put there.
-engines = [(a.split("=")[0], a.split("=", 1)[1]) for a in sys.argv[4:]]
+engines = [(a.split("=")[0], a.split("=", 1)[1]) for a in sys.argv[5:]]
+
+# Our own manifest (the one aapt2 compiled). It declares the foreground
+# service that keeps QuickSTT alive in the background.
+with zipfile.ZipFile(manifest_apk) as zm:
+    manifest = zm.read("AndroidManifest.xml")
+
 with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
+    stamp = None
     for item in zin.infolist():
+        stamp = item.date_time
+        if item.filename == "AndroidManifest.xml":
+            continue
         data = zin.read(item.filename)
         info = zipfile.ZipInfo(item.filename, date_time=item.date_time)
         info.compress_type = item.compress_type
         info.external_attr = item.external_attr
         info.create_system = item.create_system
         zout.writestr(info, data)
+    info = zipfile.ZipInfo("AndroidManifest.xml", date_time=stamp)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    zout.writestr(info, manifest)
     zout.write(dex, "classes.dex")
     # The engines go into the APK's lib directory: the installer extracts
     # them into the app's native library directory, which is the only place
@@ -107,11 +148,11 @@ with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
     for name, path in engines:
         with open(path, "rb") as handle:
             data = handle.read()
-        info = zipfile.ZipInfo("lib/arm64-v8a/" + name, date_time=item.date_time)
+        info = zipfile.ZipInfo("lib/arm64-v8a/" + name, date_time=stamp)
         info.compress_type = zipfile.ZIP_DEFLATED
         info.external_attr = 0o755 << 16
         zout.writestr(info, data)
-'@ | & $python.Source - $apk $merged "$work\dex\classes.dex" `
+'@ | & $python.Source - $apk $merged "$work\dex\classes.dex" "$manifestWork\manifest.apk" `
         "libwhisper-cli.so=$root\prebuilt\whisper-cli-arm64-v8a" `
         "libneedle.so=$root\prebuilt\needle-arm64-v8a" `
         "libtranscribe-cli.so=$root\prebuilt\transcribe-cli-arm64-v8a"
@@ -121,6 +162,15 @@ with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
     Copy-Item $apk $merged -Force
     Push-Location "$work\dex"
     & $jar uf $merged classes.dex
+    Pop-Location
+    # The manifest out of the aapt2 output.
+    $manifestDir = Join-Path $work "manifest"
+    New-Item -ItemType Directory -Force $manifestDir | Out-Null
+    Push-Location $manifestDir
+    & $jar xf "$manifestWork\manifest.apk" AndroidManifest.xml
+    Pop-Location
+    Push-Location $manifestDir
+    & $jar uf $merged AndroidManifest.xml
     Pop-Location
 }
 if (-not (Test-Path $merged)) { throw "the dex was not added" }

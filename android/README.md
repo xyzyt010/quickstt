@@ -16,16 +16,19 @@ record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window
 | **Microphone self-test** ("Test mic" in the setup card) | ✅ implemented |
 | **Runtime permission flow** (system dialog + result pickup) | ✅ implemented |
 | **On-device transcription** (three engines for arm64-v8a) | ✅ implemented |
-| **Model download in-app** (8 models, with a progress bar) | ✅ implemented |
 | **Clipboard copy** of the finished transcript | ✅ implemented |
 | **Floating bubble over other apps** (`TYPE_APPLICATION_OVERLAY`) | ✅ implemented |
 | **Interactive bubble** (REC / TYPE / close, draggable) | ✅ implemented (Java helper in a dex) |
+| **Foreground service** (the bubble keeps working in other apps) | ✅ implemented (`SpeechService`) |
+| **Battery optimisation exemption** (the app is not put to sleep) | ✅ implemented |
+| **Model download in-app** (8 models, real byte progress) | ✅ implemented (Android HTTP stack) |
+| **Model self-test** ("Test this model" — records 4 s, runs the engine) | ✅ implemented |
 | **Typing into the app in front** (real KeyEvents) | ✅ implemented, needs the INJECT_EVENTS permission |
 | **Share sheet** for the last transcript | ✅ implemented |
 | Setup steps / how-to-use card in the Listen tab | ✅ implemented |
 | Activity log + status line (every action says what it did) | ✅ implemented |
 | Tab bar with real icons and an active marker | ✅ implemented |
-| Always-on wake word (background mic) | ⏳ needs a Java foreground service |
+| Always-on wake word (background mic) | ⏳ needs the foreground service to record |
 
 ## The engines are real
 
@@ -230,12 +233,42 @@ settings.
    hallucinates short words on noise-only audio).
 4. **Model** — never bundled. The Models tab lists the models the phone can
    run and downloads the chosen one from the same HuggingFace source the
-   desktop app uses, with a progress bar per row. The choice is remembered
-   between launches.
+   desktop app uses. The transfer is done by the **Android HTTP stack**
+   (`ai.quickstt.app.ModelDownloader`, `HttpURLConnection`): the number of
+   bytes that really arrived is reported into the app, an interrupted
+   download continues where it stopped (a `Range` request), and only a
+   **complete** file is moved into place — a truncated model is worse than
+   no model at all, because the engine would fail on it. The choice is
+   remembered between launches.
 5. **Result** — the transcript is shown in the app, pushed into History and
    copied to the system clipboard, so it can be pasted into any app. If
    another app is in front, the text is also *typed* into it (see above).
 6. **Floating bubble** — the overlay described above.
+7. **Background** — the bubble is started together with a **foreground
+   service** (`ai.quickstt.app.SpeechService`, type `microphone`): it keeps
+   the process alive while the user works in another app and shows a small
+   notification that says what it is for. The service needs the app to be
+   exempt from the battery restrictions, which the Settings tab offers
+   (`Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, the app's own
+   page first and the list of all apps as the fallback — the same flow the
+   reference app uses).
+
+## The manifest
+
+cargo-apk generates a manifest that can only describe an activity, and
+QuickSTT needs a **service** (the foreground service above). So the APK is
+finished by hand:
+
+- `AndroidManifest.xml` in this folder is the real manifest — the
+  permissions, the activity with `android.app.lib_name`, and the service
+  with its type. It is compiled with `aapt2 link` and the result replaces
+  the manifest in the APK.
+- `build-apk.ps1` (and the CI) do that: javac → d8 → `aapt2 link` → the dex,
+  the manifest and the engines go into the APK → zipalign → apksigner.
+
+The manifest is also where `android:extractNativeLibs="true"` lives: it is
+false by default for apps that target API 23 or newer, and then the speech
+engines stay inside the APK where they can never be started.
 
 ## Build
 

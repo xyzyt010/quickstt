@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.os.Process;
 import android.provider.Settings;
 
@@ -179,6 +180,63 @@ public final class Overlay {
     /** Take the floating bubble off the screen (see {@link Bubble}). */
     public static String hide(Context context, String state, String transcript) {
         return Bubble.hide(context);
+    }
+
+    /**
+     * Is QuickSTT exempt from the battery restrictions?
+     *
+     * <p>Without the exemption Android puts the app to sleep as soon as it
+     * is in the background — and the bubble would stop working.
+     */
+    public static boolean ignoringBatteryOptimizations(Context context) {
+        try {
+            PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+            return power != null
+                    && power.isIgnoringBatteryOptimizations(context.getPackageName());
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Ask the system to let QuickSTT run in the background.
+     *
+     * <p>QuickSTT's own page first, the list of all apps as the fallback —
+     * the same flow the reference app uses for the battery exemption.
+     *
+     * @return an empty string when a page was opened, otherwise the reason.
+     */
+    public static String requestBatteryExemption(Context context) {
+        try {
+            Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            intent.setData(Uri.parse("package:" + context.getPackageName()));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(intent);
+            return "";
+        } catch (Throwable t) {
+            // The action is not implemented on every phone: show the list.
+            try {
+                Intent intent = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                context.startActivity(intent);
+                return "";
+            } catch (Throwable t2) {
+                return "the battery settings could not be opened (" + describe(t2) + ")";
+            }
+        }
+    }
+
+    /** May QuickSTT show its notification? (Android 13+ asks for it.) */
+    public static boolean canPostNotifications(Context context) {
+        try {
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
+                return true;
+            }
+            return context.checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        } catch (Throwable t) {
+            return true;
+        }
     }
 
     private static String describe(Throwable t) {

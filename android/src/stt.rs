@@ -14,8 +14,6 @@
 // model the bundled engine really can load, so the Models tab only ever
 // lists engines that work on the phone.
 
-#[cfg(target_os = "android")]
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// The engines that run on the phone.
@@ -328,61 +326,26 @@ pub fn selected() -> usize {
 }
 
 /// Download a model, reporting progress (done, total) in bytes.
+///
+/// The transfer itself is done by the Android HTTP stack (the Java helper
+/// `ai.quickstt.app.ModelDownloader`): that is the stack the phone trusts,
+/// it continues an interrupted download where it stopped, and it only moves
+/// a **complete** file into place — a truncated model is worse than no model
+/// at all, because the engine would fail on it.
 #[cfg(target_os = "android")]
-pub fn download_model<F: FnMut(u64, u64)>(index: usize, mut progress: F) -> Result<(), String> {
+pub fn download_model<F: FnMut(u64, u64) + 'static>(
+    index: usize,
+    progress: F,
+) -> Result<(), String> {
     let spec = model(index);
     let path = model_path(index).ok_or("no writable app directory")?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let part = path.with_extension("part");
-    // A download must not hang forever: the connect is short, the reads may
-    // take as long as the file needs.
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(30))
-        .timeout_read(std::time::Duration::from_secs(120))
-        .timeout_write(std::time::Duration::from_secs(120))
-        .build();
-    let resp = agent
-        .get(spec.url)
-        .set("User-Agent", "QuickSTT-Android/1.0")
-        .call()
-        .map_err(|e| format!("download failed: {e}"))?;
-    let total: u64 = resp
-        .header("Content-Length")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let mut reader = resp.into_reader();
-    let mut file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
-    let mut buf = vec![0u8; 256 * 1024];
-    let mut done = 0u64;
-    loop {
-        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        std::io::Write::write_all(&mut file, &buf[..n]).map_err(|e| e.to_string())?;
-        done += n as u64;
-        progress(done, total);
-    }
-    drop(file);
-    // A truncated download is worse than none: the engine would fail on it.
-    let written = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
-    if written < spec.min_bytes {
-        let _ = std::fs::remove_file(&part);
-        return Err(format!(
-            "the download was incomplete ({written} of {total} bytes)"
-        ));
-    }
-    std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
-    Ok(())
+    crate::platform::download_file_with_progress(spec.url, &path, spec.min_bytes, progress)
 }
 
 #[cfg(not(target_os = "android"))]
 pub fn download_model<F: FnMut(u64, u64)>(_index: usize, _progress: F) -> Result<(), String> {
     Err("model downloads are only available on Android".into())
 }
-
 /// Transcribe a 16 kHz mono WAV with the bundled engine.
 ///
 /// The engine gets a hard timeout: a model that hangs must not freeze the

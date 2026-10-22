@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The manifest of QuickSTT for Android.
+
+  cargo-apk generates a manifest of its own, and that one can only describe
+  an activity — it has no way to declare a service. QuickSTT needs a
+  foreground service (it has to keep running in the background and own the
+  floating bubble above the other apps), so the APK is finished by hand:
+  this file is compiled with `aapt2 link` and the resulting manifest is
+  put into the APK by `build-apk.ps1` (and by the CI).
+
+  The structure follows the reference app (tide-music): the permissions
+  that are asked for, a foreground service with its own type, the battery
+  optimisation exemption, and `extractNativeLibs` so the speech engines can
+  be started.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="ai.quickstt.app">
+
+    <!-- The microphone: the speech-to-text input. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- The models are downloaded from HuggingFace. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- The floating bubble above the other apps. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- The foreground service: QuickSTT keeps running while the user works
+         in another app, and the bubble stays on the screen. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- The notification of that service (API 33+ asks for it). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Keep the recording alive while the screen is off. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Do not let the system put QuickSTT to sleep when it is in the
+         background. The app asks for this when the user switches the
+         bubble on. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Typing into the app in front. A signature permission: only a rooted
+         phone or a userdebug build can grant it
+         (adb shell pm grant ai.quickstt.app android.permission.INJECT_EVENTS).
+         Without it QuickSTT copies the text to the clipboard instead. -->
+    <uses-permission android:name="android.permission.INJECT_EVENTS"
+        tools:ignore="ProtectedPermissions" />
+
+    <uses-feature android:name="android.hardware.microphone" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <application
+        android:label="QuickSTT"
+        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+        android:hasCode="true"
+        android:allowBackup="true"
+        android:supportsRtl="true"
+        android:windowSoftInputMode="adjustResize"
+        android:hardwareAccelerated="true"
+        android:extractNativeLibs="true">
+
+        <!-- The activity is the framework's NativeActivity: it loads
+             libquickstt_android.so, which starts Slint and the app. -->
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:screenOrientation="fullSensor"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|density"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data android:name="android.app.lib_name" android:value="quickstt_android" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Keeps QuickSTT alive in the background and owns the floating
+             bubble. `microphone` because the service exists for the
+             microphone; `specialUse` is the fallback for the case where the
+             microphone permission was refused (Android 14 and newer demand a
+             type for every foreground service). -->
+        <service
+            android:name="ai.quickstt.app.SpeechService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the microphone bubble of QuickSTT available in the background." />
+        </service>
+    </application>
+</manifest>

@@ -222,7 +222,12 @@ the NDK AAudio API, three engines (whisper.cpp, the Cactus `needle` and
 transcribe.cpp — all cross-compiled for arm64-v8a and shipped inside the APK)
 transcribe on-device, the text is copied to the clipboard, typed into the app
 in front with real key events, and a floating bubble with REC / TYPE buttons
-follows you across apps.
+follows you across apps — kept alive by a **foreground service**, so it
+survives the app being swiped away.
+
+The models are downloaded with the phone's own HTTP stack, so the progress
+bar shows the bytes that really arrived, an interrupted download continues
+where it stopped, and only a complete model file is put in place.
 
 The fastest way to get it is the release APK (11.2 MB, signed):
 
