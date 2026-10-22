@@ -26,7 +26,7 @@ Everything is published on the [GitHub release page](https://github.com/xyzyt010
 
 | What | Platform | Link |
 |---|---|---|
-| **`quickstt-android-release.apk`** (11.2 MB) | Android 8.0+ (arm64-v8a) | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt-android-release.apk) |
+| **`quickstt-android-release.apk`** (10.5 MB) | Android 8.0+ (arm64-v8a) | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt-android-release.apk) |
 | `quickstt-v2.0.0-alpha.18-x86_64.tar.gz` (29 MB) | Ubuntu 22.04+ / Debian 12 / Mint 21+ | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt-v2.0.0-alpha.18-x86_64.tar.gz) |
 | `quickstt_2.0.0.alpha.18-1_amd64.deb` (20 MB) | Debian / Ubuntu / Mint | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt_2.0.0.alpha.18-1_amd64.deb) |
 | `SHA256SUMS` | — | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/SHA256SUMS) |
@@ -229,7 +229,7 @@ The models are downloaded with the phone's own HTTP stack, so the progress
 bar shows the bytes that really arrived, an interrupted download continues
 where it stopped, and only a complete model file is put in place.
 
-The fastest way to get it is the release APK (11.2 MB, signed):
+The fastest way to get it is the release APK (10.5 MB, signed):
 
 ```bash
 wget -O quickstt.apk https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt-android-release.apk
