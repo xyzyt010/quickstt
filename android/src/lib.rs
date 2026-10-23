@@ -79,7 +79,13 @@ pub fn android_main(app: slint::android::AndroidApp) {
     // dialog, the clipboard and the overlay), so keep a handle before the
     // backend consumes it.
     platform::init(app.clone());
-    if let Err(e) = slint::android::init(app) {
+    // Every Android event is written to logcat. It is the only way to see
+    // whether the phone sends the taps to the app at all:
+    //   adb logcat | grep QuickSTT
+    // "android event: Main(InputAvailable)" means the touch arrived.
+    if let Err(e) = slint::android::init_with_event_listener(app, |event| {
+        platform::log(&format!("android event: {event:?}"));
+    }) {
         eprintln!("QuickSTT: Slint Android backend failed to start: {e}");
         return;
     }
@@ -408,8 +414,13 @@ fn diagnostics_report(index: usize) -> String {
     lines.join("\n")
 }
 
-/// Wire callbacks and run the event loop.
-pub fn run() {
+/// Build the window and wire every callback.
+///
+/// This is separate from [`run`] on purpose: a test can build the very same
+/// window, tap its buttons and check that the tap really arrives in the
+/// Rust code. A button that looks alive but does nothing is the worst kind
+/// of bug, and this is what catches it.
+pub fn build_ui() -> AppWindow {
     let ui = AppWindow::new().expect("could not create the QuickSTT window");
 
     // The desktop preview should look like a phone. (On Android the surface is
@@ -810,6 +821,29 @@ pub fn run() {
         ui.on_nav(move |tab| {
             if let Some(ui) = weak.upgrade() {
                 ui.set_tab(tab.clamp(0, 3));
+            }
+        });
+    }
+
+    // The touch probe: it shows where a tap landed, how big the window is
+    // and how much it is scaled. When a button does nothing, this says
+    // whether the tap never arrived or arrived somewhere else.
+    {
+        let weak = ui.as_weak();
+        ui.on_report_tap(move |x, y| {
+            let (w, h, scale) = match weak.upgrade() {
+                Some(ui) => {
+                    let size = ui.window().size();
+                    (size.width, size.height, ui.window().scale_factor())
+                }
+                None => (0, 0, 0.0),
+            };
+            let text = format!(
+                "Tap at {x:.0}, {y:.0} px · window {w:.0}x{h:.0} · scale {scale:.2}"
+            );
+            platform::log(&format!("touch probe: {text}"));
+            if let Some(ui) = weak.upgrade() {
+                ui.set_touch_probe(text.into());
             }
         });
     }
@@ -1217,6 +1251,23 @@ pub fn run() {
         });
         note(&weak, &log, "QuickSTT started.");
 
+        // The size of the window and the scale factor: the two numbers that
+        // decide where a tap on the screen ends up. They are in logcat and
+        // in the touch probe of the first page.
+        {
+            let size = ui.window().size();
+            let scale = ui.window().scale_factor();
+            platform::log(&format!(
+                "window: {:.0}x{:.0} logical, scale {scale:.2}",
+                size.width, size.height
+            ));
+            let text = format!(
+                "Window {:.0}x{:.0} · scale {scale:.2} — tap here to test",
+                size.width, size.height
+            );
+            ui.set_touch_probe(text.into());
+        }
+
         // The bubble stays on if the user left it on: put it back on the
         // screen so it is there in every app, not only inside QuickSTT.
         let bubble_on = platform::overlay_enabled();
@@ -1239,7 +1290,12 @@ pub fn run() {
         platform::watch_overlay_permission();
     }
 
-    ui.run().expect("Slint event loop failed");
+    ui
+}
+
+/// Show the window and run the event loop.
+pub fn run() {
+    build_ui().run().expect("Slint event loop failed");
 }
 
 /// Is this take silent?

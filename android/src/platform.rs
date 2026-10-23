@@ -364,10 +364,23 @@ where
     let out = f(&mut env, &activity);
     // A failed Java call leaves a pending exception on this thread. Clear it,
     // otherwise every later JNI call on that thread fails with
-    // "JNI DETECTED ERROR IN APPLICATION: pending exception".
+    // "JNI DETECTED ERROR IN APPLICATION: pending exception". The message is
+    // read first and logged: a swallowed `ClassNotFoundException` is exactly
+    // what a button that "does nothing" looks like.
     if env.exception_check().unwrap_or(false) {
-        log("a Java call failed - the exception was cleared");
+        let thrown = env.exception_occurred().ok();
         let _ = env.exception_clear();
+        let described = thrown
+            .and_then(|exception| {
+                let text = env
+                    .call_method(&exception, "toString", "()Ljava/lang/String;", &[])
+                    .ok()?
+                    .l()
+                    .ok()?;
+                env.get_string(&JString::from(text)).ok().map(|s| s.into())
+            })
+            .unwrap_or_else(|| "unknown Java exception".to_string());
+        log(&format!("a Java call failed: {described}"));
     }
     // Never delete a reference we do not own.
     std::mem::forget(activity);
@@ -377,23 +390,25 @@ where
 /// Find one of the app's own Java classes.
 ///
 /// `FindClass` uses the **system** class loader on a thread that was attached
-/// with `AttachCurrentThread`, so the app's own classes (the bubble helper)
-/// are invisible to it — the call fails with `ClassNotFoundException` and the
-/// bubble silently falls back to a plain read-out. The Activity's class
-/// loader can see them, so it is used instead.
+/// with `AttachCurrentThread`, so the app's own classes (the bubble helper,
+/// the downloader, the service) are invisible to it.
+///
+/// The loader has to be `Context.getClassLoader()` — the loader of the
+/// **application package**. `activity.getClass().getClassLoader()` looks
+/// equivalent but is not: the activity is `android.app.NativeActivity`,
+/// which is a framework class loaded by the **boot** class loader, and that
+/// one cannot see a single class of the app. Every helper call then failed
+/// with `ClassNotFoundException` while the JNI layer silently cleared it —
+/// the downloads never started, the bubble never appeared and the settings
+/// page never opened, exactly as if the buttons did nothing.
 #[cfg(target_os = "android")]
 fn app_class<'local>(
     env: &mut jni::JNIEnv<'local>,
     activity: &JObject<'_>,
     name: &str,
 ) -> Option<JClass<'local>> {
-    let class = env
-        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])
-        .ok()?
-        .l()
-        .ok()?;
     let loader = env
-        .call_method(&class, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
         .ok()?
         .l()
         .ok()?;

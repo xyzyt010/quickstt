@@ -10,7 +10,14 @@
 #
 #   ./build-apk.ps1            release build (signed with the release key)
 #   ./build-apk.ps1 -Debug     debug build
-param([switch]$Debug)
+param(
+    [switch]$Debug,
+    # The ABI to build for. The phone is arm64-v8a; the emulator on this
+    # machine is x86_64, so the same script can build a test APK for it.
+    [string]$Abi = "aarch64-linux-android",
+    # Where the finished APK is copied to. Empty means cargo-apk's output.
+    [string]$OutName = ""
+)
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -101,18 +108,30 @@ if (Test-Path $ndkBin) {
     Write-Host "    WARNING: no NDK toolchain at $ndkBin"
 }
 if ($Debug) {
-    cargo apk build --target aarch64-linux-android --lib
+    cargo apk build --target $Abi --lib
 } else {
-    cargo apk build --release --target aarch64-linux-android --lib
+    cargo apk build --release --target $Abi --lib
 }
 if ($LASTEXITCODE -ne 0) { throw "cargo apk build failed" }
 
-$apk = Join-Path $root "target\release\apk\quickstt-android.apk"
-if (-not (Test-Path $apk)) { $apk = Join-Path $root "target\debug\apk\quickstt-android.apk" }
-if (-not (Test-Path $apk)) { throw "cargo apk did not produce an APK" }
+$profile = if ($Debug) { "debug" } else { "release" }
+$apk = @(
+    (Join-Path $root "target\$Abi\$profile\apk\quickstt-android.apk"),
+    (Join-Path $root "target\$profile\apk\quickstt-android.apk")
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $apk) { throw "cargo apk did not produce an APK" }
 
 Write-Host "==> adding the dex, the manifest and the engines"
 $merged = Join-Path $work "with-dex.apk"
+# The speech engines are arm64 binaries; an emulator APK has none.
+$engineArgs = @()
+if ($Abi -eq "aarch64-linux-android") {
+    $engineArgs = @(
+        "libwhisper-cli.so=$root\prebuilt\whisper-cli-arm64-v8a",
+        "libneedle.so=$root\prebuilt\needle-arm64-v8a",
+        "libtranscribe-cli.so=$root\prebuilt\transcribe-cli-arm64-v8a"
+    )
+}
 $python = Get-Command python -ErrorAction SilentlyContinue
 if ($python) {
     @'
@@ -152,10 +171,7 @@ with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
         info.compress_type = zipfile.ZIP_DEFLATED
         info.external_attr = 0o755 << 16
         zout.writestr(info, data)
-'@ | & $python.Source - $apk $merged "$work\dex\classes.dex" "$manifestWork\manifest.apk" `
-        "libwhisper-cli.so=$root\prebuilt\whisper-cli-arm64-v8a" `
-        "libneedle.so=$root\prebuilt\needle-arm64-v8a" `
-        "libtranscribe-cli.so=$root\prebuilt\transcribe-cli-arm64-v8a"
+'@ | & $python.Source - $apk $merged "$work\dex\classes.dex" "$manifestWork\manifest.apk" @engineArgs
 } else {
     # Fall back to the JDK's jar tool.
     $jar = (Get-Command jar -ErrorAction Stop).Source
@@ -189,6 +205,13 @@ if ($Debug) {
         --ks-pass pass:quickstt --key-pass pass:quickstt --out $apk $aligned
     if ($LASTEXITCODE -ne 0) { throw "apksigner failed" }
     Write-Host "==> signed release APK: $apk"
+}
+
+if ($OutName) {
+    $dest = Join-Path $root $OutName
+    New-Item -ItemType Directory -Force (Split-Path -Parent $dest) | Out-Null
+    Copy-Item $apk $dest -Force
+    Write-Host "==> copied to $dest"
 }
 
 Pop-Location

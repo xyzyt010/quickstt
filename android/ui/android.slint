@@ -1,6 +1,4 @@
-﻿import { ScrollView } from "std-widgets.slint";
-
-// QuickSTT for Android — touch-first UI.
+﻿// QuickSTT for Android — touch-first UI.
 //
 // This is deliberately NOT the desktop dashboard: phones are held in one
 // hand, so the primary action (the mic orb) sits in the bottom third of the
@@ -148,6 +146,10 @@ component Toggle inherits Rectangle {
     }
 
     TouchArea {
+        // An explicit size: a TouchArea without one has no area to hit, and
+        // the tap is lost instead of reaching the button.
+        width: parent.width;
+        height: parent.height;
         clicked => { root.toggled(); }
     }
 }
@@ -175,6 +177,8 @@ component ActionButton inherits Rectangle {
     }
 
     TouchArea {
+        width: parent.width;
+        height: parent.height;
         enabled: root.enabled;
         clicked => { root.clicked(); }
     }
@@ -187,6 +191,18 @@ component Card inherits Rectangle {
     border-width: 1px;
     border-color: #1E1E1E;
 }
+
+// The scroll area of a page.
+//
+// The standard library's ScrollView is built on a *native* scroll view, and
+// the Android backend has no native widgets — on the phone that widget is
+// missing, and with it the gesture handling of the page. So the pages use a
+// plain Flickable: it is pure Slint and behaves the same on every
+// platform.
+//
+// The Flickable fills the body (it is not in a layout, so it takes 100% of
+// its parent); its content is the layout inside it, and the content height
+// is what makes the page scroll.
 
 // Bottom-bar entry: an icon, a label and an accent rail on top.
 component NavItem inherits Rectangle {
@@ -238,6 +254,8 @@ component NavItem inherits Rectangle {
     }
 
     TouchArea {
+        width: parent.width;
+        height: parent.height;
         clicked => { root.picked(); }
     }
 }
@@ -427,6 +445,10 @@ export component AppWindow inherits Window {
     // A short, human-readable activity log — the app tells the user what it
     // is doing instead of looking frozen.
     in-out property <string> log-text: "";
+    // The last tap: where it landed, how big the window is and how much it
+    // is scaled. It is the answer to "the buttons do nothing" — a tap that
+    // arrives somewhere else shows up here.
+    in-out property <string> touch-probe: "No tap yet";
     // The result of the last model test: what the engine said, how long it
     // took and which files were used. This is how the user finds out whether
     // the speech recognition really works on this phone.
@@ -467,6 +489,8 @@ export component AppWindow inherits Window {
     // Push the last transcript into the app in front / into the share sheet.
     callback type-into-app();
     callback share-text();
+    // A tap arrived: (x, y) inside the probe area of the status card.
+    callback report-tap(float, float);
 
     // Root box: a Rectangle fills the Window; a bare root layout gets centred
     // at its preferred width by the winit backend instead of stretching.
@@ -540,9 +564,9 @@ export component AppWindow inherits Window {
                 background: #000000;
 
                 // ══ LISTEN ═══════════════════════════════════════════════
-                if root.tab == 0 : ScrollView {
+                if root.tab == 0 : Flickable {
                     VerticalLayout {
-                        width: 100%;
+                        width: parent.width;
                         alignment: start;
                         padding-left: 16px;
                         padding-right: 16px;
@@ -575,6 +599,25 @@ export component AppWindow inherits Window {
                                     text: root.log-text;
                                     font-size: 11px;
                                     color: #5E5E5E;
+                                }
+
+                                // The touch probe: tapping this card shows
+                                // where the tap landed. If the numbers are
+                                // not where the finger was, the phone sends
+                                // the tap to the wrong place.
+                                Body {
+                                    text: root.touch-probe;
+                                    font-size: 11px;
+                                    color: #7A5C3A;
+                                }
+                            }
+
+                            // The probe itself: the whole card is the target.
+                            probe := TouchArea {
+                                width: parent.width;
+                                height: parent.height;
+                                clicked => {
+                                    root.report-tap(probe.mouse-x / 1px, probe.mouse-y / 1px);
                                 }
                             }
                         }
@@ -656,6 +699,8 @@ export component AppWindow inherits Window {
                                 }
 
                                 TouchArea {
+                                    width: parent.width;
+                                    height: parent.height;
                                     clicked => { root.toggle-record(); }
                                 }
                             }
@@ -716,6 +761,8 @@ export component AppWindow inherits Window {
                             }
 
                             TouchArea {
+                                width: parent.width;
+                                height: parent.height;
                                 clicked => { root.nav(2); }
                             }
                         }
@@ -858,9 +905,9 @@ export component AppWindow inherits Window {
                 }
 
                 // ══ HISTORY ══════════════════════════════════════════════
-                if root.tab == 1 : ScrollView {
+                if root.tab == 1 : Flickable {
                     VerticalLayout {
-                        width: 100%;
+                        width: parent.width;
                         alignment: start;
                         padding-left: 16px;
                         padding-right: 16px;
@@ -921,9 +968,9 @@ export component AppWindow inherits Window {
                 }
 
                 // ══ MODELS ═══════════════════════════════════════════════
-                if root.tab == 2 : ScrollView {
+                if root.tab == 2 : Flickable {
                     VerticalLayout {
-                        width: 100%;
+                        width: parent.width;
                         alignment: start;
                         padding-left: 16px;
                         padding-right: 16px;
@@ -947,6 +994,17 @@ export component AppWindow inherits Window {
                             text: "Every model below runs on this phone with the bundled engines — the same model files the desktop app uses. Nothing is bundled in the app: a model is downloaded once and then works offline.";
                             font-size: 13px;
                             color: #6B6B6B;
+                        }
+
+                        // The download starts from this page, so its result has
+                        // to be visible here. Without this line a failed download
+                        // left the page unchanged: exactly "nothing happens".
+                        if root.status-text != "" : Text {
+                            text: root.status-text;
+                            font-size: 12px;
+                            color: root.model-downloading ? #4ADE80 : #B08A5A;
+                            horizontal-alignment: left;
+                            wrap: word-wrap;
                         }
 
                         // The test card: the honest answer to "does the
@@ -1121,9 +1179,9 @@ export component AppWindow inherits Window {
                 }
 
                 // ══ SETTINGS ═════════════════════════════════════════════
-                if root.tab == 3 : ScrollView {
+                if root.tab == 3 : Flickable {
                     VerticalLayout {
-                        width: 100%;
+                        width: parent.width;
                         alignment: start;
                         padding-left: 16px;
                         padding-right: 16px;
