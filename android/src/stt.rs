@@ -300,13 +300,18 @@ pub fn model_path(index: usize) -> Option<PathBuf> {
     work_dir().map(|d| d.join("models").join(model(index).file))
 }
 
-/// True when the model is already downloaded.
+/// True when the model is already downloaded or extracted from the APK.
 pub fn model_installed(index: usize) -> bool {
     let spec = model(index);
-    model_path(index)
-        .and_then(|p| std::fs::metadata(p).ok())
-        .map(|m| m.len() > spec.min_bytes)
-        .unwrap_or(false)
+    if let Some(path) = model_path(index) {
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() >= spec.min_bytes {
+                return true;
+            }
+        }
+    }
+    // Check if the model is bundled in the APK (e.g. Cactus Whistle)
+    crate::platform::extract_bundled_model(spec.file, spec.min_bytes)
 }
 
 /// Remember the model the user picked (the app restarts with it).
@@ -316,13 +321,19 @@ pub fn save_selected(index: usize) {
     }
 }
 
-/// The model the user picked (defaults to the fastest one).
+/// The model the user picked (defaults to the packaged model or fastest one).
 pub fn selected() -> usize {
     work_dir()
         .and_then(|d| std::fs::read_to_string(d.join("selected_model")).ok())
         .and_then(|s| s.trim().parse::<usize>().ok())
         .filter(|i| *i < MODELS.len())
-        .unwrap_or(DEFAULT_MODEL)
+        .unwrap_or_else(|| {
+            if model_installed(1) {
+                1
+            } else {
+                DEFAULT_MODEL
+            }
+        })
 }
 
 /// Download a model, reporting progress (done, total) in bytes.

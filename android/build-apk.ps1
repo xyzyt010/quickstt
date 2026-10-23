@@ -121,8 +121,13 @@ $apk = @(
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $apk) { throw "cargo apk did not produce an APK" }
 
-Write-Host "==> adding the dex, the manifest and the engines"
+Write-Host "==> adding the dex, the manifest, the engines and bundled models"
 $merged = Join-Path $work "with-dex.apk"
+$cactusModel = Join-Path $root "prebuilt\whistle.cact"
+if (-not (Test-Path $cactusModel)) {
+    Write-Host "==> downloading Cactus Whistle model to embed into APK"
+    curl.exe -L -o $cactusModel "https://huggingface.co/Cactus-Compute/whistle/resolve/main/whistle.cact"
+}
 # The speech engines are arm64 binaries; an emulator APK has none.
 $engineArgs = @()
 if ($Abi -eq "aarch64-linux-android") {
@@ -135,10 +140,10 @@ if ($Abi -eq "aarch64-linux-android") {
 $python = Get-Command python -ErrorAction SilentlyContinue
 if ($python) {
     @'
-import sys, zipfile
-src, dst, dex, manifest_apk = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+import sys, os, zipfile
+src, dst, dex, manifest_apk, cactus_model = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 # The engines: the file name in the APK and the binary to put there.
-engines = [(a.split("=")[0], a.split("=", 1)[1]) for a in sys.argv[5:]]
+engines = [(a.split("=")[0], a.split("=", 1)[1]) for a in sys.argv[6:]]
 
 # Our own manifest (the one aapt2 compiled). It declares the foreground
 # service that keeps QuickSTT alive in the background.
@@ -161,6 +166,13 @@ with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
     info.compress_type = zipfile.ZIP_DEFLATED
     zout.writestr(info, manifest)
     zout.write(dex, "classes.dex")
+    # Bundle the Cactus model directly inside the APK assets
+    if cactus_model and os.path.isfile(cactus_model):
+        with open(cactus_model, "rb") as handle:
+            cdata = handle.read()
+        info = zipfile.ZipInfo("assets/models/whistle.cact", date_time=stamp)
+        info.compress_type = zipfile.ZIP_DEFLATED
+        zout.writestr(info, cdata)
     # The engines go into the APK's lib directory: the installer extracts
     # them into the app's native library directory, which is the only place
     # where Android lets an app run a program.
@@ -171,7 +183,7 @@ with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
         info.compress_type = zipfile.ZIP_DEFLATED
         info.external_attr = 0o755 << 16
         zout.writestr(info, data)
-'@ | & $python.Source - $apk $merged "$work\dex\classes.dex" "$manifestWork\manifest.apk" @engineArgs
+'@ | & $python.Source - $apk $merged "$work\dex\classes.dex" "$manifestWork\manifest.apk" $cactusModel @engineArgs
 } else {
     # Fall back to the JDK's jar tool.
     $jar = (Get-Command jar -ErrorAction Stop).Source

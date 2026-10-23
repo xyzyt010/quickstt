@@ -1,4 +1,4 @@
-﻿//! QuickSTT for Android — touch-first dictation.
+//! QuickSTT for Android — touch-first dictation.
 //!
 //! The UI is a dedicated touch-first Slint scene (`ui/android.slint`), not the
 //! desktop dashboard: phones get a bottom nav, a thumb-reachable record orb
@@ -1233,8 +1233,11 @@ pub fn build_ui() -> AppWindow {
     {
         let weak = ui.as_weak();
         let log = log.clone();
+        // Extract any pre-packaged model (e.g. Cactus Whistle) so the app has
+        // a working on-device speech engine out of the box.
+        let _ = platform::extract_bundled_model("whistle.cact", 16_000_000);
         let mic_ok = platform::has_mic_permission();
-        // Pick up the model the user chose last time.
+        // Pick up the model the user chose last time (or default to the packaged one).
         let index = stt::selected();
         ui.set_selected_model(index as i32);
         let model_ok = stt::model_installed(index);

@@ -239,6 +239,31 @@ public final class Overlay {
         }
     }
 
+    /** Copy text to the clipboard safely from any thread on the main Looper. */
+    public static boolean copyToClipboard(final Context context, final String text) {
+        try {
+            android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                                context.getSystemService(Context.CLIPBOARD_SERVICE);
+                        if (cm != null) {
+                            android.content.ClipData clip = android.content.ClipData.newPlainText("QuickSTT", text);
+                            cm.setPrimaryClip(clip);
+                        }
+                    } catch (Throwable t) {
+                        android.util.Log.w("QuickSTT", "could not copy to clipboard", t);
+                    }
+                }
+            });
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private static String describe(Throwable t) {
         String message = t.getMessage();
         if (message == null || message.isEmpty()) {

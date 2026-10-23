@@ -36,12 +36,12 @@ pub fn has_window_focus() -> bool {
     #[cfg(target_os = "android")]
     {
         with_activity(|env, activity| {
-            let res: jint = env
+            let res = env
                 .call_method(activity, "hasWindowFocus", "()Z", &[])
                 .ok()?
-                .i()
+                .z()
                 .ok()?;
-            Some(res != 0)
+            Some(res)
         })
         .unwrap_or(false)
     }
@@ -412,7 +412,8 @@ fn app_class<'local>(
         .ok()?
         .l()
         .ok()?;
-    let text = env.new_string(name).ok()?;
+    let binary_name = name.replace('/', ".");
+    let text = env.new_string(&binary_name).ok()?;
     let loaded = env
         .call_method(
             &loader,
@@ -526,7 +527,7 @@ pub fn stage_from_apk(entry: &str) -> Option<PathBuf> {
     #[cfg(target_os = "android")]
     {
         let path = with_activity(|env, activity| {
-            let cls = env.find_class("ai/quickstt/app/Engine").ok()?;
+            let cls = app_class(env, activity, "ai/quickstt/app/Engine")?;
             let name = env.new_string(entry).ok()?;
             let result = env
                 .call_static_method(
@@ -563,38 +564,16 @@ pub fn copy_to_clipboard(text: &str) -> bool {
     #[cfg(target_os = "android")]
     {
         let ok = with_activity(|env, activity| {
-            let service_name = env.new_string("clipboard").ok()?;
-            let service = env
-                .call_method(
-                    activity,
-                    "getSystemService",
-                    "(Ljava/lang/String;)Ljava/lang/Object;",
-                    &[JValue::from(&service_name)],
-                )
-                .ok()?
-                .l()
-                .ok()?;
-            let clip_cls = env.find_class("android/content/ClipData").ok()?;
-            let label = env.new_string("QuickSTT").ok()?;
             let body = env.new_string(text).ok()?;
-            let clip = env
-                .call_static_method(
-                    clip_cls,
-                    "newPlainText",
-                    "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;",
-                    &[JValue::from(&label), JValue::from(&body)],
-                )
-                .ok()?
-                .l()
-                .ok()?;
-            env.call_method(
-                &service,
-                "setPrimaryClip",
-                "(Landroid/content/ClipData;)V",
-                &[JValue::from(&clip)],
-            )
-            .ok()?;
-            Some(true)
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "copyToClipboard",
+                "(Landroid/content/Context;Ljava/lang/String;)Z",
+                &[JValue::from(activity), JValue::from(&body)],
+            )?;
+            value.z().ok()
         })
         .unwrap_or(false);
         if !ok {
@@ -654,7 +633,7 @@ pub fn request_permissions(permissions: &[&str]) {
         log(&format!("asking for {names:?}"));
         on_java_thread(move || {
             let result = with_activity(|env, activity| {
-                let string_cls = env.find_class("java.lang.String").ok()?;
+                let string_cls = env.find_class("java/lang/String").ok()?;
                 let arr = env
                     .new_object_array(names.len() as i32, &string_cls, JObject::null())
                     .ok()?;
@@ -750,7 +729,7 @@ pub fn ignoring_battery_optimizations() -> bool {
                 "(Landroid/content/Context;)Z",
                 &[JValue::from(activity)],
             )?;
-            Some(value.i().ok()? != 0)
+            value.z().ok()
         })
         .unwrap_or(false)
     }
@@ -801,7 +780,7 @@ pub fn can_post_notifications() -> bool {
                 "(Landroid/content/Context;)Z",
                 &[JValue::from(activity)],
             )?;
-            Some(value.i().ok()? != 0)
+            value.z().ok()
         })
         .unwrap_or(true)
     }
@@ -911,14 +890,14 @@ pub fn can_draw_overlays() -> bool {
                 "(Landroid/content/Context;)Z",
                 &[JValue::from(activity)],
             )?;
-            Some(value.i().ok()? != 0)
+            value.z().ok()
         });
         if let Some(granted) = via_helper {
             return granted;
         }
         with_activity(|env, activity| {
             let cls = env.find_class("android/provider/Settings").ok()?;
-            let res: jint = env
+            let res = env
                 .call_static_method(
                     cls,
                     "canDrawOverlays",
@@ -926,14 +905,43 @@ pub fn can_draw_overlays() -> bool {
                     &[JValue::from(activity)],
                 )
                 .ok()?
-                .i()
+                .z()
                 .ok()?;
-            Some(res != 0)
+            Some(res)
         })
         .unwrap_or(false)
     }
     #[cfg(not(target_os = "android"))]
     false
+}
+
+/// Extract a bundled model from the APK assets/zip if present.
+pub fn extract_bundled_model(file_name: &str, min_bytes: u64) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let name = env.new_string(file_name).ok()?;
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/ModelDownloader",
+                "extractBundledModel",
+                "(Landroid/content/Context;Ljava/lang/String;J)Z",
+                &[
+                    JValue::from(activity),
+                    JValue::from(&name),
+                    JValue::from(min_bytes as i64),
+                ],
+            )?;
+            value.z().ok()
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (file_name, min_bytes);
+        false
+    }
 }
 
 /// Open the system page where the user grants "display over other apps".

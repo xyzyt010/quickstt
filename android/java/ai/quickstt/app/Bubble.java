@@ -73,6 +73,13 @@ public final class Bubble {
      */
     public static String show(Context context, String state, String transcript) {
         try {
+            if (current != null && currentManager != null) {
+                String updated = update(state, transcript);
+                if (updated != null && updated.isEmpty()) {
+                    return "";
+                }
+            }
+
             hide(context);
 
             // The application context: the bubble has to survive the activity
