@@ -4,7 +4,10 @@ import android.content.Context;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
+import android.util.Log;
 import android.util.TypedValue;
+import android.view.ContextThemeWrapper;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -17,20 +20,15 @@ import android.widget.TextView;
 /**
  * The floating bubble that lives above every other app.
  *
- * <p>It is a small card with the mic state, the last transcript and three
+ * <p>It is a sleek, minimal card with the mic state, the last transcript and three
  * buttons: record, type the transcript into the app in front, and close.
  * The card can be dragged to any corner of the screen.
  *
- * <p>The whole overlay is built here because a {@code View.OnClickListener}
- * cannot be created from JNI, and because the window flags and the layout
- * parameters of an overlay window are easier to get right in Java. Every
- * method returns an error message (or an empty string for success) so the
- * Rust side can tell the user what went wrong instead of failing silently.
- *
- * <p>The class is optional: when the dex is missing (or the class cannot be
- * loaded) the app falls back to a plain read-out bubble.
+ * <p>Styled in a clean monochrome dark palette (#121212 / #1E1E1E / white text).
  */
 public final class Bubble {
+
+    private static final String TAG = "QuickSTT";
 
     /** Start or stop the recording. */
     public static final int ACTION_RECORD = 1;
@@ -39,11 +37,12 @@ public final class Bubble {
     /** Hide the bubble. */
     public static final int ACTION_CLOSE = 3;
 
-    /** TYPE_APPLICATION_OVERLAY: may be drawn over every other app. */
+    /** TYPE_APPLICATION_OVERLAY: may be drawn over other apps. */
     private static final int TYPE_APPLICATION_OVERLAY = 2038;
     /** FLAG_NOT_FOCUSABLE | FLAG_NOT_TOUCH_MODAL: the app in front keeps the
      *  keyboard focus and every tap outside the bubble still reaches it. */
-    private static final int FLAGS = 0x00000008 | 0x00000010;
+    private static final int FLAGS = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
 
     /** The bubble that is currently on the screen (if any). */
     private static View current;
@@ -51,12 +50,10 @@ public final class Bubble {
     private static WindowManager currentManager;
 
     static {
-        // The library is already loaded by the NativeActivity; loading it
-        // again is a no-op and makes the class safe to use on its own.
         try {
             System.loadLibrary("quickstt_android");
         } catch (UnsatisfiedLinkError e) {
-            // The bubble then simply has no buttons.
+            Log.w(TAG, "quickstt_android library not loaded yet for Bubble", e);
         }
     }
 
@@ -82,16 +79,47 @@ public final class Bubble {
 
             hide(context);
 
-            // The application context: the bubble has to survive the activity
-            // that created it (the user switches to another app all the time).
-            Context app = context.getApplicationContext();
-            WindowManager manager = (WindowManager)
-                    app.getSystemService(Context.WINDOW_SERVICE);
+            WindowManager manager = null;
+            Context themedContext = null;
+
+            // On Android 11+ (API 30+), createWindowContext provides the proper visual context for overlays
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    Context windowContext = context.createWindowContext(TYPE_APPLICATION_OVERLAY, null);
+                    manager = (WindowManager) windowContext.getSystemService(Context.WINDOW_SERVICE);
+                    themedContext = new ContextThemeWrapper(windowContext, android.R.style.Theme_DeviceDefault);
+                } catch (Throwable t) {
+                    Log.w(TAG, "createWindowContext failed, trying direct context", t);
+                }
+            }
+
+            if (manager == null) {
+                try {
+                    manager = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+                    themedContext = new ContextThemeWrapper(context, android.R.style.Theme_DeviceDefault);
+                } catch (Throwable t) {
+                    Log.w(TAG, "context getSystemService failed", t);
+                }
+            }
+
+            if (manager == null) {
+                try {
+                    Context app = context.getApplicationContext();
+                    manager = (WindowManager) app.getSystemService(Context.WINDOW_SERVICE);
+                    themedContext = new ContextThemeWrapper(app, android.R.style.Theme_DeviceDefault);
+                } catch (Throwable t) {
+                    Log.w(TAG, "app getSystemService failed", t);
+                }
+            }
+
             if (manager == null) {
                 return "the window manager is not available";
             }
+            if (themedContext == null) {
+                themedContext = context;
+            }
 
-            View view = build(app, state, transcript);
+            View view = build(themedContext, state, transcript);
 
             WindowManager.LayoutParams params = new WindowManager.LayoutParams(
                     WindowManager.LayoutParams.WRAP_CONTENT,
@@ -100,8 +128,8 @@ public final class Bubble {
                     FLAGS,
                     PixelFormat.TRANSLUCENT);
             params.gravity = Gravity.TOP | Gravity.START;
-            params.x = dp(context, 12);
-            params.y = dp(context, 90);
+            params.x = dp(context, 16);
+            params.y = dp(context, 96);
 
             manager.addView(view, params);
 
@@ -110,7 +138,7 @@ public final class Bubble {
             currentManager = manager;
             return "";
         } catch (Throwable t) {
-            // A missing permission shows up here as a BadTokenException.
+            Log.e(TAG, "Bubble.show failed", t);
             return describe(t);
         }
     }
@@ -119,7 +147,10 @@ public final class Bubble {
     public static String hide(Context context) {
         try {
             if (current != null && currentManager != null) {
-                currentManager.removeView(current);
+                try {
+                    currentManager.removeView(current);
+                } catch (Throwable ignored) {
+                }
             }
             current = null;
             currentParams = null;
@@ -150,39 +181,40 @@ public final class Bubble {
         }
     }
 
-    /** Build the bubble view: the state, the transcript and the buttons. */
+    /** Build the bubble view: the state, the transcript and the buttons. Minimalist monochrome. */
     private static View build(Context context, String state, String transcript) {
         LinearLayout row = new LinearLayout(context);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        int pad = dp(context, 10);
-        row.setPadding(pad, pad, pad, pad);
+        int padH = dp(context, 12);
+        int padV = dp(context, 8);
+        row.setPadding(padH, padV, padH, padV);
 
         TextView text = new TextView(context);
         text.setText(transcript.isEmpty() ? state : state + "\n" + transcript);
-        text.setTextColor(0xFFF2F5F7);
-        text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        text.setMaxWidth(dp(context, 210));
+        text.setTextColor(0xFFEDEDED);
+        text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        text.setMaxWidth(dp(context, 190));
         text.setMaxLines(3);
-        row.addView(text, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        textLp.setMarginEnd(dp(context, 8));
+        row.addView(text, textLp);
 
-        row.addView(makeButton(context, "REC", ACTION_RECORD, 0xFF4ADE80));
-        row.addView(makeButton(context, "TYPE", ACTION_TYPE, 0xFFE7ECF2));
-        row.addView(makeButton(context, "X", ACTION_CLOSE, 0xFF9AA3AD));
+        // Minimal monochrome buttons
+        row.addView(makeButton(context, "REC", ACTION_RECORD, 0xFFFFFFFF, 0xFF121212));
+        row.addView(makeButton(context, "TYPE", ACTION_TYPE, 0xFF262626, 0xFFFFFFFF));
+        row.addView(makeButton(context, "✕", ACTION_CLOSE, 0xFF1C1C1C, 0xFFAAAAAA));
 
+        // Background: clean dark grey with subtle outline (#121212 / #262626)
         GradientDrawable background = new GradientDrawable();
-        background.setColor(0xE6121418);
-        background.setCornerRadius(dp(context, 18));
-        background.setStroke(dp(context, 1), 0x33FFFFFF);
+        background.setColor(0xF0121212);
+        background.setCornerRadius(dp(context, 20));
+        background.setStroke(dp(context, 1), 0xFF2A2A2A);
         row.setBackground(background);
-        row.setElevation(dp(context, 6));
+        row.setElevation(dp(context, 8));
 
-        // Drag the bubble anywhere on the screen.
-        //
-        // The listener sits on the *text*, not on the row: a touch listener
-        // on a view group swallows the events before they reach the child
-        // views, and the REC / TYPE / X buttons would never be pressed.
+        // Drag the bubble anywhere on the screen
         text.setOnTouchListener(new View.OnTouchListener() {
             private float downX;
             private float downY;
@@ -207,7 +239,6 @@ public final class Bubble {
                             try {
                                 currentManager.updateViewLayout(current, currentParams);
                             } catch (Throwable ignored) {
-                                // The window is gone; nothing to move.
                             }
                         }
                         return true;
@@ -219,20 +250,35 @@ public final class Bubble {
         return row;
     }
 
-    private static Button makeButton(Context context, String label, final int action, int color) {
+    private static Button makeButton(Context context, String label, final int action, int bgColor, int textColor) {
         Button button = new Button(context);
         button.setText(label);
-        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        button.setTextColor(0xFF101418);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        button.setTextColor(textColor);
         button.setAllCaps(false);
-        button.setPadding(dp(context, 12), 0, dp(context, 12), 0);
+        button.setPadding(dp(context, 10), 0, dp(context, 10), 0);
         button.setMinimumWidth(0);
-        button.setMinimumHeight(dp(context, 32));
-        button.setBackgroundColor(color);
+        button.setMinimumHeight(dp(context, 30));
+
+        GradientDrawable btnBg = new GradientDrawable();
+        btnBg.setColor(bgColor);
+        btnBg.setCornerRadius(dp(context, 15));
+        btnBg.setStroke(dp(context, 1), 0x33FFFFFF);
+        button.setBackground(btnBg);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(context, 30));
+        lp.setMarginEnd(dp(context, 4));
+        button.setLayoutParams(lp);
+
         button.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                nativeBubbleAction(action);
+                try {
+                    nativeBubbleAction(action);
+                } catch (Throwable t) {
+                    Log.w(TAG, "nativeBubbleAction failed", t);
+                }
             }
         });
         return button;

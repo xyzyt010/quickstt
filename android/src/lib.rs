@@ -574,6 +574,30 @@ pub fn build_ui() -> AppWindow {
     {
         let weak = ui.as_weak();
         let log = log.clone();
+        ui.on_uninstall_model(move |idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            let index = idx.max(0) as usize;
+            let spec = stt::model(index);
+            match stt::uninstall_model(index) {
+                Ok(()) => {
+                    note(&weak, &log, &format!("{} uninstalled.", spec.name));
+                    ui.set_status_text(format!("{} uninstalled", spec.name).into());
+                    let current_selected = ui.get_selected_model().max(0) as usize;
+                    if current_selected == index {
+                        ui.set_model_installed(false);
+                    }
+                    ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
+                }
+                Err(e) => {
+                    note(&weak, &log, &format!("Could not uninstall {}: {e}", spec.name));
+                    ui.set_status_text(format!("Could not uninstall: {e}").into());
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
         ui.on_open_overlay_settings(move || {
             note(&weak, &log, "Opening QuickSTT's page in the system settings…");
             let Some(ui) = weak.upgrade() else { return };

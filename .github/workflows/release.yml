@@ -524,12 +524,12 @@ jobs:
           \`\`\`
           The touch app dictates for real: the microphone is captured with the NDK AAudio API, **three engines** (whisper.cpp, the Cactus \`needle\` and transcribe.cpp — all cross-compiled for arm64-v8a and shipped inside the APK) transcribe on-device, the text is copied to the clipboard and typed into the app in front with real key events, and a floating bubble with **REC** / **TYPE** buttons follows you across apps.
 
-          ### Fixed in this release (Android)
-          - **Pre-packaged on-device speech model**: The Cactus Whistle 16M model is directly embedded inside the APK and automatically extracted into the models directory on first launch. QuickSTT is genuinely functional and ready to dictate out of the box with zero initial download required.
-          - **Model downloader completely functional**: The Android HTTP stack now manually follows HTTP 301, 302, 303, 307, and 308 redirects across HuggingFace and CDN mirrors, resumes partial downloads with Range headers, and handles chunked transfers without false incomplete errors.
-          - **Overlay permission & floating bubble live**: Fixed `loadClass` binary dot notation, resolved JNI boolean return types (`.z()`), and fixed runtime permission class resolution. The "display over other apps" permission is immediately recognized when toggled in system settings, and the foreground service keeps the draggable REC/TYPE/Close bubble alive over other apps.
-          - **Clipboard fallback**: Safely dispatches clipboard copies onto Android's main looper so dictation can be typed or pasted anywhere without permissions issues.
-          - **The pages scroll & every touch registers**: Pages use Flickable with explicit touch bounds, touch probes, and real-time event logging.
+          ### Fixed & improved in this release (Android v2.0.0-alpha.21)
+          - **Microphone recording & transcription live**: Fixed the critical bug in AAudio where `AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_INPUT)` was missing (was defaulting to audio playback instead of microphone capture). Fixed frame count calculations and added automatic fallback to 16-bit PCM with normalized float conversion, guaranteeing mic input and live transcription work across all Android phones.
+          - **Overlay floating bubble fixed**: Fixed JNI `addView` signature mismatch (`ViewGroup.LayoutParams`), added visual context theme wrapper for overlay view instantiation, and declared `FOREGROUND_SERVICE_SPECIAL_USE` for Android 14+. The floating bubble stays reliably on screen over other apps.
+          - **Sleek minimalist monochrome UI**: Complete overhaul adhering to pure black (`#000000`), dark greys (`#121212`), crisp white (`#FFFFFF`) with all green accents removed. Clean modern vector mic iconography and breathing recording orb.
+          - **Proper progress bar**: Download progress starts cleanly at 0% from the left edge and animates smoothly to 100%.
+          - **Model uninstallation**: Added full model uninstallation support to free device storage directly from the Models tab.
 
           * **Eight real models**: Cactus Whistle 16M (pre-packaged), Whisper Tiny EN, Moonshine Base EN, SenseVoice Small, Canary 180M Flash, Parakeet Unified EN 0.6B, **Nemotron 3.5 ASR Streaming 0.6B**, and Qwen3-ASR 0.6B.
           * **The bubble is a control, not a read-out**: REC records, TYPE types the transcript into the app in front (or copies to clipboard), and it can be dragged anywhere.

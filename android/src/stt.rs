@@ -300,7 +300,7 @@ pub fn model_path(index: usize) -> Option<PathBuf> {
     work_dir().map(|d| d.join("models").join(model(index).file))
 }
 
-/// True when the model is already downloaded or extracted from the APK.
+/// True when the model is already downloaded and installed on disk.
 pub fn model_installed(index: usize) -> bool {
     let spec = model(index);
     if let Some(path) = model_path(index) {
@@ -310,8 +310,18 @@ pub fn model_installed(index: usize) -> bool {
             }
         }
     }
-    // Check if the model is bundled in the APK (e.g. Cactus Whistle)
-    crate::platform::extract_bundled_model(spec.file, spec.min_bytes)
+    false
+}
+
+/// Delete a downloaded model from disk.
+pub fn uninstall_model(index: usize) -> Result<(), String> {
+    if let Some(path) = model_path(index) {
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| format!("could not remove model file: {e}"))?;
+            return Ok(());
+        }
+    }
+    Err("model is not installed on disk".into())
 }
 
 /// Remember the model the user picked (the app restarts with it).
@@ -346,9 +356,13 @@ pub fn selected() -> usize {
 #[cfg(target_os = "android")]
 pub fn download_model<F: FnMut(u64, u64) + 'static>(
     index: usize,
-    progress: F,
+    mut progress: F,
 ) -> Result<(), String> {
     let spec = model(index);
+    if crate::platform::extract_bundled_model(spec.file, spec.min_bytes) {
+        progress(spec.min_bytes, spec.min_bytes);
+        return Ok(());
+    }
     let path = model_path(index).ok_or("no writable app directory")?;
     crate::platform::download_file_with_progress(spec.url, &path, spec.min_bytes, progress)
 }

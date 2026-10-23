@@ -3315,7 +3315,7 @@ dependencies = [
 
 [[package]]
 name = "quickstt-android"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "cc",
  "jni 0.21.1",

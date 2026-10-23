@@ -1068,27 +1068,27 @@ fn create_plain_bubble<'local>(
         &[JValue::from(&text)],
     )
     .ok()?;
-    env.call_method(&view, "setTextColor", "(I)V", &[JValue::from(0xF0F6FCi32)])
+    env.call_method(&view, "setTextColor", "(I)V", &[JValue::from(0xFFEDEDEDu32 as i32)])
         .ok()?;
-    env.call_method(&view, "setTextSize", "(F)V", &[JValue::from(13.0f32)])
+    env.call_method(&view, "setTextSize", "(F)V", &[JValue::from(12.0f32)])
         .ok()?;
     env.call_method(
         &view,
         "setPadding",
         "(IIII)V",
         &[
-            JValue::from(36i32),
-            JValue::from(24i32),
-            JValue::from(36i32),
-            JValue::from(24i32),
+            JValue::from(32i32),
+            JValue::from(20i32),
+            JValue::from(32i32),
+            JValue::from(20i32),
         ],
     )
     .ok()?;
     let gd_cls = env.find_class("android/graphics/drawable/GradientDrawable").ok()?;
     let bg = env.new_object(gd_cls, "()V", &[]).ok()?;
-    env.call_method(&bg, "setColor", "(I)V", &[JValue::from(0xE6121418u32 as i32)])
+    env.call_method(&bg, "setColor", "(I)V", &[JValue::from(0xF0121212u32 as i32)])
         .ok()?;
-    env.call_method(&bg, "setCornerRadius", "(F)V", &[JValue::from(48.0f32)])
+    env.call_method(&bg, "setCornerRadius", "(F)V", &[JValue::from(20.0f32)])
         .ok()?;
     env.call_method(
         &view,
@@ -1231,7 +1231,7 @@ fn add_overlay_view(
     env.call_method(
         &wm,
         "addView",
-        "(Landroid/view/View;Landroid/view/WindowManager$LayoutParams;)V",
+        "(Landroid/view/View;Landroid/view/ViewGroup$LayoutParams;)V",
         &[JValue::from(&view), JValue::from(&lp)],
     )
     .ok()?;
