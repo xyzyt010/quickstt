@@ -465,8 +465,10 @@ jobs:
       - name: Release notes
         run: |
           VER="${{ github.ref_name }}"
-          # v2.0.0-alpha.5 -> quickstt_2.0.0.alpha.5-1_amd64.deb (cargo-deb mangles dashes)
-          DEB_NAME="quickstt_$(echo "${VER#v}" | sed 's/-/./')-1_amd64.deb"
+          # Take the name cargo-deb actually produced instead of rebuilding it
+          # from the tag: the .deb version comes from the desktop crate, and a
+          # tag that moved ahead of it would otherwise link to a 404.
+          DEB_NAME=$(basename "$(find release -name '*.deb' -print -quit)")
           echo "DEB_NAME=$DEB_NAME"
           cat > /tmp/notes.md <<NOTES
           ## QuickSTT ${VER} — Ubuntu/Debian amd64 (Mint 21/22)
