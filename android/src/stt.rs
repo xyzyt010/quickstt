@@ -1,26 +1,18 @@
-// Android speech-to-text: the engines (whisper.cpp, Cactus needle,
-// transcribe.cpp) + the GGML/CACT/GGUF models.
-//
-// The engine binaries are built for arm64-v8a and shipped inside the APK, in
-// the APK's `lib/arm64-v8a/` directory, named `lib<engine>.so` — that is the
-// name the installer looks for. It extracts them into the app's *native
-// library directory*, which is read-only but **exec-mounted**: the only
-// place where a modern Android lets an app run a program. (The app's home
-// directory is mounted noexec for apps that target API 29 or newer, so a
-// binary unpacked there cannot be started at all.)
-//
-// The models are NOT bundled: they are downloaded in-app from the same
-// HuggingFace sources the desktop app uses. Every entry in `MODELS` is a
-// model the bundled engine really can load, so the Models tab only ever
-// lists engines that work on the phone.
+// Android speech-to-text: the engines (Cactus needle, whisper.cpp,
+// transcribe.cpp), the model catalog (with Cactus Whistle 16M bundled inside
+// the APK), and the on-device RAM onloading / offloading runtime manager.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// The engines that run on the phone.
 pub const ENGINES: &[(&str, &str, &str)] = &[
     // id, display name, binary file name
-    ("whisper", "Whisper (whisper.cpp)", "whisper-cli"),
     ("cactus", "Cactus needle", "needle"),
+    ("whisper", "Whisper (whisper.cpp)", "whisper-cli"),
     ("transcribe", "transcribe.cpp", "transcribe-cli"),
 ];
 
@@ -39,24 +31,22 @@ pub fn human_size(bytes: u64) -> String {
     let mb = bytes as f64 / MB;
     if mb >= 1.0 {
         format!("{mb:.1} MB")
-    } else {
+    } else if bytes > 0 {
         format!("{:.0} kB", bytes as f64 / 1024.0)
+    } else {
+        "0 MB".to_string()
     }
 }
 
 /// Where an engine's binary is and whether it is there at all.
-///
-/// This is what the self-test shows: the engine is either in the app's
-/// native library directory (where Android lets the app run it) or it is
-/// missing, and the user needs to know which.
 pub fn engine_info(id: &str) -> String {
     match ensure_engine(id) {
         Ok(engine) => {
             let size = std::fs::metadata(&engine.binary).map(|m| m.len()).unwrap_or(0);
             let via = if engine.launcher.is_some() {
-                " (through the system linker)"
+                " (via system linker64)"
             } else {
-                ""
+                " (native exec)"
             };
             format!("{} · {}{via}", engine.binary.display(), human_size(size))
         }
@@ -73,7 +63,6 @@ pub fn model_info(index: usize) -> String {
     }
 }
 
-/// The path of a model's file (for the report).
 fn meta_path(index: usize) -> String {
     model_path(index)
         .map(|p| p.display().to_string())
@@ -81,92 +70,68 @@ fn meta_path(index: usize) -> String {
 }
 
 /// Transcribe a WAV and report how long the engine took.
-///
-/// The time matters as much as the text: it tells the user whether the
-/// model is fast enough on this phone.
 pub fn transcribe_timed(wav: &Path, index: usize) -> Result<(String, f32), String> {
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let text = transcribe(wav, index)?;
     Ok((text, started.elapsed().as_secs_f32()))
 }
 
-/// The file name of an engine's binary.
 fn engine_binary(id: &str) -> &'static str {
     ENGINES
         .iter()
         .find(|e| e.0 == id)
         .map(|e| e.2)
-        .unwrap_or("whisper-cli")
+        .unwrap_or("needle")
 }
 
-/// The name the engine has inside the APK's lib directory.
-///
-/// The installer only extracts files that are named `lib*.so`, so the
-/// engines use that convention.
 fn engine_entry(id: &str) -> String {
     format!("lib{}.so", engine_binary(id))
 }
 
 /// A ready-to-run engine.
 pub struct Engine {
-    /// The engine binary.
     pub binary: PathBuf,
-    /// A program that starts the engine (the system linker), when the
-    /// binary itself cannot be started.
     pub launcher: Option<PathBuf>,
 }
 
 impl Engine {
-    /// The command that runs the engine.
-    pub fn command(&self) -> std::process::Command {
+    pub fn command(&self) -> Command {
         let mut command = match &self.launcher {
             Some(launcher) => {
-                let mut command = std::process::Command::new(launcher);
-                command.arg(&self.binary);
-                command
+                let mut cmd = Command::new(launcher);
+                cmd.arg(&self.binary);
+                cmd
             }
-            None => std::process::Command::new(&self.binary),
+            None => Command::new(&self.binary),
         };
-        command.stdout(std::process::Stdio::piped());
-        command.stderr(std::process::Stdio::piped());
+        if let Some(dir) = work_dir() {
+            command.env("TMPDIR", &dir).env("HOME", &dir);
+        }
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
         command
     }
 }
 
 /// A speech model that really runs on Android.
 pub struct ModelSpec {
-    /// Name shown in the app.
     pub name: &'static str,
-    /// The engine that runs it.
     pub engine: &'static str,
-    /// File name inside the model directory.
     pub file: &'static str,
-    /// Where it is downloaded from.
     pub url: &'static str,
-    /// Human readable size.
     pub size: &'static str,
-    /// A download smaller than this is broken (a truncated file).
     pub min_bytes: u64,
-    /// One line explaining the trade-off.
     pub detail: &'static str,
+    pub bundled: bool,
+    pub lang_arg: Option<&'static str>,
 }
 
-/// The Android model catalog. Every entry is a model the bundled engine can
-/// really run — the phone build has no placeholder rows.
+/// The Android model catalog.
 ///
-/// The list mirrors the desktop build: Whisper (GGML), the Cactus Whistle
-/// container and the GGUF family (Nemotron, Moonshine, SenseVoice, Canary,
-/// Parakeet, Qwen3-ASR), all served from the same sources the desktop uses.
+/// Index 0 (`DEFAULT_MODEL`) is **Cactus Whistle 16M** (`whistle.cact`), which
+/// is bundled directly inside the APK and extracted automatically on launch so
+/// the app works 100% offline out of the box without any download step.
 pub const MODELS: &[ModelSpec] = &[
-    ModelSpec {
-        name: "Whisper Tiny EN",
-        engine: "whisper",
-        file: "ggml-tiny.en-q5_1.bin",
-        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin",
-        size: "32 MB",
-        min_bytes: 30_000_000,
-        detail: "English · whisper.cpp · fastest",
-    },
     ModelSpec {
         name: "Cactus Whistle 16M",
         engine: "cactus",
@@ -174,7 +139,20 @@ pub const MODELS: &[ModelSpec] = &[
         url: "https://huggingface.co/Cactus-Compute/whistle/resolve/main/whistle.cact",
         size: "16.9 MB",
         min_bytes: 16_000_000,
-        detail: "7 languages · auto-detect · Cactus needle",
+        detail: "Built-in · 7 languages · ARM64 NEON dotprod · Cactus needle",
+        bundled: true,
+        lang_arg: Some("en"),
+    },
+    ModelSpec {
+        name: "Whisper Tiny EN",
+        engine: "whisper",
+        file: "ggml-tiny.en-q5_1.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin",
+        size: "32 MB",
+        min_bytes: 30_000_000,
+        detail: "English · Q5_1 quantized · whisper.cpp",
+        bundled: false,
+        lang_arg: Some("en"),
     },
     ModelSpec {
         name: "Moonshine Base EN",
@@ -183,7 +161,9 @@ pub const MODELS: &[ModelSpec] = &[
         url: "https://huggingface.co/handy-computer/moonshine-base-gguf/resolve/main/moonshine-base-Q8_0.gguf",
         size: "74 MB",
         min_bytes: 70_000_000,
-        detail: "English · streaming · transcribe.cpp",
+        detail: "English · low-latency encoder-decoder · transcribe.cpp",
+        bundled: false,
+        lang_arg: None,
     },
     ModelSpec {
         name: "SenseVoice Small",
@@ -192,7 +172,9 @@ pub const MODELS: &[ModelSpec] = &[
         url: "https://huggingface.co/handy-computer/SenseVoiceSmall-gguf/resolve/main/SenseVoiceSmall-Q4_K_M.gguf",
         size: "139 MB",
         min_bytes: 130_000_000,
-        detail: "5 languages · auto-detect · transcribe.cpp",
+        detail: "5 languages · ultra-fast non-autoregressive · transcribe.cpp",
+        bundled: false,
+        lang_arg: None,
     },
     ModelSpec {
         name: "Canary 180M Flash",
@@ -201,7 +183,9 @@ pub const MODELS: &[ModelSpec] = &[
         url: "https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/main/canary-180m-flash-Q5_K_M.gguf",
         size: "151 MB",
         min_bytes: 145_000_000,
-        detail: "8 languages · auto-detect · transcribe.cpp",
+        detail: "4 languages · punctuation & capitalization · transcribe.cpp",
+        bundled: false,
+        lang_arg: Some("en"),
     },
     ModelSpec {
         name: "Parakeet Unified EN 0.6B",
@@ -210,7 +194,9 @@ pub const MODELS: &[ModelSpec] = &[
         url: "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/main/parakeet-unified-en-0.6b-Q4_K_M.gguf",
         size: "455 MB",
         min_bytes: 440_000_000,
-        detail: "English · most accurate · transcribe.cpp",
+        detail: "English · FastConformer TDT 0.6B · transcribe.cpp",
+        bundled: false,
+        lang_arg: None,
     },
     ModelSpec {
         name: "Nemotron 3.5 ASR Streaming 0.6B",
@@ -219,7 +205,9 @@ pub const MODELS: &[ModelSpec] = &[
         url: "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf",
         size: "473 MB",
         min_bytes: 460_000_000,
-        detail: "30 languages · streaming · transcribe.cpp",
+        detail: "30 languages · streaming RNNT · transcribe.cpp",
+        bundled: false,
+        lang_arg: Some("en-US"),
     },
     ModelSpec {
         name: "Qwen3-ASR 0.6B",
@@ -228,33 +216,48 @@ pub const MODELS: &[ModelSpec] = &[
         url: "https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/main/Qwen3-ASR-0.6B-Q4_K_M.gguf",
         size: "562 MB",
         min_bytes: 540_000_000,
-        detail: "multilingual · streaming · transcribe.cpp",
+        detail: "Multilingual · auto-detect · transcribe.cpp",
+        bundled: false,
+        lang_arg: None,
     },
 ];
 
-/// The model used when nothing else was picked.
+/// Default model is 0 (Cactus Whistle 16M, inbuilt in the APK).
 pub const DEFAULT_MODEL: usize = 0;
 
-/// A model by index (falls back to the default).
+/// Get a model spec by index.
 pub fn model(index: usize) -> &'static ModelSpec {
     MODELS.get(index).unwrap_or(&MODELS[DEFAULT_MODEL])
 }
 
-/// Directory for the models (the app's private files dir).
-fn work_dir() -> Option<PathBuf> {
+/// Writable app directory for models and temporary WAV buffers.
+pub fn work_dir() -> Option<PathBuf> {
     let base = crate::platform::files_dir()?;
     let dir = base.join("quickstt");
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
 }
 
-/// Make sure the engine is there and can be started.
+/// Writable path for temporary WAV recording files.
 ///
-/// The installer extracts the engines from the APK into the app's native
-/// library directory — that is where they can be run. If that did not
-/// happen, the engine is copied out of the APK into the app's data
-/// directory and started through the system linker (the home directory
-/// itself is mounted noexec).
+/// Never uses `/data/local/tmp` on Android (which is permission-denied to apps).
+pub fn wav_path(file_name: &str) -> PathBuf {
+    if let Some(dir) = work_dir() {
+        return dir.join(file_name);
+    }
+    std::env::temp_dir().join(file_name)
+}
+
+/// Extract any bundled models (such as `whistle.cact`) from the APK on startup.
+pub fn ensure_bundled_models() {
+    for (idx, spec) in MODELS.iter().enumerate() {
+        if spec.bundled && !model_installed(idx) {
+            let _ = crate::platform::extract_bundled_model(spec.file, spec.min_bytes);
+        }
+    }
+}
+
+/// Make sure the engine binary is unpacked and executable.
 pub fn ensure_engine(id: &str) -> Result<Engine, String> {
     #[cfg(target_os = "android")]
     {
@@ -262,29 +265,27 @@ pub fn ensure_engine(id: &str) -> Result<Engine, String> {
         if let Some(dir) = crate::platform::native_lib_dir() {
             let path = dir.join(&entry);
             if path.exists() {
-                crate::platform::log(&format!(
-                    "the {id} engine runs from {}",
-                    path.display()
-                ));
                 return Ok(Engine {
                     binary: path,
                     launcher: None,
                 });
             }
         }
-        // Fallback: a copy in the app's data directory, started through the
-        // system linker.
         if let Some(path) = crate::platform::stage_from_apk(&entry) {
-            if let Some(linker) = crate::platform::linker64() {
-                crate::platform::log(&format!(
-                    "the {id} engine runs from {} (through the system linker)",
-                    path.display()
-                ));
+            // If stage_from_apk found the file inside nativeLibraryDir, run it directly
+            let in_native = crate::platform::native_lib_dir()
+                .map(|nd| path.starts_with(&nd))
+                .unwrap_or(false);
+            if in_native {
                 return Ok(Engine {
                     binary: path,
-                    launcher: Some(linker),
+                    launcher: None,
                 });
             }
+            return Ok(Engine {
+                binary: path,
+                launcher: crate::platform::linker64(),
+            });
         }
         Err(format!("the {id} engine is missing from the app"))
     }
@@ -295,12 +296,12 @@ pub fn ensure_engine(id: &str) -> Result<Engine, String> {
     }
 }
 
-/// Path of a downloaded model.
+/// Path of a model on disk.
 pub fn model_path(index: usize) -> Option<PathBuf> {
     work_dir().map(|d| d.join("models").join(model(index).file))
 }
 
-/// True when the model is already downloaded and installed on disk.
+/// True when the model is present on disk and meets the minimum byte size.
 pub fn model_installed(index: usize) -> bool {
     let spec = model(index);
     if let Some(path) = model_path(index) {
@@ -313,8 +314,19 @@ pub fn model_installed(index: usize) -> bool {
     false
 }
 
-/// Delete a downloaded model from disk.
+/// Actual size on disk in bytes (0 if not installed).
+pub fn model_disk_bytes(index: usize) -> u64 {
+    model_path(index)
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+/// Delete a downloaded model from disk (and offload it if currently in RAM).
 pub fn uninstall_model(index: usize) -> Result<(), String> {
+    if loaded_model_index() == Some(index) {
+        let _ = offload_model();
+    }
     if let Some(path) = model_path(index) {
         if path.exists() {
             std::fs::remove_file(&path).map_err(|e| format!("could not remove model file: {e}"))?;
@@ -324,35 +336,352 @@ pub fn uninstall_model(index: usize) -> Result<(), String> {
     Err("model is not installed on disk".into())
 }
 
-/// Remember the model the user picked (the app restarts with it).
+/// Remember the model the user picked.
 pub fn save_selected(index: usize) {
     if let Some(dir) = work_dir() {
         let _ = std::fs::write(dir.join("selected_model"), index.to_string());
     }
 }
 
-/// The model the user picked (defaults to the packaged model or fastest one).
+/// The model the user picked (defaults to index 0 = inbuilt Cactus Whistle 16M).
 pub fn selected() -> usize {
-    work_dir()
+    let saved = work_dir()
         .and_then(|d| std::fs::read_to_string(d.join("selected_model")).ok())
         .and_then(|s| s.trim().parse::<usize>().ok())
-        .filter(|i| *i < MODELS.len())
-        .unwrap_or_else(|| {
-            if model_installed(1) {
-                1
-            } else {
-                DEFAULT_MODEL
+        .filter(|i| *i < MODELS.len());
+    if let Some(idx) = saved {
+        if model_installed(idx) {
+            return idx;
+        }
+    }
+    // Prefer the inbuilt model (index 0) or any installed model
+    for i in 0..MODELS.len() {
+        if model_installed(i) {
+            return i;
+        }
+    }
+    DEFAULT_MODEL
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  MODEL ONLOADING & OFFLOADING RUNTIME MANAGER
+// ══════════════════════════════════════════════════════════════════════════════
+
+struct WorkerHandle {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Drop for WorkerHandle {
+    fn drop(&mut self) {
+        // Ask the worker to release the model before taking the process down.
+        let _ = writeln!(self.stdin, "{{\"action\":\"quit\"}}");
+        let _ = self.stdin.flush();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+struct ResidentModel {
+    index: usize,
+    ram_bytes: u64,
+    load_ms: u32,
+    last_used: Instant,
+    /// Persistent `transcribe-cli --worker` session keeping GGUF/GGML tensors in RAM.
+    ///
+    /// This lives behind its own mutex so a long transcription does not hold
+    /// `RESIDENT` — the UI polls the resident status every second and must
+    /// never block on engine I/O.
+    worker: Option<Arc<Mutex<WorkerHandle>>>,
+    /// Pre-warmed model bytes kept hot in RAM for instant one-shot engines (`needle`/`whisper`).
+    pinned_weights: Option<Vec<u8>>,
+}
+
+static RESIDENT: Mutex<Option<ResidentModel>> = Mutex::new(None);
+
+/// Currently onloaded model index, if any.
+pub fn loaded_model_index() -> Option<usize> {
+    RESIDENT.lock().ok().and_then(|g| g.as_ref().map(|r| r.index))
+}
+
+/// Details of the currently onloaded model: `(index, ram_bytes, load_ms, idle_secs)`.
+pub fn loaded_model_status() -> Option<(usize, u64, u32, u64)> {
+    let guard = RESIDENT.lock().ok()?;
+    let res = guard.as_ref()?;
+    Some((
+        res.index,
+        res.ram_bytes,
+        res.load_ms,
+        res.last_used.elapsed().as_secs(),
+    ))
+}
+
+/// Onload a model into RAM so transcription starts with zero cold-load latency.
+pub fn onload_model(index: usize) -> Result<String, String> {
+    let spec = model(index);
+    if !model_installed(index) {
+        if spec.bundled && crate::platform::extract_bundled_model(spec.file, spec.min_bytes) {
+            // Extracted bundled model on the fly
+        } else {
+            return Err(format!("{} is not downloaded yet", spec.name));
+        }
+    }
+
+    // If already loaded, just touch timestamp and return status
+    if let Ok(mut guard) = RESIDENT.lock() {
+        if let Some(existing) = guard.as_mut() {
+            if existing.index == index {
+                let alive = existing
+                    .worker
+                    .as_mut()
+                    .map(|w| match w.lock() {
+                        Ok(mut w) => matches!(w.child.try_wait(), Ok(None)),
+                        Err(_) => false,
+                    })
+                    .unwrap_or(true);
+                if alive {
+                    existing.last_used = Instant::now();
+                    return Ok(format!(
+                        "{} is onloaded in RAM ({} · {} ms)",
+                        spec.name,
+                        human_size(existing.ram_bytes),
+                        existing.load_ms
+                    ));
+                }
             }
-        })
+        }
+    }
+
+    // Offload any previous model first
+    let _ = offload_model();
+
+    let model_file = model_path(index).ok_or("no model path available")?;
+    let disk_bytes = std::fs::metadata(&model_file)
+        .map(|m| m.len())
+        .unwrap_or(spec.min_bytes);
+    let started = Instant::now();
+
+    #[cfg(target_os = "android")]
+    {
+        let engine = ensure_engine(spec.engine)?;
+        if spec.engine == "transcribe" {
+            // Spawn persistent `transcribe-cli --worker` and load the GGUF into RAM
+            match spawn_transcribe_worker(&engine, &model_file) {
+                Ok((worker, load_ms)) => {
+                    let elapsed_ms = if load_ms > 0 {
+                        load_ms
+                    } else {
+                        started.elapsed().as_millis() as u32
+                    };
+                    if let Ok(mut guard) = RESIDENT.lock() {
+                        *guard = Some(ResidentModel {
+                            index,
+                            ram_bytes: disk_bytes,
+                            load_ms: elapsed_ms,
+                            last_used: Instant::now(),
+                            worker: Some(Arc::new(Mutex::new(worker))),
+                            pinned_weights: None,
+                        });
+                    }
+                    return Ok(format!(
+                        "Onloaded {} into RAM ({} · {} ms)",
+                        spec.name,
+                        human_size(disk_bytes),
+                        elapsed_ms
+                    ));
+                }
+                Err(e) => {
+                    crate::platform::log(&format!(
+                        "worker preload failed for {}: {e}",
+                        spec.name
+                    ));
+                    // Never pin a multi-hundred-MB GGUF as a fallback — the
+                    // one-shot engine still works, but the phone could OOM.
+                    return Err(format!(
+                        "{} could not be kept in RAM ({e}); one-shot transcription still works",
+                        spec.name
+                    ));
+                }
+            }
+        }
+
+        // For Cactus needle / Whisper (or fallback): pin the model weights in RAM
+        // so the kernel page cache is 100% hot and verify the engine binary.
+        let weights = std::fs::read(&model_file)
+            .map_err(|e| format!("could not read {} into RAM: {e}", spec.name))?;
+        let ram_bytes = weights.len() as u64;
+        let elapsed_ms = started.elapsed().as_millis().max(1) as u32;
+        if let Ok(mut guard) = RESIDENT.lock() {
+            *guard = Some(ResidentModel {
+                index,
+                ram_bytes,
+                load_ms: elapsed_ms,
+                last_used: Instant::now(),
+                worker: None,
+                pinned_weights: Some(weights),
+            });
+        }
+        Ok(format!(
+            "Onloaded {} into RAM ({} · {} ms)",
+            spec.name,
+            human_size(ram_bytes),
+            elapsed_ms
+        ))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let elapsed_ms = started.elapsed().as_millis().max(1) as u32;
+        if let Ok(mut guard) = RESIDENT.lock() {
+            *guard = Some(ResidentModel {
+                index,
+                ram_bytes: disk_bytes,
+                load_ms: elapsed_ms,
+                last_used: Instant::now(),
+                worker: None,
+                pinned_weights: None,
+            });
+        }
+        Ok(format!(
+            "Onloaded {} into RAM ({})",
+            spec.name,
+            human_size(disk_bytes)
+        ))
+    }
+}
+
+/// Offload the currently resident model from RAM to free device memory.
+pub fn offload_model() -> Result<String, String> {
+    let mut guard = RESIDENT.lock().map_err(|_| "lock poisoned".to_string())?;
+    let Some(mut resident) = guard.take() else {
+        return Ok("No model was loaded in RAM".to_string());
+    };
+    let name = model(resident.index).name;
+    let freed = resident.ram_bytes;
+    if let Some(worker) = resident.worker.take() {
+        // If a transcription currently owns the worker, dropping our handle
+        // lets that call finish; WorkerHandle::drop shuts it down afterwards.
+        if let Ok(mut worker) = worker.try_lock() {
+            let _ = writeln!(worker.stdin, "{{\"action\":\"quit\"}}");
+            let _ = worker.stdin.flush();
+        }
+        drop(worker);
+    }
+    drop(resident.pinned_weights.take());
+    Ok(format!(
+        "Offloaded {name} — freed {} of RAM",
+        human_size(freed)
+    ))
+}
+
+/// Automatically offload the resident model if it has been idle longer than `max_idle_secs`.
+pub fn check_idle_offload(max_idle_secs: u64) -> Option<String> {
+    let should_offload = {
+        let guard = RESIDENT.lock().ok()?;
+        let res = guard.as_ref()?;
+        res.last_used.elapsed() >= Duration::from_secs(max_idle_secs)
+    };
+    if should_offload {
+        offload_model().ok()
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "android")]
+fn spawn_transcribe_worker(engine: &Engine, model_file: &Path) -> Result<(WorkerHandle, u32), String> {
+    let args: Vec<std::ffi::OsString> = vec![
+        "--worker".into(),
+        "-q".into(),
+        "--threads".into(),
+        "4".into(),
+        "--backend".into(),
+        "cpu".into(),
+    ];
+    let mut child = spawn_engine_process(engine, &args, true)?;
+    let mut stdin = child.stdin.take().ok_or("worker stdin unavailable")?;
+    let stdout = child.stdout.take().ok_or("worker stdout unavailable")?;
+    let mut reader = BufReader::new(stdout);
+
+    let escaped_path = model_file.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    writeln!(stdin, "{{\"action\":\"load\",\"model_path\":\"{escaped_path}\"}}")
+        .map_err(|e| format!("failed to send load command: {e}"))?;
+    stdin
+        .flush()
+        .map_err(|e| format!("failed to flush load command: {e}"))?;
+
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|e| format!("worker did not respond to load: {e}"))?;
+    if !line.contains("\"status\":\"ok\"") {
+        let _ = child.kill();
+        let _ = child.wait();
+        let err = json_field(&line, "error").unwrap_or_else(|| line.trim().to_string());
+        return Err(err);
+    }
+    let load_ms = json_number(&line, "load_ms").unwrap_or(0.0) as u32;
+    Ok((
+        WorkerHandle {
+            child,
+            stdin,
+            stdout: reader,
+        },
+        load_ms,
+    ))
+}
+
+#[cfg(target_os = "android")]
+fn spawn_engine_process(
+    engine: &Engine,
+    args: &[std::ffi::OsString],
+    piped_stdin: bool,
+) -> Result<Child, String> {
+    let start = |launcher: Option<&Path>| -> std::io::Result<Child> {
+        let mut command = match launcher {
+            Some(launcher) => {
+                let mut cmd = Command::new(launcher);
+                cmd.arg(&engine.binary);
+                cmd
+            }
+            None => Command::new(&engine.binary),
+        };
+        command.args(args);
+        if let Some(dir) = work_dir() {
+            command.env("TMPDIR", &dir).env("HOME", &dir);
+        }
+        if piped_stdin {
+            command.stdin(Stdio::piped());
+        }
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        command.spawn()
+    };
+
+    // 1. Try the preferred launch mode (direct if in nativeLibraryDir, or via engine.launcher)
+    match start(engine.launcher.as_deref()) {
+        Ok(child) => Ok(child),
+        Err(first) => {
+            // 2. If direct exec failed, fall back to /system/bin/linker64
+            if engine.launcher.is_none() {
+                if let Some(linker) = crate::platform::linker64() {
+                    if let Ok(child) = start(Some(&linker)) {
+                        return Ok(child);
+                    }
+                }
+            } else {
+                // Or if launcher failed, try direct exec
+                if let Ok(child) = start(None) {
+                    return Ok(child);
+                }
+            }
+            Err(format!("could not start engine {}: {first}", engine.binary.display()))
+        }
+    }
 }
 
 /// Download a model, reporting progress (done, total) in bytes.
-///
-/// The transfer itself is done by the Android HTTP stack (the Java helper
-/// `ai.quickstt.app.ModelDownloader`): that is the stack the phone trusts,
-/// it continues an interrupted download where it stopped, and it only moves
-/// a **complete** file into place — a truncated model is worse than no model
-/// at all, because the engine would fail on it.
 #[cfg(target_os = "android")]
 pub fn download_model<F: FnMut(u64, u64) + 'static>(
     index: usize,
@@ -371,50 +700,104 @@ pub fn download_model<F: FnMut(u64, u64) + 'static>(
 pub fn download_model<F: FnMut(u64, u64)>(_index: usize, _progress: F) -> Result<(), String> {
     Err("model downloads are only available on Android".into())
 }
-/// Transcribe a 16 kHz mono WAV with the bundled engine.
+
+/// Transcribe a 16 kHz mono WAV with the selected model.
 ///
-/// The engine gets a hard timeout: a model that hangs must not freeze the
-/// app, and the user always gets an answer (or a clear error).
+/// If the model is onloaded in the persistent worker, it transcribes directly
+/// against the warm RAM session; otherwise it onloads / runs the engine.
 pub fn transcribe(wav: &Path, index: usize) -> Result<String, String> {
     let spec = model(index);
+    if !model_installed(index) {
+        if spec.bundled && crate::platform::extract_bundled_model(spec.file, spec.min_bytes) {
+            // Extracted bundled model
+        } else {
+            return Err(format!("{} is not downloaded yet", spec.name));
+        }
+    }
+
+    // 1. Check if this model is already warm in our persistent transcribe-cli worker
+    #[cfg(target_os = "android")]
+    if spec.engine == "transcribe" {
+        if loaded_model_index() != Some(index) {
+            let _ = onload_model(index);
+        }
+        let worker = {
+            let mut guard = RESIDENT.lock().ok();
+            if let Some(Some(res)) = guard.as_deref_mut() {
+                if res.index == index {
+                    res.last_used = Instant::now();
+                    res.worker.as_ref().cloned()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        // Run the worker I/O without holding RESIDENT: the UI polls the
+        // resident status on the event-loop thread while this runs.
+        let worker_attempt = worker.and_then(|worker| {
+            worker
+                .lock()
+                .ok()
+                .map(|mut worker| transcribe_via_worker(&mut *worker, wav, spec.lang_arg))
+        });
+        if let Some(Ok(text)) = worker_attempt {
+            return Ok(text);
+        }
+    }
+
+    // Touch or onload the model so the UI reflects that it is active in RAM
+    if loaded_model_index() != Some(index) {
+        let _ = onload_model(index);
+    } else if let Ok(mut guard) = RESIDENT.lock() {
+        if let Some(res) = guard.as_mut() {
+            res.last_used = Instant::now();
+        }
+    }
+
     let engine = ensure_engine(spec.engine)?;
     let model_file = model_path(index).ok_or("no model downloaded")?;
-    if !model_installed(index) {
-        return Err("the speech model is not downloaded yet".into());
-    }
-    // The command line of the engine, collected first so it can be used for
-    // a second attempt (see below).
+
     let mut args: Vec<std::ffi::OsString> = Vec::new();
     match spec.engine {
         "cactus" => {
-            // Cactus needle: --model <file.cact> --audio <wav> [--audio-language en]
+            // Cactus needle: --model <file.cact> --audio <wav> [--audio-language en] --threads 4
             args.push("--model".into());
-            args.push(model_file.clone().into_os_string());
+            args.push(model_file.into_os_string());
             args.push("--audio".into());
             args.push(wav.as_os_str().to_owned());
-            args.push("--audio-language".into());
-            args.push("en".into());
+            if let Some(lang) = spec.lang_arg {
+                args.push("--audio-language".into());
+                args.push(lang.into());
+            }
+            args.push("--threads".into());
+            args.push("4".into());
         }
         "transcribe" => {
-            // transcribe.cpp: the same command line the desktop build uses.
             args.push("-m".into());
-            args.push(model_file.clone().into_os_string());
-            args.push("--language".into());
-            args.push("en".into());
+            args.push(model_file.into_os_string());
+            if let Some(lang) = spec.lang_arg {
+                args.push("--language".into());
+                args.push(lang.into());
+            }
             args.push("--threads".into());
             args.push("4".into());
             args.push("--backend".into());
             args.push("cpu".into());
+            args.push("--timestamps".into());
+            args.push("none".into());
+            args.push("-q".into());
             args.push(wav.as_os_str().to_owned());
         }
         _ => {
-            // whisper.cpp: -m <model> -f <wav> -l en --no-timestamps ...
+            // whisper.cpp: -m <model> -f <wav> -l en --no-timestamps --suppress-nst -nth 0.85 -t 4
             args.push("-m".into());
-            args.push(model_file.clone().into_os_string());
+            args.push(model_file.into_os_string());
             args.push("-f".into());
             args.push(wav.as_os_str().to_owned());
             args.push("-l".into());
-            args.push("en".into());
+            args.push(spec.lang_arg.unwrap_or("en").into());
             args.push("--no-timestamps".into());
             args.push("--suppress-nst".into());
             args.push("-nth".into());
@@ -424,41 +807,16 @@ pub fn transcribe(wav: &Path, index: usize) -> Result<String, String> {
         }
     }
 
-    // Start the engine. The native library directory is the only place where
-    // Android lets an app run a program — when the system still refuses it
-    // ("Permission denied"), the program is started through the system
-    // linker instead.
-    let start = |launcher: Option<&Path>| -> std::io::Result<std::process::Child> {
-        let mut command = match launcher {
-            Some(launcher) => {
-                let mut command = std::process::Command::new(launcher);
-                command.arg(&engine.binary);
-                command
-            }
-            None => std::process::Command::new(&engine.binary),
-        };
-        command.args(&args);
-        command.stdout(std::process::Stdio::piped());
-        command.stderr(std::process::Stdio::piped());
-        command.spawn()
-    };
-    let mut child = match start(None) {
-        Ok(child) => child,
-        Err(first) => {
-            if engine.launcher.is_some() {
-                return Err(format!("could not run the engine: {first}"));
-            }
-            match crate::platform::linker64() {
-                Some(linker) => start(Some(&linker)).map_err(|second| {
-                    format!("could not run the engine: {first} (through the system linker: {second})")
-                })?,
-                None => return Err(format!("could not run the engine: {first}")),
-            }
-        }
-    };
+    #[cfg(target_os = "android")]
+    let mut child = spawn_engine_process(&engine, &args, false)?;
 
-    // Read both pipes on their own threads so a full pipe cannot deadlock
-    // the engine, then wait with a deadline.
+    #[cfg(not(target_os = "android"))]
+    let mut child = engine
+        .command()
+        .args(&args)
+        .spawn()
+        .map_err(|e| format!("could not run the engine: {e}"))?;
+
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let out_handle = std::thread::spawn(move || {
@@ -478,17 +836,17 @@ pub fn transcribe(wav: &Path, index: usize) -> Result<String, String> {
         buf
     });
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(120);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
-                if std::time::Instant::now() > deadline {
+                if Instant::now() > deadline {
                     let _ = child.kill();
                     let _ = child.wait();
                     break None;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(30));
             }
             Err(e) => return Err(format!("the engine could not be waited for: {e}")),
         }
@@ -497,24 +855,22 @@ pub fn transcribe(wav: &Path, index: usize) -> Result<String, String> {
     let stderr = err_handle.join().unwrap_or_default();
 
     let Some(status) = status else {
-        return Err("the engine did not finish in time".into());
+        return Err("the engine timed out after 120s".into());
     };
     if !status.success() {
         let err = stderr.trim();
         return Err(if err.is_empty() {
-            format!("the engine failed ({status})")
+            format!("the engine exited with {status}")
         } else {
             format!("the engine failed: {err}")
         });
     }
     if spec.engine == "cactus" {
-        // The needle prints a JSON object per line; the last one with a
-        // "text" field is the transcript.
         for line in stdout.lines().rev() {
             let line = line.trim();
             if line.starts_with('{') && line.contains("\"text\"") {
                 if let Some(text) = json_text(line) {
-                    return Ok(text);
+                    return Ok(clean_transcript(&text));
                 }
             }
         }
@@ -526,43 +882,98 @@ pub fn transcribe(wav: &Path, index: usize) -> Result<String, String> {
     Ok(clean_transcript(&stdout))
 }
 
-/// The transcribe.cpp CLI prints a metadata block and then
-/// `text: <transcript>`; the metadata and the special tokens are not part
-/// of the transcript. This mirrors the desktop build's cleanup.
-fn clean_transcript_output(raw: &str) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let low = line.to_lowercase();
-        if low.starts_with("text:") {
-            lines.push(line[5..].trim().to_string());
-            continue;
-        }
-        // The metadata block the CLI echoes before the transcript.
-        if low.starts_with("audio:")
-            || low.starts_with("model:")
-            || low.starts_with("run:")
-            || low.starts_with("backend:")
-            || low.starts_with("timings:")
-            || low.starts_with("samples:")
-            || low.starts_with("duration:")
-            || low.starts_with("sample rate")
-            || low.starts_with("name:")
-            || low.starts_with("license:")
-            || low.starts_with("max audio:")
-            || low.starts_with("[info]")
-            || low.starts_with("[warn]")
-            || low.starts_with('{')
-        {
-            continue;
-        }
-        lines.push(line.to_string());
+#[cfg(target_os = "android")]
+fn transcribe_via_worker(
+    worker: &mut WorkerHandle,
+    wav: &Path,
+    lang: Option<&str>,
+) -> Result<String, String> {
+    let wav_str = wav.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    let lang_str = lang.unwrap_or("auto");
+    writeln!(
+        worker.stdin,
+        "{{\"action\":\"transcribe\",\"audio_path\":\"{wav_str}\",\"language\":\"{lang_str}\"}}"
+    )
+    .map_err(|e| e.to_string())?;
+    worker.stdin.flush().map_err(|e| e.to_string())?;
+
+    let mut line = String::new();
+    worker
+        .stdout
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    if line.is_empty() {
+        return Err("worker closed pipe".into());
     }
-    let text = lines.join(" ");
-    let text = text
+    if !line.contains("\"status\":\"ok\"") {
+        let err = json_field(&line, "error").unwrap_or_else(|| line.trim().to_string());
+        return Err(err);
+    }
+    let raw = json_text(&line).unwrap_or_default();
+    Ok(clean_transcript_output(&raw))
+}
+
+/// Clean output from `transcribe-cli`.
+pub fn clean_transcript_output(raw: &str) -> String {
+    // 1. If explicit `text:` lines exist, extract only those!
+    let mut explicit_text: Vec<String> = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let low = trimmed.to_lowercase();
+        if low.starts_with("text:") {
+            let val = trimmed[5..].trim();
+            if !val.is_empty() && !val.eq_ignore_ascii_case("(empty)") {
+                explicit_text.push(val.to_string());
+            }
+        }
+    }
+    let joined = if !explicit_text.is_empty() {
+        explicit_text.join(" ")
+    } else {
+        let mut lines: Vec<String> = Vec::new();
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.eq_ignore_ascii_case("(empty)") {
+                continue;
+            }
+            let low = line.to_lowercase();
+            if low.starts_with("audio:")
+                || low.starts_with("text:")
+                || low.starts_with("model:")
+                || low.starts_with("run:")
+                || low.starts_with("backend:")
+                || low.starts_with("timings:")
+                || low.starts_with("samples:")
+                || low.starts_with("duration:")
+                || low.starts_with("sample rate")
+                || low.starts_with("name:")
+                || low.starts_with("license:")
+                || low.starts_with("max audio:")
+                || low.starts_with("detected-language:")
+                || low.starts_with("segments:")
+                || low.starts_with("words:")
+                || low.starts_with("tokens:")
+                || low.starts_with("realtime:")
+                || low.starts_with("load:")
+                || low.starts_with("mel:")
+                || low.starts_with("encode:")
+                || low.starts_with("decode:")
+                || low.starts_with("note:")
+                || low.starts_with("[info]")
+                || low.starts_with("[warn]")
+                || low.starts_with("[error]")
+                || low.starts_with("[debug]")
+                || (low.starts_with('[') && low.contains("->"))
+                || low.starts_with('{')
+            {
+                continue;
+            }
+            lines.push(line.to_string());
+        }
+        lines.join(" ")
+    };
+
+    let cleaned = joined
         .replace("<unk>", "")
         .replace("<pad>", "")
         .replace("<s>", "")
@@ -570,13 +981,13 @@ fn clean_transcript_output(raw: &str) -> String {
         .replace("<|endoftext|>", "")
         .replace("<lang-en-US>", "")
         .replace("<en-US>", "");
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    clean_transcript(&cleaned)
 }
 
-/// Pull the "text" field out of a flat JSON object (no JSON dependency).
-fn json_text(line: &str) -> Option<String> {
-    let key = "\"text\"";
-    let start = line.find(key)? + key.len();
+/// Pull a string field out of a flat JSON object.
+fn json_field(line: &str, field: &str) -> Option<String> {
+    let key = format!("\"{field}\"");
+    let start = line.find(&key)? + key.len();
     let rest = &line[start..];
     let colon = rest.find(':')? + 1;
     let rest = rest[colon..].trim_start();
@@ -609,12 +1020,29 @@ fn json_text(line: &str) -> Option<String> {
     None
 }
 
-/// Same cleanup the desktop app applies: drop whisper's blank-audio markers
-/// and bracketed/parenthesised noise lines.
+fn json_text(line: &str) -> Option<String> {
+    json_field(line, "text")
+}
+
+#[cfg(target_os = "android")]
+fn json_number(line: &str, field: &str) -> Option<f64> {
+    let key = format!("\"{field}\"");
+    let start = line.find(&key)? + key.len();
+    let rest = &line[start..];
+    let colon = rest.find(':')? + 1;
+    let rest = rest[colon..].trim_start();
+    let num_str: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+        .collect();
+    num_str.parse().ok()
+}
+
+/// Drop whisper blank-audio markers and bracketed/parenthesised noise lines.
 fn clean_transcript(raw: &str) -> String {
     raw.lines()
         .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
+        .filter(|l| !l.is_empty() && !l.eq_ignore_ascii_case("(empty)"))
         .filter(|l| {
             let low = l.to_lowercase();
             if low == "[blank audio]" || low == "[blank_audio]" || low == "[blank]" {
@@ -630,23 +1058,29 @@ fn clean_transcript(raw: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-        .trim()
-        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The transcript is what ends up in the other app, so the noise lines
-    /// whisper adds for silence have to be gone.
     #[test]
     fn transcript_drops_the_noise_markers() {
         let raw = "\n[BLANK_AUDIO]\n  hello there  \n(inaudible)\nhow are you\n";
         assert_eq!(clean_transcript(raw), "hello there how are you");
     }
 
-    /// The needle prints JSON; the text field has to survive the escaping.
+    #[test]
+    fn transcribe_cli_output_extracts_only_text() {
+        let sample = "audio: test.wav\n  samples: 32000\nmodel: m.gguf -> ok\nrun: ok\ntext: Hello world.\ndetected-language: en\nsegments: 1\n  [   0.00 ->    2.00] Hello world.\n  realtime: 15x\n";
+        assert_eq!(clean_transcript_output(sample), "Hello world.");
+        let empty = "run: ok\ntext: (empty)\n";
+        assert_eq!(clean_transcript_output(empty), "");
+    }
+
     #[test]
     fn json_text_is_extracted() {
         assert_eq!(
@@ -660,11 +1094,13 @@ mod tests {
         assert_eq!(json_text("{\"other\": 1}"), None);
     }
 
-    /// A model the engine cannot load is worse than no model at all, so the
-    /// catalog must only contain sane, distinct entries.
     #[test]
-    fn model_catalog_is_real() {
+    fn model_catalog_is_real_and_needle_is_default_inbuilt() {
         assert!(!MODELS.is_empty());
+        assert_eq!(MODELS[DEFAULT_MODEL].engine, "cactus");
+        assert_eq!(MODELS[DEFAULT_MODEL].file, "whistle.cact");
+        assert!(MODELS[DEFAULT_MODEL].bundled);
+
         let mut files: Vec<&str> = Vec::new();
         for spec in MODELS {
             assert!(
@@ -681,7 +1117,6 @@ mod tests {
             );
             assert!(spec.min_bytes > 0, "{} has no size check", spec.name);
             assert!(!spec.size.is_empty(), "{} has no size label", spec.name);
-            // Every model needs an engine that really runs on the phone.
             assert!(
                 ENGINES.iter().any(|e| e.0 == spec.engine),
                 "{} has no engine",
@@ -694,9 +1129,6 @@ mod tests {
         assert_eq!(model(999).file, MODELS[DEFAULT_MODEL].file);
     }
 
-    /// The download has to work — this is the check that the URLs are alive
-    /// and that the TLS stack works. It needs the network, so it is ignored
-    /// by default: `cargo test -- --ignored`.
     #[test]
     #[ignore = "needs the network"]
     fn every_model_url_is_downloadable() {
@@ -714,15 +1146,10 @@ mod tests {
                 "{} is smaller than expected ({total} bytes)",
                 spec.name
             );
-            // The first bytes have to be the model, not an error page.
             let mut reader = response.into_reader();
             let mut head = [0u8; 4];
             let n = std::io::Read::read(&mut reader, &mut head).unwrap_or(0);
             assert!(n > 0, "{} delivered no data", spec.name);
-            // GGML ("ggml", stored little-endian), GGUF ("GGUF") and the
-            // Cactus container (0x84 0x2a 0xe1 0x05) are the three formats
-            // in the catalog. An HTML error page would fail this — and it
-            // is exactly what a wrong URL produces.
             let magic = &head[..n];
             let known = magic == b"ggml"
                 || magic == b"lmgg"
@@ -737,14 +1164,6 @@ mod tests {
         }
     }
 
-    /// The engines ship inside the APK, and the app passes them a fixed
-    /// command line. If one of those options does not exist in the binary,
-    /// the engine dies with "unknown argument" and the transcription is
-    /// empty — on the phone, with no way to see why.
-    ///
-    /// So the options the app uses are checked against the shipped
-    /// binaries. The Cactus engine builds its option names at runtime
-    /// ("audio-" + "language"), so it is checked in parts.
     #[test]
     fn the_shipped_engines_know_our_options() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("prebuilt");
@@ -767,7 +1186,7 @@ mod tests {
             ),
             (
                 "transcribe-cli-arm64-v8a",
-                &["--model", "--language", "--threads", "--backend"],
+                &["--model", "--language", "--threads", "--backend", "--timestamps"],
             ),
         ];
         for (file, options) in cases {
@@ -784,10 +1203,21 @@ mod tests {
                 );
             }
         }
+
+        // `--worker` is short enough for the compiler to compare inline, so
+        // the literal is not guaranteed to survive in the binary. The worker
+        // protocol's own error strings are: if they are present, worker_main()
+        // was compiled into the shipped engine and onload/offload can work.
+        let worker = std::fs::read(dir.join("transcribe-cli-arm64-v8a"))
+            .expect("transcribe-cli cannot be read");
+        for marker in ["missing model_path", "unknown action"] {
+            assert!(
+                worker.windows(marker.len()).any(|w| w == marker.as_bytes()),
+                "transcribe-cli-arm64-v8a has no worker mode — onload/offload would fail"
+            );
+        }
     }
 
-    /// The engines have to be Android programs: a Linux build cannot be
-    /// started on a phone (wrong linker, wrong libc).
     #[test]
     fn the_shipped_engines_are_android_binaries() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("prebuilt");
@@ -795,11 +1225,9 @@ mod tests {
             let path = dir.join(file);
             let bytes = std::fs::read(&path)
                 .unwrap_or_else(|e| panic!("{} cannot be read: {e}", path.display()));
-            // The ELF header of a 64-bit little-endian ARM program.
             assert_eq!(&bytes[0..4], b"\x7fELF", "{} is not an ELF file", file);
             assert_eq!(bytes[4], 2, "{} is not 64-bit", file);
             assert_eq!(bytes[18], 0xB7, "{} is not an ARM64 program", file);
-            // The program interpreter: Android's own linker.
             let text = String::from_utf8_lossy(&bytes);
             assert!(
                 text.contains("/system/bin/linker64"),

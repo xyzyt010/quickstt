@@ -24,7 +24,22 @@ import java.util.zip.ZipFile;
  */
 public final class Engine {
 
+    static {
+        try {
+            System.loadLibrary("quickstt_android");
+        } catch (Throwable ignored) {
+        }
+    }
+
     private Engine() {
+    }
+
+    /**
+     * Return the app's native library directory (exec-mounted by Android).
+     */
+    public static String nativeDir(Context context) {
+        File dir = nativeLibraryDir(context);
+        return dir != null ? dir.getAbsolutePath() : "";
     }
 
     /**
@@ -39,6 +54,11 @@ public final class Engine {
             //    can be started directly.
             File nativeDir = nativeLibraryDir(context);
             if (nativeDir != null) {
+                File preinstalled = new File(nativeDir, entry);
+                if (preinstalled.isFile() && preinstalled.length() > 0) {
+                    makeExecutable(preinstalled);
+                    return preinstalled.getAbsolutePath();
+                }
                 String path = write(context, nativeDir, entry);
                 if (!path.isEmpty()) {
                     return path;

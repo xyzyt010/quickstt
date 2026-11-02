@@ -325,8 +325,48 @@ pub fn log(message: &str) {
 /// Remember the app handle so the Activity can be reached later.
 #[cfg(target_os = "android")]
 pub fn init(app: AndroidApp) {
-    let mut slot = APP.lock().unwrap();
-    *slot = Some(app);
+    {
+        let mut slot = APP.lock().unwrap();
+        *slot = Some(app);
+    }
+    // Ensure TMPDIR and HOME point to our private writable app directory rather
+    // than Android's read-only /data/local/tmp.
+    if let Some(dir) = files_dir() {
+        let tmp = dir.join("quickstt");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::env::set_var("TMPDIR", &tmp);
+        std::env::set_var("HOME", &tmp);
+    }
+    // Bind JNI native callbacks directly onto the app classes loaded via the
+    // application's PathClassLoader so they never fail with UnsatisfiedLinkError
+    // even when NativeActivity loaded libquickstt_android.so via C dlopen.
+    let _ = with_activity(|env, activity| {
+        if let Some(cls) = app_class(env, activity, "ai/quickstt/app/Bubble") {
+            let methods = [jni::NativeMethod {
+                name: "nativeBubbleAction".into(),
+                sig: "(I)V".into(),
+                fn_ptr: crate::Java_ai_quickstt_app_Bubble_nativeBubbleAction as *mut std::ffi::c_void,
+            }];
+            let _ = env.register_native_methods(cls, &methods);
+        }
+        if let Some(cls) = app_class(env, activity, "ai/quickstt/app/Overlay") {
+            let methods = [jni::NativeMethod {
+                name: "nativeActivityResumed".into(),
+                sig: "()V".into(),
+                fn_ptr: crate::Java_ai_quickstt_app_Overlay_nativeActivityResumed as *mut std::ffi::c_void,
+            }];
+            let _ = env.register_native_methods(cls, &methods);
+        }
+        if let Some(cls) = app_class(env, activity, "ai/quickstt/app/ModelDownloader") {
+            let methods = [jni::NativeMethod {
+                name: "nativeProgress".into(),
+                sig: "(JJ)V".into(),
+                fn_ptr: Java_ai_quickstt_app_ModelDownloader_nativeProgress as *mut std::ffi::c_void,
+            }];
+            let _ = env.register_native_methods(cls, &methods);
+        }
+        Some(())
+    });
 }
 
 /// The stored app handle (Android only).
@@ -486,13 +526,43 @@ pub fn native_lib_dir() -> Option<PathBuf> {
     #[cfg(target_os = "android")]
     {
         with_activity(|env, activity| {
+            // 1. Try via our Java helper (Engine.nativeDir)
+            if let Some(val) = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Engine",
+                "nativeDir",
+                "(Landroid/content/Context;)Ljava/lang/String;",
+                &[JValue::from(activity)],
+            ) {
+                if let Some(s) = jni_string(env, val) {
+                    if !s.is_empty() {
+                        return Some(PathBuf::from(s));
+                    }
+                }
+            }
+            // 2. Direct JNI lookup: activity.getApplicationInfo().nativeLibraryDir
+            let app_info = env
+                .call_method(
+                    activity,
+                    "getApplicationInfo",
+                    "()Landroid/content/pm/ApplicationInfo;",
+                    &[],
+                )
+                .ok()?
+                .l()
+                .ok()?;
             let dir = env
-                .call_method(activity, "getNativeLibraryDir", "()Ljava/lang/String;", &[])
+                .get_field(&app_info, "nativeLibraryDir", "Ljava/lang/String;")
                 .ok()?
                 .l()
                 .ok()?;
             let path: String = env.get_string(&JString::from(dir)).ok()?.into();
-            Some(PathBuf::from(path))
+            if path.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(path))
+            }
         })
     }
     #[cfg(not(target_os = "android"))]
@@ -1167,6 +1237,54 @@ pub fn hide_overlay() {
                 Some(())
             });
         });
+    }
+}
+
+/// Feed live microphone RMS level and state to the floating bubble waveform.
+pub fn update_overlay_level(level: f32, recording: bool, busy: bool) {
+    #[cfg(target_os = "android")]
+    {
+        let _ = with_activity(|env, activity| {
+            call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "setLevel",
+                "(FZZ)V",
+                &[
+                    JValue::from(level),
+                    JValue::from(recording),
+                    JValue::from(busy),
+                ],
+            )?;
+            Some(())
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (level, recording, busy);
+    }
+}
+
+/// Expand or collapse the floating bubble between rounded icon and circular pill.
+pub fn set_overlay_expanded(expanded: bool) {
+    #[cfg(target_os = "android")]
+    {
+        let _ = with_activity(|env, activity| {
+            call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "setExpanded",
+                "(Z)V",
+                &[JValue::from(expanded)],
+            )?;
+            Some(())
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = expanded;
     }
 }
 

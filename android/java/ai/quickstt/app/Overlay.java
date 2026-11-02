@@ -32,6 +32,13 @@ import android.provider.Settings;
  */
 public final class Overlay {
 
+    static {
+        try {
+            System.loadLibrary("quickstt_android");
+        } catch (Throwable ignored) {
+        }
+    }
+
     /** Called from Rust when the activity comes back to the front. */
     private static native void nativeActivityResumed();
 
@@ -180,6 +187,16 @@ public final class Overlay {
     /** Take the floating bubble off the screen (see {@link Bubble}). */
     public static String hide(Context context, String state, String transcript) {
         return Bubble.hide(context);
+    }
+
+    /** Feed live microphone RMS level and state to the floating bubble waveform. */
+    public static void setLevel(float level, boolean recording, boolean busy) {
+        Bubble.setLevel(level, recording, busy);
+    }
+
+    /** Expand or collapse the floating bubble between rounded icon and circular pill. */
+    public static void setExpanded(boolean expanded) {
+        Bubble.setExpanded(expanded);
     }
 
     /**

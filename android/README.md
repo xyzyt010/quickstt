@@ -18,10 +18,12 @@ record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window
 | **On-device transcription** (three engines for arm64-v8a) | ✅ implemented |
 | **Clipboard copy** of the finished transcript | ✅ implemented |
 | **Floating bubble over other apps** (`TYPE_APPLICATION_OVERLAY`) | ✅ implemented |
-| **Interactive bubble** (REC / TYPE / close, draggable) | ✅ implemented (Java helper in a dex) |
+| **Interactive bubble** (expandable live waveform pill, draggable, tap-to-record/STOP/TYPE) | ✅ implemented (Java helper in a dex) |
 | **Foreground service** (the bubble keeps working in other apps) | ✅ implemented (`SpeechService`) |
 | **Battery optimisation exemption** (the app is not put to sleep) | ✅ implemented |
-| **Model download in-app** (8 models, real byte progress) | ✅ implemented (Android HTTP stack) |
+| **Model download in-app** (7 downloads + 1 bundled model, real byte progress) | ✅ implemented (Android HTTP stack) |
+| **Bundled Cactus Whistle 16M** (works offline on first launch, no download) | ✅ implemented (`assets/models/whistle.cact`) |
+| **Onload / offload models in RAM** with live status and idle auto-offload | ✅ implemented (persistent `--worker` + pinned buffers) |
 | **Model self-test** ("Test this model" — records 4 s, runs the engine) | ✅ implemented |
 | **Typing into the app in front** (real KeyEvents) | ✅ implemented, needs the INJECT_EVENTS permission |
 | **Share sheet** for the last transcript | ✅ implemented |
@@ -89,8 +91,8 @@ the bundled engines can really load on a phone:
 
 | Model | Engine | File | Size |
 |---|---|---|---|
+| **Cactus Whistle 16M** (bundled in the APK) | Cactus needle | `whistle.cact` | 16.9 MB |
 | Whisper Tiny EN | whisper.cpp | `ggml-tiny.en-q5_1.bin` | 32 MB |
-| Cactus Whistle 16M | Cactus needle | `whistle.cact` | 16.9 MB |
 | Moonshine Base EN | transcribe.cpp | `moonshine-base-Q8_0.gguf` | 74 MB |
 | SenseVoice Small | transcribe.cpp | `SenseVoiceSmall-Q4_K_M.gguf` | 139 MB |
 | Canary 180M Flash | transcribe.cpp | `canary-180m-flash-Q5_K_M.gguf` | 151 MB |
@@ -98,11 +100,15 @@ the bundled engines can really load on a phone:
 | Nemotron 3.5 ASR Streaming 0.6B | transcribe.cpp | `nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf` | 473 MB |
 | Qwen3-ASR 0.6B | transcribe.cpp | `Qwen3-ASR-0.6B-Q4_K_M.gguf` | 562 MB |
 
-The models are the same files the desktop app uses (the same HuggingFace
-sources), so one download serves both. The Models tab renders the list with
-the real download state — there is no placeholder row and no button that
-cannot work. `cargo test -- --ignored` checks that every URL is alive and
-delivers the announced size.
+Cactus Whistle 16M is the **default model** and ships inside the APK
+(`assets/models/whistle.cact`): it is extracted into the app's private model
+directory on first launch and onloaded into RAM, so dictation works
+immediately with no network and no download step. The other models are
+downloaded from the same HuggingFace sources the desktop app uses, so one
+download serves both. The Models tab renders the list with the real
+installed / downloading / onloaded state — there is no placeholder row and no
+button that cannot work. `cargo test -- --ignored` checks that every URL is
+alive and delivers the announced size.
 
 ## The floating bubble
 
@@ -134,11 +140,16 @@ of the bubble (**Enable** / **Disable**), not the state of the permission.
 It is built by a small Java helper (`java/ai/quickstt/app/Bubble.java`),
 because a `View.OnClickListener` cannot be created from JNI. The helper:
 
-* draws a compact card with the mic state and the last transcript,
-* has three buttons — **REC** (start/stop a recording), **TYPE** (type the
-  last transcript into the app in front) and **X** (hide it),
-* can be **dragged** anywhere on the screen (by its text — a touch listener
-  on the row would swallow the taps before they reach the buttons),
+* draws an always-on **48 dp rounded-corner icon** with a live 5-bar white
+  waveform and a subtle purple rim — no microphone icons,
+* smoothly morphs on press into a **circular stadium pill** (236 × 54 dp,
+  27 dp radius) with a pure black background, slight purple ambient
+  highlights and a 17-bar waveform animated by `Choreographer` at the
+  display refresh rate (60/120 fps) from the real AAudio level,
+* expands and starts recording in one tap; **STOP** finishes the take,
+  **TYPE** types the transcript into the app in front (or copies it), and
+  the chevron folds it back into the icon,
+* can be **dragged** anywhere on the screen,
 * uses the *application* context, so it survives the activity that made it,
 * reports every failure back to Rust, so the app can say what went wrong
   instead of showing a bubble that is not there.
@@ -146,12 +157,15 @@ because a `View.OnClickListener` cannot be created from JNI. The helper:
 The helper is looked up through the **Activity's class loader**, not with
 `FindClass`: on a thread that was attached with `AttachCurrentThread`,
 `FindClass` uses the *system* class loader and the app's own classes are
-invisible to it.
+invisible to it. The JNI entry points are also bound with
+`RegisterNatives` during startup, so a dex class loaded through the app's
+`PathClassLoader` never fails with `UnsatisfiedLinkError`.
 
-The class is compiled with `javac`, turned into a `classes.dex` with `d8` and
-added to the APK by `build-apk.ps1` (cargo-apk cannot put a dex into an APK).
-The manifest therefore needs `android:hasCode="true"`. When the dex is
-missing, the app falls back to a plain read-out bubble — it never breaks.
+The class is compiled with `javac`, turned into a `classes.dex` with `d8`
+(including every inner class) and added to the APK by `build-apk.ps1`
+(cargo-apk cannot put a dex into an APK). The manifest therefore needs
+`android:hasCode="true"`. When the dex is missing, the app falls back to a
+plain read-out bubble — it never breaks.
 
 The bubble is *persistent*: the Settings tab has a switch that keeps it on
 across apps and across launches. It is also shown automatically while a
@@ -256,18 +270,20 @@ settings.
    and reports the level, so the user can check the input without
    recording.
 3. **Transcribe** — the engine for the chosen model runs out of the app's
-   native library directory (where the installer put it) and is executed
-   once per turn, with a 120 s deadline, so a broken model cannot freeze the
-   app. A silent take is rejected *before* the engine runs (whisper
+   native library directory (where the installer put it). The GGUF engines
+   stay resident in a persistent `transcribe-cli --worker` process, so a
+   turn does not pay the model-load cost again; the other engines run once
+   per turn with a 120 s deadline, so a broken model cannot freeze the app.
+   A silent take is rejected *before* the engine runs (whisper
    hallucinates short words on noise-only audio).
-4. **Model** — never bundled. The Models tab lists the models the phone can
-   run and downloads the chosen one from the same HuggingFace source the
-   desktop app uses. The transfer is done by the **Android HTTP stack**
-   (`ai.quickstt.app.ModelDownloader`, `HttpURLConnection`): the number of
-   bytes that really arrived is reported into the app, an interrupted
-   download continues where it stopped (a `Range` request), and only a
-   **complete** file is moved into place — a truncated model is worse than
-   no model at all, because the engine would fail on it. The choice is
+4. **Model** — Cactus Whistle 16M is bundled in the APK and installed on
+   first launch. Every other model is downloaded from the same HuggingFace
+   source the desktop app uses. The transfer is done by the **Android HTTP
+   stack** (`ai.quickstt.app.ModelDownloader`, `HttpURLConnection`): the
+   number of bytes that really arrived is reported into the app, an
+   interrupted download continues where it stopped (a `Range` request), and
+   only a **complete** file is moved into place — a truncated model is worse
+   than no model at all, because the engine would fail on it. The choice is
    remembered between launches.
 5. **Result** — the transcript is shown in the app, pushed into History and
    copied to the system clipboard, so it can be pasted into any app. If

@@ -55,10 +55,8 @@ if ($LASTEXITCODE -ne 0) { throw "javac failed" }
 
 Write-Host "==> dexing"
 $d8 = Get-ChildItem "$buildTools" -Filter "d8*" | Select-Object -First 1
-& $d8.FullName --min-api 26 --output "$work\dex" `
-    "$work\classes\ai\quickstt\app\Bubble.class" "$work\classes\ai\quickstt\app\Overlay.class" `
-    "$work\classes\ai\quickstt\app\Engine.class" "$work\classes\ai\quickstt\app\SpeechService.class" `
-    "$work\classes\ai\quickstt\app\ModelDownloader.class"
+$classFiles = Get-ChildItem "$work\classes\ai\quickstt\app" -Filter "*.class" | ForEach-Object { $_.FullName }
+& $d8.FullName --min-api 26 --output "$work\dex" @classFiles
 if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
 if (-not (Test-Path "$work\dex\classes.dex")) { throw "d8 produced no classes.dex" }
 
@@ -97,7 +95,7 @@ if (-not $env:ANDROID_NDK_ROOT) {
 }
 # The `cc` crate compiles the AAudio shim and only finds the compiler on PATH
 # ("aarch64-linux-android21-clang"); the NDK is not there by default.
-$ndkHost = if ($IsWindows) { "windows-x86_64" } else { "linux-x86_64" }
+$ndkHost = if ($env:OS -eq "Windows_NT") { "windows-x86_64" } else { "linux-x86_64" }
 $ndkBin = Join-Path $env:ANDROID_NDK_ROOT "toolchains\llvm\prebuilt\$ndkHost\bin"
 if (Test-Path $ndkBin) {
     if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $ndkBin })) {

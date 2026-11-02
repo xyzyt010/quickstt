@@ -1,27 +1,16 @@
-//! QuickSTT for Android — touch-first dictation.
+//! QuickSTT for Android — touch-first on-device speech-to-text.
 //!
-//! The UI is a dedicated touch-first Slint scene (`ui/android.slint`), not the
-//! desktop dashboard: phones get a bottom nav, a thumb-reachable record orb
-//! and 44+ DIP targets.
-//!
-//! What actually works in this build:
-//!   * real microphone capture (NDK AAudio via the `src/aaudio.c` shim — cpal
-//!     has no Android backend),
-//!   * real on-device transcription (whisper.cpp built for arm64-v8a, shipped
-//!     inside the APK and unpacked on first run),
-//!   * the model is downloaded in-app (32 MB, whisper.cpp GGML tiny.en Q5_1),
-//!   * the finished text is copied to the clipboard so it can be pasted into
-//!     any app,
-//!   * a floating bubble above other apps (WindowManager overlay) that shows
-//!     the mic state and the last transcript.
-//!
-//! Every action reports what it did: the status line and the activity log in
-//! the UI (and logcat) always say what happened, so a silent button is not
-//! possible any more.
-//!
-//! Build:
-//!   * `cargo apk build` → Android APK (`android_main` below)
-//!   * `cargo run --example preview` → desktop preview window
+//! Features:
+//!   * Real 16 kHz microphone capture via NDK AAudio (`src/aaudio.c`),
+//!   * Three ARM64 NEON-optimized speech engines (`needle`, `whisper-cli`,
+//!     `transcribe-cli`) with **Cactus Whistle 16M** (`whistle.cact`) inbuilt
+//!     directly inside the APK,
+//!   * Real RAM model onloading & offloading (persistent `transcribe-cli --worker`
+//!     sessions + pinned model buffers + idle auto-offload),
+//!   * Always-on expandable floating bubble (`Bubble.java`): a sleek rounded-corner
+//!     icon that morphs on press into a circular stadium pill with a pure black
+//!     background, slight purple highlights, and 60/120fps super-smooth white
+//!     waveforms (no microphone icons).
 
 mod audio;
 mod conditioner;
@@ -30,7 +19,7 @@ mod stt;
 
 slint::include_modules!();
 
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,9 +36,7 @@ struct PendingTurn {
 struct Session {
     recorder: audio::Recorder,
     samples: Vec<f32>,
-    /// Speech detected at least once (so silence-only takes are discarded).
     spoke: bool,
-    /// Last time we saw a sample above the speech threshold.
     last_voice: std::time::Instant,
     started: std::time::Instant,
 }
@@ -67,22 +54,10 @@ impl Session {
 }
 
 /// Android entry point.
-///
-/// The APK ships this crate as a `cdylib`, and the Java side loads it as
-/// `System.loadLibrary("quickstt_android")` and looks for exactly this
-/// symbol. Without it the library contains only the dependencies and the
-/// app never starts (the activity dies with "UnsatisfiedLinkError").
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub fn android_main(app: slint::android::AndroidApp) {
-    // The platform layer needs the Activity instance (for the permission
-    // dialog, the clipboard and the overlay), so keep a handle before the
-    // backend consumes it.
     platform::init(app.clone());
-    // Every Android event is written to logcat. It is the only way to see
-    // whether the phone sends the taps to the app at all:
-    //   adb logcat | grep QuickSTT
-    // "android event: Main(InputAvailable)" means the touch arrived.
     if let Err(e) = slint::android::init_with_event_listener(app, |event| {
         platform::log(&format!("android event: {event:?}"));
     }) {
@@ -92,33 +67,33 @@ pub fn android_main(app: slint::android::AndroidApp) {
     run();
 }
 
-/// The UI the floating bubble talks to. The bubble is a Java view, so it
-/// calls back into Rust through a native method.
+/// The UI handle used by JNI callbacks from the Java overlay bubble.
 static BUBBLE_UI: Mutex<Option<slint::Weak<AppWindow>>> = Mutex::new(None);
 
-/// Called by the Java bubble when the user taps one of its buttons.
+/// Called by the Java bubble when the user taps one of its interactive zones.
 ///
-/// * 1 = start/stop the recording
-/// * 2 = type the last transcript into the app in front
+/// * 1 = start/stop recording
+/// * 2 = type the last transcript into the focused app
 /// * 3 = hide the bubble
-#[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "C" fn Java_ai_quickstt_app_Bubble_nativeBubbleAction(
-    _env: jni::JNIEnv,
-    _class: jni::sys::jclass,
-    action: jni::sys::jint,
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    action: i32,
 ) {
-    bubble_action(action as i32);
+    bubble_action(action);
 }
 
-/// Run a bubble action on the Slint event loop.
 fn bubble_action(action: i32) {
     let ui = BUBBLE_UI.lock().ok().and_then(|g| g.clone());
     let Some(ui) = ui else { return };
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = ui.upgrade() else { return };
         match action {
-            1 => ui.invoke_toggle_record(),
+            1 => {
+                ui.set_bubble_expanded(true);
+                ui.invoke_toggle_record();
+            }
             2 => ui.invoke_type_into_app(),
             3 => platform::hide_overlay(),
             _ => {}
@@ -126,17 +101,11 @@ fn bubble_action(action: i32) {
     });
 }
 
-/// Called by the Java overlay helper when the app comes back to the front.
-///
-/// The user leaves the app to grant the "display over other apps"
-/// permission in the system settings and comes back — this is the moment
-/// the app has to notice the new permission and put the bubble on the
-/// screen. Without it the user is left with a button that looks broken.
-#[cfg(target_os = "android")]
+/// Called by the Java overlay helper when the Activity resumes.
 #[no_mangle]
 pub extern "C" fn Java_ai_quickstt_app_Overlay_nativeActivityResumed(
-    _env: jni::JNIEnv,
-    _class: jni::sys::jclass,
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
 ) {
     let ui = BUBBLE_UI.lock().ok().and_then(|g| g.clone());
     let Some(ui) = ui else { return };
@@ -146,63 +115,127 @@ pub extern "C" fn Java_ai_quickstt_app_Overlay_nativeActivityResumed(
     });
 }
 
-/// The engines the Models tab lists.
-///
-/// Only engines that really run on the phone are in here: the catalog is
-/// built from `stt::MODELS` and each entry carries its *real* download
-/// state. Nothing in the list is a placeholder, and nothing promises a
-/// language or a feature the phone build cannot do.
+/// Per-model download state: `(downloading, progress, info_text)`.
+static DOWNLOADS: Mutex<Vec<(bool, f32, String)>> = Mutex::new(Vec::new());
+
+fn set_download_state(index: usize, downloading: bool, progress: f32, info: String) {
+    let Ok(mut list) = DOWNLOADS.lock() else { return };
+    if list.len() < stt::MODELS.len() {
+        list.resize(stt::MODELS.len(), (false, 0.0, String::new()));
+    }
+    if let Some(slot) = list.get_mut(index) {
+        *slot = (downloading, progress, info);
+    }
+}
+
+fn download_state(index: usize) -> (bool, f32, String) {
+    let Ok(list) = DOWNLOADS.lock() else {
+        return (false, 0.0, String::new());
+    };
+    list.get(index)
+        .cloned()
+        .unwrap_or((false, 0.0, String::new()))
+}
+
+/// Build the Slint model catalog with live installation, download, and RAM onload states.
 fn model_catalog() -> Vec<ModelItem> {
+    let loaded_info = stt::loaded_model_status();
     stt::MODELS
         .iter()
         .enumerate()
         .map(|(index, spec)| {
-            let (downloading, progress) = download_state(index);
+            let (downloading, progress, dl_info) = download_state(index);
+            let installed = stt::model_installed(index);
+            let is_loaded = loaded_info.map(|(li, _, _, _)| li == index).unwrap_or(false);
+            let ram_status = if let Some((li, ram_bytes, load_ms, idle_s)) = loaded_info {
+                if li == index {
+                    format!(
+                        "Onloaded in RAM · {} · {} ms (idle {}s)",
+                        stt::human_size(ram_bytes),
+                        load_ms,
+                        idle_s
+                    )
+                } else if installed {
+                    format!(
+                        "Offloaded (on disk · {})",
+                        stt::human_size(stt::model_disk_bytes(index))
+                    )
+                } else {
+                    format!("Not downloaded · {}", spec.size)
+                }
+            } else if installed {
+                if spec.bundled {
+                    format!(
+                        "Installed (inbuilt · {}) — ready to onload",
+                        stt::human_size(stt::model_disk_bytes(index).max(spec.min_bytes))
+                    )
+                } else {
+                    format!(
+                        "Installed on disk ({}) — tap Onload for RAM",
+                        stt::human_size(stt::model_disk_bytes(index))
+                    )
+                }
+            } else if spec.bundled {
+                "Bundled in APK — tap Restore Inbuilt".to_string()
+            } else {
+                format!("Not downloaded · requires {}", spec.size)
+            };
+
             ModelItem {
                 name: spec.name.into(),
                 detail: spec.detail.into(),
                 size: spec.size.into(),
-                installed: stt::model_installed(index),
+                installed,
+                bundled: spec.bundled,
                 downloading,
                 progress,
+                download_info: dl_info.into(),
+                loaded: is_loaded,
+                ram_status: ram_status.into(),
                 engine: stt::engine_name(spec.engine).into(),
             }
         })
         .collect()
 }
 
-/// The download state of every model: (downloading, progress).
-///
-/// The download runs on a worker thread, so the state lives here and the UI
-/// reads it when it rebuilds the model list.
-static DOWNLOADS: Mutex<Vec<(bool, f32)>> = Mutex::new(Vec::new());
+/// Sync the top-level UI properties with the current model selection and RAM state.
+fn sync_model_ui(ui: &AppWindow) {
+    let index = ui.get_selected_model().max(0) as usize;
+    let installed = stt::model_installed(index);
+    ui.set_model_installed(installed);
 
-/// Remember what a model's download is doing.
-fn set_download_state(index: usize, downloading: bool, progress: f32) {
-    let Ok(mut list) = DOWNLOADS.lock() else { return };
-    if list.len() < stt::MODELS.len() {
-        list.resize(stt::MODELS.len(), (false, 0.0));
+    if let Some((loaded_idx, ram_bytes, load_ms, _idle_s)) = stt::loaded_model_status() {
+        let loaded_spec = stt::model(loaded_idx);
+        ui.set_model_loaded(true);
+        ui.set_model_ram_status(
+            format!(
+                "Onloaded in RAM: {} ({} · {} ms)",
+                loaded_spec.name,
+                stt::human_size(ram_bytes),
+                load_ms
+            )
+            .into(),
+        );
+    } else {
+        ui.set_model_loaded(false);
+        let spec = stt::model(index);
+        if installed {
+            ui.set_model_ram_status(
+                format!("Offloaded (RAM free) · {} ready on disk", spec.name).into(),
+            );
+        } else {
+            ui.set_model_ram_status(
+                format!("{} not downloaded yet ({})", spec.name, spec.size).into(),
+            );
+        }
     }
-    if let Some(slot) = list.get_mut(index) {
-        *slot = (downloading, progress);
-    }
+    ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
 }
 
-/// What a model's download is doing.
-fn download_state(index: usize) -> (bool, f32) {
-    let Ok(list) = DOWNLOADS.lock() else { return (false, 0.0) };
-    list.get(index).copied().unwrap_or((false, 0.0))
-}
-
-/// Run something on the UI thread.
-///
-/// Slint properties may only be set from the event-loop thread, so every
-/// update from a worker thread goes through here.
 fn on_ui<F: FnOnce() + Send + 'static>(f: F) {
     let _ = slint::invoke_from_event_loop(f);
 }
 
-/// Push a line into the activity log (shown in the UI and in logcat).
 fn note(ui: &slint::Weak<AppWindow>, log: &Arc<Mutex<Vec<String>>>, message: &str) {
     platform::log(message);
     let text = {
@@ -218,7 +251,6 @@ fn note(ui: &slint::Weak<AppWindow>, log: &Arc<Mutex<Vec<String>>>, message: &st
     }
 }
 
-/// Show the floating bubble and say what went wrong if it fails.
 fn bubble(
     state: &str,
     transcript: &str,
@@ -230,37 +262,33 @@ fn bubble(
     }
 }
 
-/// Bring the floating bubble in line with the permission.
-///
-/// * the permission was granted → the bubble appears (when the user wants it)
-/// * the permission was withdrawn → the bubble disappears
-///
-/// The permission is granted in the system settings, i.e. while the app is
-/// in the background. This runs when the app comes back and once a second
-/// while it is in front, so the button and the bubble always tell the
-/// truth.
 fn refresh_overlay_state(ui: &AppWindow) {
     let granted = platform::can_draw_overlays();
-    if granted == ui.get_overlay_ok() {
+    let changed = granted != ui.get_overlay_ok();
+    ui.set_overlay_ok(granted);
+    if !changed {
         return;
     }
-    ui.set_overlay_ok(granted);
     if granted {
-        // The user asked for the bubble before the permission was there — it
-        // appears now, without another tap.
         if platform::overlay_enabled() {
             match platform::show_overlay("QuickSTT ready", "") {
                 Ok(()) => {
                     ui.set_overlay_enabled(true);
-                    ui.set_status_text("Floating bubble on — it follows you across apps".into());
+                    let _ = platform::start_service();
+                    ui.set_background_ok(true);
+                    ui.set_status_text(
+                        "Floating waveform bubble active — press it anywhere to expand & dictate"
+                            .into(),
+                    );
                 }
                 Err(e) => {
                     ui.set_status_text(format!("The bubble could not be shown: {e}").into());
                 }
             }
         } else {
-            ui.set_status_text("“Display over other apps” is allowed — the bubble can be switched on"
-                .into());
+            ui.set_status_text(
+                "“Display over other apps” is allowed — tap Enable to launch the bubble".into(),
+            );
         }
     } else {
         platform::hide_overlay();
@@ -269,26 +297,19 @@ fn refresh_overlay_state(ui: &AppWindow) {
     }
 }
 
-/// The report of the last model test.
 static LAST_TEST: Mutex<String> = Mutex::new(String::new());
 
-/// Remember the result of the last model test.
 fn set_last_test(report: &str) {
     if let Ok(mut slot) = LAST_TEST.lock() {
         *slot = report.to_string();
     }
 }
 
-/// The result of the last model test.
 fn last_test() -> String {
     LAST_TEST.lock().ok().map(|s| s.clone()).unwrap_or_default()
 }
 
 /// Test a model end to end: four seconds of speech through the engine.
-///
-/// This is the only honest way to see that the microphone, the model file
-/// and the engine binary all work on this phone. The app then says what it
-/// found — in words, with the paths and the time the engine needed.
 fn run_model_test(index: usize, weak: slint::Weak<AppWindow>, log: Arc<Mutex<Vec<String>>>) {
     let spec = stt::model(index);
     let name = spec.name.to_string();
@@ -300,11 +321,22 @@ fn run_model_test(index: usize, weak: slint::Weak<AppWindow>, log: Arc<Mutex<Vec
             format!("Model: {}", stt::model_info(index)),
         ];
         if !stt::model_installed(index) {
-            lines.push("Result: the model file is not downloaded yet".to_string());
-            finish_test(lines.join("\n"), weak, log);
-            return;
+            if spec.bundled {
+                let _ = platform::extract_bundled_model(spec.file, spec.min_bytes);
+            }
+            if !stt::model_installed(index) {
+                lines.push("Result: the model file is not downloaded yet".to_string());
+                finish_test(lines.join("\n"), weak, log);
+                return;
+            }
         }
-        // Record four seconds of speech.
+
+        // Onload model first and record onload time
+        match stt::onload_model(index) {
+            Ok(msg) => lines.push(format!("RAM State: {msg}")),
+            Err(e) => lines.push(format!("RAM State: {e}")),
+        }
+
         let mut recorder = audio::Recorder::new();
         if let Err(e) = recorder.start() {
             lines.push(format!("Result: the microphone could not be opened — {e}"));
@@ -318,27 +350,39 @@ fn run_model_test(index: usize, weak: slint::Weak<AppWindow>, log: Arc<Mutex<Vec
             let n = recorder.read(&mut chunk);
             if n > 0 {
                 samples.extend_from_slice(&chunk[..n]);
+                let lvl = recorder.rms.min(1.0);
+                platform::update_overlay_level(lvl, true, false);
+                let w = weak.clone();
+                on_ui(move || {
+                    if let Some(ui) = w.upgrade() {
+                        ui.set_audio_level(lvl);
+                    }
+                });
             } else {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
         recorder.stop();
+        platform::update_overlay_level(0.0, false, true);
         let seconds = (samples.len() as f32 / audio::SAMPLE_RATE as f32).ceil() as i32;
-        lines.push(format!("Recorded: {seconds} s"));
+        lines.push(format!("Recorded: {seconds} s (16 kHz mono PCM)"));
 
-        let wav = std::env::temp_dir().join("quickstt-test.wav");
+        let wav = stt::wav_path("quickstt-test.wav");
         let result = audio::write_wav(&wav, &samples, audio::SAMPLE_RATE as u32)
-            .map_err(|e| e.to_string())
+            .map_err(|e| format!("failed to write WAV ({}): {e}", wav.display()))
             .and_then(|_| stt::transcribe_timed(&wav, index));
+        platform::update_overlay_level(0.0, false, false);
         match result {
             Ok((text, took)) => {
                 let text = text.trim();
                 if text.is_empty() {
-                    lines.push("Result: the engine returned nothing (no speech was heard)".to_string());
+                    lines.push(
+                        "Result: engine ran cleanly (no speech detected in the 4s clip)".to_string(),
+                    );
                 } else {
-                    lines.push(format!("Result: “{text}”"));
+                    lines.push(format!("Transcript: “{text}”"));
                 }
-                lines.push(format!("Took: {:.1} s", took));
+                lines.push(format!("Inference Latency: {:.2} s", took));
             }
             Err(e) => lines.push(format!("Result: FAILED — {e}")),
         }
@@ -346,7 +390,6 @@ fn run_model_test(index: usize, weak: slint::Weak<AppWindow>, log: Arc<Mutex<Vec
     });
 }
 
-/// Put the result of a test into the app.
 fn finish_test(report: String, weak: slint::Weak<AppWindow>, log: Arc<Mutex<Vec<String>>>) {
     set_last_test(&report);
     platform::log(&report);
@@ -355,18 +398,23 @@ fn finish_test(report: String, weak: slint::Weak<AppWindow>, log: Arc<Mutex<Vec<
         if let Some(ui) = ui_weak.upgrade() {
             ui.set_test_result(report.clone().into());
             ui.set_test_running(false);
+            ui.set_audio_level(0.0);
+            sync_model_ui(&ui);
         }
     });
-    note(&weak, &log, "The model test finished — the result is in the test card.");
+    note(
+        &weak,
+        &log,
+        "Model benchmark finished — see Benchmark card.",
+    );
 }
 
-/// Everything the app can see about itself.
-///
-/// This is the report the user asks for when something does not work: the
-/// permissions, every engine and every model file, with their paths.
 fn diagnostics_report(index: usize) -> String {
     let mut lines = vec![
-        format!("QuickSTT {} · ai.quickstt.app", env!("CARGO_PKG_VERSION")),
+        format!(
+            "QuickSTT {} · ai.quickstt.app (ARM64 NEON)",
+            env!("CARGO_PKG_VERSION")
+        ),
         format!(
             "Microphone: {}",
             if platform::has_mic_permission() {
@@ -376,7 +424,7 @@ fn diagnostics_report(index: usize) -> String {
             }
         ),
         format!(
-            "Overlay: {}",
+            "Overlay permission: {}",
             if platform::can_draw_overlays() {
                 "granted"
             } else {
@@ -384,11 +432,11 @@ fn diagnostics_report(index: usize) -> String {
             }
         ),
         format!(
-            "Background service: {}",
+            "Background keep-alive: {}",
             if platform::ignoring_battery_optimizations() {
-                "running, battery optimisation lifted"
+                "unrestricted"
             } else {
-                "the app is put to sleep in the background"
+                "battery restricted"
             }
         ),
         format!(
@@ -400,36 +448,49 @@ fn diagnostics_report(index: usize) -> String {
             }
         ),
     ];
+    if let Some((li, ram, ms, idle)) = stt::loaded_model_status() {
+        lines.push(format!(
+            "RAM Onload: {} ({} · loaded in {} ms · idle {}s)",
+            stt::model(li).name,
+            stt::human_size(ram),
+            ms,
+            idle
+        ));
+    } else {
+        lines.push("RAM Onload: no model currently resident in RAM".to_string());
+    }
     for (id, name, _) in stt::ENGINES {
         lines.push(format!("Engine {name}: {}", stt::engine_info(id)));
     }
-    let spec = stt::model(index);
-    lines.push(format!("Model {}: {}", spec.name, stt::model_info(index)));
+    for (idx, spec) in stt::MODELS.iter().enumerate() {
+        let marker = if idx == index { "*" } else { " " };
+        lines.push(format!(
+            "[{marker}] {}: {}",
+            spec.name,
+            stt::model_info(idx)
+        ));
+    }
     let test = last_test();
     if test.is_empty() {
-        lines.push("Last test: not run yet".to_string());
+        lines.push("Last benchmark: not run yet".to_string());
     } else {
-        lines.push(format!("Last test:\n{test}"));
+        lines.push(format!("Last benchmark:\n{test}"));
     }
     lines.join("\n")
 }
 
 /// Build the window and wire every callback.
-///
-/// This is separate from [`run`] on purpose: a test can build the very same
-/// window, tap its buttons and check that the tap really arrives in the
-/// Rust code. A button that looks alive but does nothing is the worst kind
-/// of bug, and this is what catches it.
 pub fn build_ui() -> AppWindow {
     let ui = AppWindow::new().expect("could not create the QuickSTT window");
 
-    // The desktop preview should look like a phone. (On Android the surface is
-    // the device screen; the request is ignored there.)
+    // 1. Extract the inbuilt Cactus Whistle 16M (`whistle.cact`) model FIRST
+    //    before building the model catalog so the UI immediately sees it installed!
+    stt::ensure_bundled_models();
+
     #[cfg(not(target_os = "android"))]
     {
         ui.window()
             .set_size(slint::LogicalSize::new(412.0, 760.0));
-        // QS_TAB=0..3 opens the preview on a given tab (dev aid).
         if let Ok(tab) = std::env::var("QS_TAB") {
             if let Ok(tab) = tab.parse::<i32>() {
                 ui.set_tab(tab.clamp(0, 3));
@@ -437,44 +498,33 @@ pub fn build_ui() -> AppWindow {
         }
     }
 
-    // Recent turns are a growable model so a finished dictation can appear
-    // immediately, exactly like the desktop history list.
     let turns = Rc::new(slint::VecModel::from(Vec::<Turn>::new()));
     ui.set_turns(turns.clone().into());
 
-    // The Models tab shows the real catalog.
-    ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
-
-    // The activity log: the last few things the app did.
     let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-    // The floating bubble calls back into the UI through this handle.
     if let Ok(mut slot) = BUBBLE_UI.lock() {
         *slot = Some(ui.as_weak());
     }
 
-    // Shared between the UI thread and the capture thread.
     let stop_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let pending: Arc<Mutex<Option<PendingTurn>>> = Arc::new(Mutex::new(None));
-    // The last finished transcript — what the "type into the app" and
-    // "share" actions push out.
     let last_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-    // Set while a permission dialog is on screen.
     let perm_wait: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
 
-    // ── Setup state (permissions + model) ──────────────────────────────────
+    // ── Permissions & Model Download / Uninstall / Onload / Offload ────────
     {
         let weak = ui.as_weak();
         let log = log.clone();
         let perm_wait = perm_wait.clone();
         ui.on_grant_mic(move || {
-            note(&weak, &log, "Requesting the microphone permission…");
+            note(&weak, &log, "Requesting microphone permission…");
             if let Ok(mut wait) = perm_wait.lock() {
                 *wait = Some(std::time::Instant::now());
             }
             platform::request_mic_permission();
             if let Some(ui) = weak.upgrade() {
-                ui.set_status_text("Waiting for the permission dialog…".into());
+                ui.set_status_text("Waiting for microphone permission dialog…".into());
             }
         });
     }
@@ -485,54 +535,65 @@ pub fn build_ui() -> AppWindow {
             let Some(ui) = weak.upgrade() else { return };
             let index = ui.get_selected_model().max(0) as usize;
             if ui.get_model_downloading() {
-                note(&weak, &log, "A download is already running.");
+                note(&weak, &log, "A model download is already in progress.");
                 return;
             }
             if stt::model_installed(index) {
-                note(&weak, &log, "That model is already installed.");
-                ui.set_status_text("That model is already downloaded".into());
+                sync_model_ui(&ui);
+                note(&weak, &log, "Model is already installed — onloading to RAM.");
+                ui.invoke_onload_model(index as i32);
                 return;
             }
             let spec = stt::model(index);
+            let start_info = format!("Connecting to HuggingFace · 0% of {}", spec.size);
             ui.set_model_downloading(true);
             ui.set_model_progress(0.0);
-            ui.set_status_text(format!("Downloading {}…", spec.name).into());
-            set_download_state(index, true, 0.0);
+            ui.set_model_download_info(start_info.clone().into());
+            ui.set_status_text(format!("Downloading {} ({})…", spec.name, spec.size).into());
+            set_download_state(index, true, 0.0, start_info);
             ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
-            note(&weak, &log, &format!("Downloading {} ({}).", spec.name, spec.size));
+            note(&weak, &log, &format!("Downloading {} ({})…", spec.name, spec.size));
 
             let weak = weak.clone();
             let log = log.clone();
-            // Download off the UI thread; the UI only receives progress.
             std::thread::spawn(move || {
-                let mut last_update = std::time::Instant::now() - std::time::Duration::from_secs(1);
+                let started_at = std::time::Instant::now();
+                let mut last_update =
+                    std::time::Instant::now() - std::time::Duration::from_secs(1);
                 let progress_weak = weak.clone();
                 let name = spec.name;
+                let fallback_total = spec.min_bytes;
                 let result = stt::download_model(index, move |done, total| {
-                    // The UI is refreshed at most ten times a second.
-                    if last_update.elapsed() < std::time::Duration::from_millis(100) {
+                    let eff_total = if total > 0 { total } else { fallback_total };
+                    let is_complete = eff_total > 0 && done >= eff_total;
+                    if !is_complete
+                        && last_update.elapsed() < std::time::Duration::from_millis(80)
+                    {
                         return;
                     }
                     last_update = std::time::Instant::now();
-                    let frac = if total > 0 {
-                        (done as f32 / total as f32).clamp(0.0, 1.0)
+                    let frac = if eff_total > 0 {
+                        (done as f32 / eff_total as f32).clamp(0.0, 1.0)
                     } else {
                         0.0
                     };
-                    let megabytes = done as f64 / 1_048_576.0;
-                    let percent = if total > 0 {
-                        format!("{}%", (frac * 100.0) as i32)
-                    } else {
-                        format!("{megabytes:.0} MB")
-                    };
-                    set_download_state(index, true, frac);
+                    let done_mb = done as f64 / 1_048_576.0;
+                    let total_mb = eff_total as f64 / 1_048_576.0;
+                    let elapsed_s = started_at.elapsed().as_secs_f64().max(0.1);
+                    let speed_mb = done_mb / elapsed_s;
+                    let pct = (frac * 100.0).round() as i32;
+                    let info = format!(
+                        "{done_mb:.1} / {total_mb:.1} MB · {speed_mb:.1} MB/s · {pct}%"
+                    );
+                    set_download_state(index, true, frac, info.clone());
                     let progress_weak = progress_weak.clone();
                     on_ui(move || {
                         if let Some(ui) = progress_weak.upgrade() {
                             ui.set_model_progress(frac);
                             ui.set_model_downloading(true);
+                            ui.set_model_download_info(info.clone().into());
                             ui.set_status_text(
-                                format!("Downloading {name}… {percent}").into(),
+                                format!("Downloading {name}… {pct}% ({done_mb:.1} MB)").into(),
                             );
                             ui.set_models(
                                 Rc::new(slint::VecModel::from(model_catalog())).into(),
@@ -540,7 +601,21 @@ pub fn build_ui() -> AppWindow {
                         }
                     });
                 });
-                set_download_state(index, false, if result.is_ok() { 1.0 } else { 0.0 });
+
+                set_download_state(
+                    index,
+                    false,
+                    if result.is_ok() { 1.0 } else { 0.0 },
+                    String::new(),
+                );
+
+                // Automatically onload the newly downloaded model into RAM!
+                let onload_outcome = if result.is_ok() {
+                    Some(stt::onload_model(index))
+                } else {
+                    None
+                };
+
                 let done_weak = weak.clone();
                 let done_log = log.clone();
                 let name = spec.name;
@@ -548,20 +623,21 @@ pub fn build_ui() -> AppWindow {
                 on_ui(move || {
                     if let Some(ui) = done_weak.upgrade() {
                         ui.set_model_downloading(false);
+                        ui.set_model_download_info("".into());
                         match error {
                             None => {
                                 ui.set_model_progress(1.0);
-                                ui.set_models(
-                                    Rc::new(slint::VecModel::from(model_catalog())).into(),
-                                );
-                                ui.set_status_text(format!("{name} is ready — tap the mic").into());
-                                note(&done_weak, &done_log, &format!("{name} installed."));
+                                sync_model_ui(&ui);
+                                let status_msg = match onload_outcome {
+                                    Some(Ok(msg)) => format!("{name} installed & {msg}"),
+                                    _ => format!("{name} installed and ready"),
+                                };
+                                ui.set_status_text(status_msg.clone().into());
+                                note(&done_weak, &done_log, &status_msg);
                             }
                             Some(e) => {
                                 ui.set_model_progress(0.0);
-                                ui.set_models(
-                                    Rc::new(slint::VecModel::from(model_catalog())).into(),
-                                );
+                                sync_model_ui(&ui);
                                 ui.set_status_text(format!("Download failed: {e}").into());
                                 note(&done_weak, &done_log, &format!("Download failed: {e}"));
                             }
@@ -580,17 +656,23 @@ pub fn build_ui() -> AppWindow {
             let spec = stt::model(index);
             match stt::uninstall_model(index) {
                 Ok(()) => {
-                    note(&weak, &log, &format!("{} uninstalled.", spec.name));
-                    ui.set_status_text(format!("{} uninstalled", spec.name).into());
-                    let current_selected = ui.get_selected_model().max(0) as usize;
-                    if current_selected == index {
-                        ui.set_model_installed(false);
+                    note(&weak, &log, &format!("{} removed from disk.", spec.name));
+                    ui.set_status_text(format!("{} deleted from storage", spec.name).into());
+                    if ui.get_selected_model().max(0) as usize == index {
+                        // Fall back to the inbuilt Cactus Whistle model (index 0)
+                        ui.set_selected_model(0);
+                        stt::save_selected(0);
+                        let _ = stt::onload_model(0);
                     }
-                    ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
+                    sync_model_ui(&ui);
                 }
                 Err(e) => {
-                    note(&weak, &log, &format!("Could not uninstall {}: {e}", spec.name));
-                    ui.set_status_text(format!("Could not uninstall: {e}").into());
+                    note(
+                        &weak,
+                        &log,
+                        &format!("Could not delete {}: {e}", spec.name),
+                    );
+                    ui.set_status_text(format!("Could not delete: {e}").into());
                 }
             }
         });
@@ -598,21 +680,109 @@ pub fn build_ui() -> AppWindow {
     {
         let weak = ui.as_weak();
         let log = log.clone();
+        ui.on_onload_model(move |idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            let index = idx.max(0) as usize;
+            let spec = stt::model(index);
+            ui.set_selected_model(index as i32);
+            stt::save_selected(index);
+            ui.set_status_text(format!("Onloading {} into RAM…", spec.name).into());
+            ui.set_model_ram_status(format!("Onloading {} into RAM…", spec.name).into());
+            note(&weak, &log, &format!("Onloading {} into RAM…", spec.name));
+
+            let weak = weak.clone();
+            let log = log.clone();
+            std::thread::spawn(move || {
+                let res = stt::onload_model(index);
+                on_ui(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        sync_model_ui(&ui);
+                        match res {
+                            Ok(msg) => {
+                                ui.set_status_text(msg.clone().into());
+                                note(&weak, &log, &msg);
+                            }
+                            Err(e) => {
+                                ui.set_status_text(format!("Onload failed: {e}").into());
+                                note(&weak, &log, &format!("Onload failed: {e}"));
+                            }
+                        }
+                    }
+                });
+            });
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
+        ui.on_offload_model(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            match stt::offload_model() {
+                Ok(msg) => {
+                    sync_model_ui(&ui);
+                    ui.set_status_text(msg.clone().into());
+                    note(&weak, &log, &msg);
+                }
+                Err(e) => {
+                    ui.set_status_text(format!("Offload failed: {e}").into());
+                    note(&weak, &log, &format!("Offload failed: {e}"));
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
+        ui.on_toggle_auto_offload(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let next = !ui.get_auto_offload();
+            ui.set_auto_offload(next);
+            let msg = if next {
+                "Auto-offload enabled (frees model RAM after 2m idle)."
+            } else {
+                "Auto-offload disabled (model stays pinned in RAM)."
+            };
+            ui.set_status_text(msg.into());
+            note(&weak, &log, msg);
+        });
+    }
+
+    // ── Floating Bubble & Overlay Settings ─────────────────────────────────
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
         ui.on_open_overlay_settings(move || {
-            note(&weak, &log, "Opening QuickSTT's page in the system settings…");
+            note(&weak, &log, "Opening system overlay permission settings…");
             let Some(ui) = weak.upgrade() else { return };
             match platform::open_overlay_settings() {
                 Ok(()) => {
                     ui.set_status_text(
-                        "Allow “display over other apps”, then come back — the bubble appears by itself"
+                        "Allow “Display over other apps”, then return — the waveform bubble appears automatically"
                             .into(),
                     );
                 }
                 Err(e) => {
-                    note(&weak, &log, &format!("The settings page could not be opened: {e}"));
-                    ui.set_status_text(format!("The settings page could not be opened: {e}").into());
+                    note(&weak, &log, &format!("Settings could not be opened: {e}"));
+                    ui.set_status_text(format!("Settings could not be opened: {e}").into());
                 }
             }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
+        ui.on_toggle_bubble_expand(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let next = !ui.get_bubble_expanded();
+            ui.set_bubble_expanded(next);
+            platform::set_overlay_expanded(next);
+            let msg = if next {
+                "Expanded bubble into circular waveform pill"
+            } else {
+                "Collapsed bubble into rounded-corner icon"
+            };
+            ui.set_status_text(msg.into());
+            note(&weak, &log, msg);
         });
     }
     {
@@ -626,72 +796,65 @@ pub fn build_ui() -> AppWindow {
                 platform::stop_service();
                 ui.set_overlay_enabled(false);
                 platform::save_overlay_enabled(false);
-                note(&weak, &log, "Floating bubble off.");
-                ui.set_status_text("Floating bubble off".into());
+                note(&weak, &log, "Floating waveform bubble disabled.");
+                ui.set_status_text("Floating waveform bubble off".into());
                 return;
             }
-            // The wish is remembered even when the permission is missing —
-            // the bubble appears by itself as soon as the permission is
-            // granted, without the user having to press the button again.
             platform::save_overlay_enabled(true);
             if !platform::can_draw_overlays() {
                 note(
                     &weak,
                     &log,
-                    "Android needs the “display over other apps” permission for the bubble. Opening QuickSTT's page in the system settings — the bubble appears by itself once you allow it.",
+                    "Allow “Display over other apps” in system settings — the bubble will appear automatically.",
                 );
-                ui.set_status_text("Allow “display over other apps”, then come back".into());
+                ui.set_status_text("Allow “Display over other apps”, then come back".into());
                 if let Err(e) = platform::open_overlay_settings() {
-                    note(&weak, &log, &format!("The settings page could not be opened: {e}"));
-                    ui.set_status_text(format!("The settings page could not be opened: {e}").into());
+                    note(&weak, &log, &format!("Could not open settings: {e}"));
+                    ui.set_status_text(format!("Could not open settings: {e}").into());
                 }
                 return;
             }
             match platform::show_overlay("QuickSTT ready", "") {
                 Ok(()) => {
                     ui.set_overlay_enabled(true);
-                    // The notification of the background service needs a
-                    // permission of its own on Android 13 and newer. It is
-                    // asked for here, where it belongs to the bubble.
                     if !platform::can_post_notifications() {
-                        platform::request_permissions(&["android.permission.POST_NOTIFICATIONS"]);
+                        platform::request_permissions(&[
+                            "android.permission.POST_NOTIFICATIONS",
+                        ]);
                     }
-                    // The bubble has to survive the app being swiped away:
-                    // a foreground service keeps the process alive.
                     match platform::start_service() {
                         Ok(()) => {
                             ui.set_background_ok(true);
                             note(
                                 &weak,
                                 &log,
-                                "Floating bubble on — it follows you across apps, and QuickSTT keeps running in the background.",
+                                "Floating waveform bubble active — press the rounded icon to expand into the circular pill.",
                             );
                         }
                         Err(e) => {
                             note(
                                 &weak,
                                 &log,
-                                &format!("The bubble is on, but the background service failed: {e}"),
+                                &format!("Bubble active, background service warning: {e}"),
                             );
                         }
                     }
-                    ui.set_status_text("Floating bubble on".into());
+                    ui.set_status_text(
+                        "Floating bubble active — press icon to expand into circular waveform pill"
+                            .into(),
+                    );
                 }
                 Err(e) => {
                     ui.set_overlay_enabled(false);
                     platform::save_overlay_enabled(false);
-                    note(&weak, &log, &format!("The bubble could not be shown: {e}"));
-                    ui.set_status_text(format!("The bubble could not be shown: {e}").into());
+                    note(&weak, &log, &format!("Bubble failed: {e}"));
+                    ui.set_status_text(format!("Bubble failed: {e}").into());
                 }
             }
         });
     }
 
-    // ── Record toggle ──────────────────────────────────────────────────────
-    // One capture thread per session: it pulls 16 kHz frames, tracks the
-    // level for the UI meter and stops on its own after 1.4 s of silence
-    // (so a hands-free dictation ends by itself). The thread also owns the
-    // transcription and hands the result back through `pending`.
+    // ── Record Toggle (16 kHz AAudio + Live Waveform + Auto-VAD) ───────────
     {
         let weak = ui.as_weak();
         let stop_flag = stop_flag.clone();
@@ -702,60 +865,82 @@ pub fn build_ui() -> AppWindow {
             let Some(ui) = weak.upgrade() else { return };
 
             if ui.get_recording() {
-                // Stop: ask the capture thread to wrap up.
                 stop_flag.store(true, Ordering::SeqCst);
                 ui.set_recording(false);
-                ui.set_status_text("Finishing…".into());
-                note(&weak, &log, "Stopping the recording…");
+                ui.set_status_text("Finishing & transcribing…".into());
+                platform::update_overlay_level(0.0, false, true);
+                note(&weak, &log, "Stopping recording…");
                 return;
             }
 
-            // Start.
             if !platform::has_mic_permission() {
-                note(&weak, &log, "The microphone permission is missing.");
+                note(&weak, &log, "Microphone permission needed — requesting now.");
                 platform::request_mic_permission();
                 if let Ok(mut wait) = perm_wait.lock() {
                     *wait = Some(std::time::Instant::now());
                 }
-                ui.set_status_text("Microphone permission needed".into());
+                ui.set_status_text("Allow microphone permission to start dictating".into());
                 ui.set_tab(0);
                 return;
             }
-            if !stt::model_installed(ui.get_selected_model().max(0) as usize) {
-                note(&weak, &log, "The speech model is not downloaded yet.");
-                ui.set_status_text("Download the model first (step 2)".into());
-                ui.set_tab(0);
-                return;
+
+            let mut model_index = ui.get_selected_model().max(0) as usize;
+            if !stt::model_installed(model_index) {
+                // Ensure inbuilt Cactus Whistle is available as immediate fallback
+                stt::ensure_bundled_models();
+                if stt::model_installed(model_index) {
+                    sync_model_ui(&ui);
+                } else if stt::model_installed(0) {
+                    model_index = 0;
+                    ui.set_selected_model(0);
+                    stt::save_selected(0);
+                    sync_model_ui(&ui);
+                    note(
+                        &weak,
+                        &log,
+                        "Switched to inbuilt Cactus Whistle 16M model.",
+                    );
+                } else {
+                    note(&weak, &log, "Selected model is not downloaded yet.");
+                    ui.set_status_text("Download or select an installed model first".into());
+                    ui.set_tab(2);
+                    return;
+                }
             }
+
             let mut session = Session::new();
             if let Err(e) = session.recorder.start() {
-                ui.set_status_text(format!("Microphone failed: {e}").into());
-                note(&weak, &log, &format!("Microphone failed: {e}"));
+                ui.set_status_text(format!("Microphone error: {e}").into());
+                note(&weak, &log, &format!("Microphone error: {e}"));
                 return;
             }
             stop_flag.store(false, Ordering::SeqCst);
             ui.set_recording(true);
+            ui.set_bubble_expanded(true);
             ui.set_busy(false);
-            ui.set_live_text("Listening… speak now.".into());
-            ui.set_status_text("Recording".into());
+            ui.set_live_text("Listening… speak naturally.".into());
+            ui.set_status_text(
+                format!("Recording with {}…", stt::model(model_index).name).into(),
+            );
             note(&weak, &log, "Recording started.");
-            bubble("Listening…", "", &weak, &log);
+            platform::set_overlay_expanded(true);
+            platform::update_overlay_level(0.15, true, false);
+            if ui.get_overlay_enabled() {
+                bubble("Listening…", "", &weak, &log);
+            }
 
             let weak = weak.clone();
             let stop_flag = stop_flag.clone();
             let pending = pending.clone();
-            let model_index = ui.get_selected_model().max(0) as usize;
             std::thread::spawn(move || {
                 let mut session = session;
-                let mut chunk = vec![0f32; 1600]; // 100 ms
-                // Last input-health complaint shown to the user (throttled
-                // so a broken mic does not spam the status line).
+                let mut chunk = vec![0f32; 800]; // 50 ms slices for 20 Hz smooth waveform feed
                 let mut last_health: u8 = conditioner::HEALTH_OK;
                 let mut health_since = std::time::Instant::now();
                 loop {
                     let n = session.recorder.read(&mut chunk);
                     if n == 0 {
-                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        std::thread::sleep(std::time::Duration::from_millis(15));
                         if stop_flag.load(Ordering::SeqCst) {
                             break;
                         }
@@ -763,57 +948,60 @@ pub fn build_ui() -> AppWindow {
                     }
                     session.samples.extend_from_slice(&chunk[..n]);
                     let rms = session.recorder.rms;
-                    // Speech bar: the desktop's VAD floor (min_rms at the
-                    // default sensitivity) — quiet speech still counts, so
-                    // the 1.4 s auto-stop does not swallow a whole take.
+                    let peak = session.recorder.peak;
                     if rms > 0.0055 {
                         session.spoke = true;
                         session.last_voice = std::time::Instant::now();
                     }
-                    // Input health: a clipped or dead microphone must say
-                    // so instead of pretending to listen to silence.
+
+                    // Stream live normalized level to both the floating Java pill and Slint UI
+                    let visual_level = (rms * 4.2 + peak * 0.35).clamp(0.0, 1.0);
+                    platform::update_overlay_level(visual_level, true, false);
+
                     let health = session.recorder.health();
                     if health != last_health
                         && health_since.elapsed() > std::time::Duration::from_secs(2)
                     {
                         last_health = health;
                         health_since = std::time::Instant::now();
-                        let msg = match health {
-                            conditioner::HEALTH_SATURATED => {
-                                "Microphone input is clipped — lower the input gain"
-                            }
-                            conditioner::HEALTH_DEAD => {
-                                "No audio is arriving from the microphone"
-                            }
-                            _ => "Listening… speak now.",
-                        };
-                        let card_msg = match health {
-                            conditioner::HEALTH_SATURATED => "Input clipped — lower the mic gain",
-                            conditioner::HEALTH_DEAD => "No signal from the microphone",
-                            _ => "",
+                        let (msg, card_msg) = match health {
+                            conditioner::HEALTH_SATURATED => (
+                                "Microphone input is clipped — lower input gain",
+                                "Input clipped — lower mic gain",
+                            ),
+                            conditioner::HEALTH_DEAD => (
+                                "No audio arriving from microphone",
+                                "No signal from microphone",
+                            ),
+                            _ => ("Listening… speak naturally.", ""),
                         };
                         let hweak = weak.clone();
                         let card = card_msg.to_string();
-                        let _ = slint::invoke_from_event_loop(move || {
+                        on_ui(move || {
                             if let Some(ui) = hweak.upgrade() {
                                 ui.set_status_text(msg.into());
-                                ui.set_mic_health(card.clone().into());
-                            }
-                            if !card.is_empty() {
-                                platform::log(&card);
+                                ui.set_mic_health(card.into());
                             }
                         });
                     }
-                    // Auto-stop after 1.4 s of silence (only if we heard
-                    // something) or after 60 s of recording.
-                    let quiet = session.last_voice.elapsed() > std::time::Duration::from_millis(1400);
-                    let too_long = session.started.elapsed() > std::time::Duration::from_secs(60);
-                    let level = rms.min(1.0);
+
+                    let quiet = session.last_voice.elapsed()
+                        > std::time::Duration::from_millis(1500);
+                    let too_long =
+                        session.started.elapsed() > std::time::Duration::from_secs(60);
+                    let secs_elapsed = session.started.elapsed().as_secs_f32();
                     let meter_weak = weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
+                    on_ui(move || {
                         if let Some(ui) = meter_weak.upgrade() {
                             if ui.get_recording() {
-                                ui.set_live_text(format!("Listening… {:.0}%", level * 100.0).into());
+                                ui.set_audio_level(visual_level);
+                                ui.set_live_text(
+                                    format!(
+                                        "Listening ({secs_elapsed:.1}s)… level {:.0}%",
+                                        (visual_level * 100.0).min(100.0)
+                                    )
+                                    .into(),
+                                );
                             }
                         }
                     });
@@ -825,13 +1013,19 @@ pub fn build_ui() -> AppWindow {
                     }
                 }
                 session.recorder.stop();
+                platform::update_overlay_level(0.0, false, true);
                 let samples = std::mem::take(&mut session.samples);
                 let health = session.recorder.health();
                 let status_weak = weak.clone();
-                let _ = slint::invoke_from_event_loop(move || {
+                on_ui(move || {
                     if let Some(ui) = status_weak.upgrade() {
+                        ui.set_recording(false);
+                        ui.set_audio_level(0.0);
                         ui.set_busy(true);
-                        ui.set_status_text("Transcribing…".into());
+                        ui.set_status_text(
+                            format!("Transcribing with {}…", stt::model(model_index).name)
+                                .into(),
+                        );
                     }
                 });
                 transcribe(samples, health, model_index, &pending);
@@ -845,13 +1039,12 @@ pub fn build_ui() -> AppWindow {
         ui.on_nav(move |tab| {
             if let Some(ui) = weak.upgrade() {
                 ui.set_tab(tab.clamp(0, 3));
+                sync_model_ui(&ui);
             }
         });
     }
 
-    // The touch probe: it shows where a tap landed, how big the window is
-    // and how much it is scaled. When a button does nothing, this says
-    // whether the tap never arrived or arrived somewhere else.
+    // Touch probe.
     {
         let weak = ui.as_weak();
         ui.on_report_tap(move |x, y| {
@@ -872,9 +1065,7 @@ pub fn build_ui() -> AppWindow {
         });
     }
 
-    // ── Microphone self-test ────────────────────────────────────────────────
-    // Opens the mic for ~1 s and reports the level and the input health.
-    // The user can verify the microphone without recording a take.
+    // Microphone self-test.
     {
         let weak = ui.as_weak();
         let log = log.clone();
@@ -882,7 +1073,7 @@ pub fn build_ui() -> AppWindow {
         ui.on_test_mic(move || {
             let Some(ui) = weak.upgrade() else { return };
             if !platform::has_mic_permission() {
-                note(&weak, &log, "The microphone permission is missing.");
+                note(&weak, &log, "Microphone permission missing.");
                 platform::request_mic_permission();
                 if let Ok(mut wait) = perm_wait.lock() {
                     *wait = Some(std::time::Instant::now());
@@ -890,8 +1081,8 @@ pub fn build_ui() -> AppWindow {
                 ui.set_status_text("Microphone permission needed".into());
                 return;
             }
-            ui.set_status_text("Testing the microphone…".into());
-            note(&weak, &log, "Testing the microphone…");
+            ui.set_status_text("Testing microphone (1.2s)…".into());
+            note(&weak, &log, "Testing microphone…");
             let weak = weak.clone();
             let log = log.clone();
             std::thread::spawn(move || {
@@ -902,7 +1093,8 @@ pub fn build_ui() -> AppWindow {
                         let mut peak = 0.0f32;
                         let mut sum = 0f32;
                         let mut count = 0usize;
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1200);
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_millis(1200);
                         while std::time::Instant::now() < deadline {
                             let n = rec.read(&mut buf);
                             if n > 0 {
@@ -928,11 +1120,11 @@ pub fn build_ui() -> AppWindow {
                     }
                     Err(e) => {
                         rec.stop();
-                        platform::log(&format!("the microphone could not be opened: {e}"));
+                        platform::log(&format!("microphone could not be opened: {e}"));
                         None
                     }
                 };
-                let _ = slint::invoke_from_event_loop(move || {
+                on_ui(move || {
                     let Some(ui) = weak.upgrade() else { return };
                     match result {
                         None => {
@@ -942,16 +1134,16 @@ pub fn build_ui() -> AppWindow {
                         Some((peak, rms, health)) => {
                             let (status, card) = match health {
                                 conditioner::HEALTH_SATURATED => (
-                                    "The microphone input is clipped — lower the input gain".to_string(),
-                                    "Input clipped — lower the mic gain".to_string(),
+                                    "Microphone input is clipped — lower input gain".to_string(),
+                                    "Input clipped — lower mic gain".to_string(),
                                 ),
                                 conditioner::HEALTH_DEAD => (
-                                    "No audio is arriving from the microphone".to_string(),
-                                    "No signal from the microphone".to_string(),
+                                    "No audio arriving from microphone".to_string(),
+                                    "No signal from microphone".to_string(),
                                 ),
                                 _ => (
                                     format!(
-                                        "Microphone OK — level {:.0}%, peak {:.0}%",
+                                        "Microphone OK — RMS {:.0}%, peak {:.0}%",
                                         rms * 100.0,
                                         peak * 100.0
                                     ),
@@ -960,8 +1152,7 @@ pub fn build_ui() -> AppWindow {
                             };
                             ui.set_status_text(status.clone().into());
                             ui.set_mic_health(card.into());
-                            platform::log(&status);
-                            let _ = &log;
+                            note(&weak, &log, &status);
                         }
                     }
                 });
@@ -969,8 +1160,7 @@ pub fn build_ui() -> AppWindow {
         });
     }
 
-    // Model picker. Every entry is a whisper.cpp model the bundled engine can
-    // really load, so picking one always works.
+    // Model picker: selects model and onloads it if installed.
     {
         let weak = ui.as_weak();
         let log = log.clone();
@@ -980,9 +1170,10 @@ pub fn build_ui() -> AppWindow {
             let spec = stt::model(index);
             ui.set_selected_model(index as i32);
             stt::save_selected(index);
-            note(&weak, &log, &format!("Model: {}", spec.name));
+            sync_model_ui(&ui);
+            note(&weak, &log, &format!("Selected model: {}", spec.name));
             if stt::model_installed(index) {
-                ui.set_status_text(format!("{} is ready", spec.name).into());
+                ui.invoke_onload_model(index as i32);
             } else {
                 ui.set_status_text(
                     format!("{} is not downloaded yet — tap Download", spec.name).into(),
@@ -991,41 +1182,37 @@ pub fn build_ui() -> AppWindow {
         });
     }
 
-    // Test a model: four seconds of speech through the engine. This is the
-    // only way to see that the model, the engine and the microphone really
-    // work on this phone.
+    // 4-second live model benchmark.
     {
         let weak = ui.as_weak();
         let log = log.clone();
         ui.on_test_model(move |idx| {
             let Some(ui) = weak.upgrade() else { return };
             if ui.get_test_running() {
-                note(&weak, &log, "A test is already running.");
+                note(&weak, &log, "A benchmark test is already running.");
                 return;
             }
             let index = idx.max(0) as usize;
             ui.set_selected_model(index as i32);
             stt::save_selected(index);
+            sync_model_ui(&ui);
             if !platform::has_mic_permission() {
-                note(
-                    &weak,
-                    &log,
-                    "The microphone permission is missing — the test needs it.",
-                );
+                note(&weak, &log, "Microphone permission is required for the benchmark.");
                 platform::request_mic_permission();
-                ui.set_status_text("Microphone permission needed".into());
+                ui.set_status_text("Allow microphone permission first".into());
                 return;
             }
             ui.set_test_running(true);
             ui.set_test_result("Recording 4 seconds — speak a short phrase now…".into());
-            ui.set_status_text("Testing the model…".into());
-            note(&weak, &log, "Testing the model — speak a short phrase now…");
+            ui.set_status_text(
+                format!("Benchmarking {} (4s)…", stt::model(index).name).into(),
+            );
+            note(&weak, &log, "Benchmarking model — speak now…");
             run_model_test(index, weak.clone(), log.clone());
         });
     }
 
-    // The self-test: what is installed, what is missing, what the last test
-    // said. This is the report the user asks for when something misbehaves.
+    // Diagnostics & self-test.
     {
         let weak = ui.as_weak();
         let log = log.clone();
@@ -1035,8 +1222,8 @@ pub fn build_ui() -> AppWindow {
             let report = diagnostics_report(index);
             platform::log(&report);
             ui.set_diagnostics(report.into());
-            ui.set_status_text("The self-test finished — the report is in Diagnostics".into());
-            note(&weak, &log, "The self-test finished.");
+            ui.set_status_text("Self-test complete — see Diagnostics report".into());
+            note(&weak, &log, "Self-test completed.");
         });
     }
     {
@@ -1051,13 +1238,12 @@ pub fn build_ui() -> AppWindow {
                 ui.get_diagnostics().to_string()
             };
             platform::copy_to_clipboard(&report);
-            ui.set_status_text("The report was copied to the clipboard".into());
-            note(&weak, &log, "The report was copied to the clipboard.");
+            ui.set_status_text("Diagnostics report copied to clipboard".into());
+            note(&weak, &log, "Diagnostics report copied to clipboard.");
         });
     }
 
-    // Keep QuickSTT alive in the background: without the exemption Android
-    // puts the app to sleep and the bubble stops working.
+    // Battery exemption.
     {
         let weak = ui.as_weak();
         let log = log.clone();
@@ -1068,19 +1254,21 @@ pub fn build_ui() -> AppWindow {
                     note(
                         &weak,
                         &log,
-                        "Opening the battery settings — allow QuickSTT to run in the background, then come back.",
+                        "Opening battery settings — allow QuickSTT unrestricted background usage.",
                     );
-                    ui.set_status_text("Allow QuickSTT to run in the background, then come back".into());
+                    ui.set_status_text(
+                        "Allow unrestricted background usage, then return".into(),
+                    );
                 }
                 Err(e) => {
-                    note(&weak, &log, &format!("The battery settings could not be opened: {e}"));
-                    ui.set_status_text(format!("The battery settings could not be opened: {e}").into());
+                    note(&weak, &log, &format!("Battery settings failed: {e}"));
+                    ui.set_status_text(format!("Battery settings failed: {e}").into());
                 }
             }
         });
     }
 
-    // Type the last transcript into the app in front, with real key events.
+    // Output actions: Type into app, Copy turn, Share, Clear history.
     {
         let weak_a = ui.as_weak();
         let log_a = log.clone();
@@ -1089,25 +1277,29 @@ pub fn build_ui() -> AppWindow {
             let Some(ui) = weak_a.upgrade() else { return };
             let text = text_a.lock().ok().map(|t| t.clone()).unwrap_or_default();
             if text.trim().is_empty() {
-                note(&weak_a, &log_a, "There is nothing to type yet.");
+                note(&weak_a, &log_a, "Nothing to type yet — record a phrase first.");
                 ui.set_status_text("Record something first".into());
                 return;
             }
             match platform::inject_text(&text) {
                 Ok(()) => {
-                    note(&weak_a, &log_a, "Typed into the app in front.");
-                    ui.set_status_text("Typed into the app in front".into());
-                    bubble("Typed", &text, &weak_a, &log_a);
+                    note(&weak_a, &log_a, "Typed directly into focused app.");
+                    ui.set_status_text("Typed into the focused app".into());
+                    if ui.get_overlay_enabled() {
+                        bubble("Typed", &text, &weak_a, &log_a);
+                    }
                 }
                 Err(e) => {
-                    note(&weak_a, &log_a, &format!("Could not type: {e}"));
+                    note(&weak_a, &log_a, &format!("Direct key injection fallback: {e}"));
                     platform::copy_to_clipboard(&text);
-                    ui.set_status_text("Typing is not allowed — copied instead".into());
-                    bubble("Copied", &text, &weak_a, &log_a);
+                    ui.set_status_text("Copied to clipboard — ready to paste".into());
+                    if ui.get_overlay_enabled() {
+                        bubble("Copied", &text, &weak_a, &log_a);
+                    }
                 }
             }
         });
-        // Share the last transcript with the picker as well.
+
         let weak_b = ui.as_weak();
         let log_b = log.clone();
         let text_b = last_text.clone();
@@ -1119,12 +1311,36 @@ pub fn build_ui() -> AppWindow {
                 return;
             }
             if platform::share_text(&text) {
-                note(&weak_b, &log_b, "Opened the share sheet.");
+                note(&weak_b, &log_b, "Opened Android share sheet.");
             }
+        });
+
+        let weak_c = ui.as_weak();
+        let log_c = log.clone();
+        ui.on_copy_turn(move |text| {
+            let Some(ui) = weak_c.upgrade() else { return };
+            let s = text.to_string();
+            if !s.trim().is_empty() {
+                platform::copy_to_clipboard(&s);
+                ui.set_status_text("Copied transcript to clipboard".into());
+                note(&weak_c, &log_c, "Copied transcript to clipboard.");
+            }
+        });
+
+        let weak_d = ui.as_weak();
+        let log_d = log.clone();
+        let turns_clear = turns.clone();
+        ui.on_clear_history(move || {
+            let Some(ui) = weak_d.upgrade() else { return };
+            while turns_clear.row_count() > 0 {
+                turns_clear.remove(0);
+            }
+            ui.set_status_text("Cleared dictation history".into());
+            note(&weak_d, &log_d, "Cleared dictation history.");
         });
     }
 
-    // Breathing ring while listening + finished-turn pickup (~20 fps).
+    // ── Smooth Waveform Animation & Background Event Loop (~25 fps) ────────
     {
         let weak = ui.as_weak();
         let turns = turns.clone();
@@ -1137,19 +1353,27 @@ pub fn build_ui() -> AppWindow {
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
-            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(40),
             move || {
                 let Some(ui) = weak.upgrade() else { return };
+                let step = if ui.get_recording() {
+                    0.14 + ui.get_audio_level() * 0.16
+                } else if ui.get_busy() {
+                    0.18
+                } else {
+                    0.05
+                };
+                phase = (phase + step) % std::f32::consts::TAU;
+                ui.set_wave_phase(phase / std::f32::consts::TAU);
+
                 if ui.get_recording() {
-                    phase = (phase + 0.17) % std::f32::consts::TAU;
                     let p = (phase.sin() + 1.0) * 0.5;
                     ui.set_pulse(p);
                 } else if ui.get_pulse() != 0.0 {
-                    phase = 0.0;
                     ui.set_pulse(0.0);
                 }
 
-                // A permission dialog is open: watch for the answer.
+                // Watch for microphone permission grant
                 let waiting = perm_wait.lock().ok().and_then(|w| *w);
                 if let Some(since) = waiting {
                     if platform::has_mic_permission() {
@@ -1157,7 +1381,9 @@ pub fn build_ui() -> AppWindow {
                             *w = None;
                         }
                         ui.set_mic_ok(true);
-                        ui.set_status_text("Microphone ready — tap the mic".into());
+                        ui.set_status_text(
+                            "Microphone ready — press the waveform pill to dictate".into(),
+                        );
                         note(&weak, &log, "Microphone permission granted.");
                     } else if since.elapsed() > std::time::Duration::from_secs(90) {
                         if let Ok(mut w) = perm_wait.lock() {
@@ -1168,119 +1394,149 @@ pub fn build_ui() -> AppWindow {
                     }
                 }
 
-                // Did the floating bubble fail? Tell the user instead of
-                // pretending everything is fine.
                 if let Some(message) = platform::take_overlay_error() {
                     note(&weak, &log, &message);
                     ui.set_status_text(message.into());
                 }
 
-                // The overlay permission is granted in the system settings:
-                // pick it up when the user comes back.
                 ticks += 1;
                 #[cfg(not(target_os = "android"))]
                 if ticks == 2 {
-                    // The winit backend sizes the window from the content, so
-                    // the phone size has to be applied once it exists.
                     ui.window()
                         .set_size(slint::LogicalSize::new(412.0, 760.0));
                 }
-                if ticks % 20 == 0 {
-                    // The permission can be granted in the system settings
-                    // while the app is in the background: pick it up and
-                    // put the bubble on the screen.
+
+                // Once per second: refresh permissions, battery, and idle auto-offload
+                if ticks % 25 == 0 {
                     refresh_overlay_state(&ui);
-                    // The model may have been downloaded in the background.
-                    let index = ui.get_selected_model().max(0) as usize;
-                    let installed = stt::model_installed(index);
-                    if installed != ui.get_model_installed() {
-                        ui.set_model_installed(installed);
-                        ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
+                    ui.set_battery_ok(platform::ignoring_battery_optimizations());
+                    if ui.get_auto_offload() && !ui.get_recording() && !ui.get_busy() {
+                        if let Some(offload_msg) = stt::check_idle_offload(120) {
+                            sync_model_ui(&ui);
+                            ui.set_status_text(offload_msg.clone().into());
+                            note(&weak, &log, &offload_msg);
+                        }
+                    }
+                    if !ui.get_model_downloading() {
+                        sync_model_ui(&ui);
                     }
                 }
 
-                // A finished turn arrived from the worker thread.
+                // Pick up finished transcription from worker thread
                 let done = pending.lock().ok().and_then(|mut p| p.take());
                 if let Some(turn) = done {
                     ui.set_recording(false);
                     ui.set_busy(false);
+                    ui.set_audio_level(0.0);
+                    platform::update_overlay_level(0.0, false, false);
+                    sync_model_ui(&ui);
+
                     if turn.ok {
                         ui.set_live_text(turn.text.clone().into());
                         ui.set_has_text(true);
-                        // Remember it for the "type into the app" action.
                         if let Ok(mut slot) = last_text.lock() {
                             *slot = turn.text.clone();
                         }
-                        // The clipboard always gets the text — that works
-                        // everywhere, even when the app may not inject keys.
                         platform::copy_to_clipboard(&turn.text);
-                        turns.push(Turn {
-                            text: turn.text.clone().into(),
-                            when: "just now".into(),
-                            seconds: turn.seconds,
-                        });
+                        turns.insert(
+                            0,
+                            Turn {
+                                text: turn.text.clone().into(),
+                                when: "just now".into(),
+                                seconds: turn.seconds,
+                            },
+                        );
 
-                        // If another app is in front, type the text straight
-                        // into it with real key events.
-                        let mut status = "Copied to the clipboard".to_string();
+                        let mut status = "Transcribed & copied to clipboard".to_string();
                         if !platform::has_window_focus() {
                             match platform::inject_text(&turn.text) {
                                 Ok(()) => {
-                                    status = "Typed into the app in front".to_string();
-                                    note(&weak, &log, "Typed into the app in front.");
+                                    status = "Typed directly into focused app".to_string();
+                                    note(&weak, &log, "Typed into focused app.");
                                 }
                                 Err(e) => {
                                     note(
                                         &weak,
                                         &log,
-                                        &format!("Typing into the app is not allowed: {e}"),
+                                        &format!("Copied to clipboard (key inject: {e})"),
                                     );
                                 }
                             }
                         }
                         ui.set_status_text(status.clone().into());
-                        bubble(&status, &turn.text, &weak, &log);
-                        note(&weak, &log, "Transcribed and copied to the clipboard.");
+                        if ui.get_overlay_enabled() {
+                            bubble(&status, &turn.text, &weak, &log);
+                        }
+                        note(&weak, &log, "Transcribed and copied to clipboard.");
                     } else {
                         ui.set_status_text(turn.status.clone().into());
-                        bubble(&turn.status, "", &weak, &log);
+                        if ui.get_overlay_enabled() {
+                            bubble(&turn.status, "", &weak, &log);
+                        }
                         note(&weak, &log, &turn.status);
                     }
                 }
             },
         );
-        // Leak the timer into the UI lifetime (the event loop owns it).
         std::mem::forget(timer);
     }
 
-    // Initial setup state.
+    // ── Initial Startup State: Inbuilt Needle Model + Auto-Onload ──────────
     {
         let weak = ui.as_weak();
         let log = log.clone();
-        // Extract any pre-packaged model (e.g. Cactus Whistle) so the app has
-        // a working on-device speech engine out of the box.
-        let _ = platform::extract_bundled_model("whistle.cact", 16_000_000);
         let mic_ok = platform::has_mic_permission();
-        // Pick up the model the user chose last time (or default to the packaged one).
         let index = stt::selected();
         ui.set_selected_model(index as i32);
+
+        // Automatically onload the inbuilt / selected model into RAM on startup.
+        // Do it off the UI thread: a large GGUF can take seconds to page in.
+        let initial_onload = stt::model_installed(index);
+        if initial_onload {
+            let weak = ui.as_weak();
+            let log = log.clone();
+            std::thread::spawn(move || {
+                let res = stt::onload_model(index);
+                on_ui(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        sync_model_ui(&ui);
+                        if let Ok(msg) = res {
+                            ui.set_status_text(msg.clone().into());
+                            note(&weak, &log, &msg);
+                        }
+                    }
+                });
+            });
+        }
+        sync_model_ui(&ui);
+
         let model_ok = stt::model_installed(index);
         let overlay_ok = platform::can_draw_overlays();
         ui.set_mic_ok(mic_ok);
-        ui.set_model_installed(model_ok);
         ui.set_overlay_ok(overlay_ok);
         ui.set_status_text(if !mic_ok {
-            "Step 1: allow the microphone".into()
+            "Step 1: Allow microphone access below".into()
         } else if !model_ok {
-            "Step 2: download the model".into()
+            "Step 2: Tap Onload / Download model".into()
+        } else if initial_onload {
+            format!("Onloading {} into RAM…", stt::model(index).name).into()
         } else {
-            "Ready — tap the mic".into()
+            format!(
+                "{} is ready — press the waveform pill to dictate",
+                stt::model(index).name
+            )
+            .into()
         });
-        note(&weak, &log, "QuickSTT started.");
+        note(
+            &weak,
+            &log,
+            &format!(
+                "QuickSTT ready · {} ({})",
+                stt::model(index).name,
+                if model_ok { "installed" } else { "pending" }
+            ),
+        );
 
-        // The size of the window and the scale factor: the two numbers that
-        // decide where a tap on the screen ends up. They are in logcat and
-        // in the touch probe of the first page.
         {
             let size = ui.window().size();
             let scale = ui.window().scale_factor();
@@ -1289,49 +1545,36 @@ pub fn build_ui() -> AppWindow {
                 size.width, size.height
             ));
             let text = format!(
-                "Window {:.0}x{:.0} · scale {scale:.2} — tap here to test",
+                "Window {:.0}x{:.0} · scale {scale:.2} — tap card to test touch",
                 size.width, size.height
             );
             ui.set_touch_probe(text.into());
         }
 
-        // The bubble stays on if the user left it on: put it back on the
-        // screen so it is there in every app, not only inside QuickSTT.
-        let bubble_on = platform::overlay_enabled();
-        ui.set_overlay_enabled(bubble_on && overlay_ok);
-        if bubble_on && overlay_ok {
+        // Show the floating bubble automatically whenever overlay permission is granted
+        let bubble_wish = platform::overlay_enabled();
+        if overlay_ok {
+            platform::save_overlay_enabled(true);
+            ui.set_overlay_enabled(true);
             bubble("QuickSTT ready", "", &weak, &log);
-            // The foreground service keeps the process (and the bubble)
-            // alive while the user works in another app.
             match platform::start_service() {
                 Ok(()) => ui.set_background_ok(true),
-                Err(e) => note(&weak, &log, &format!("The background service failed: {e}")),
+                Err(e) => note(&weak, &log, &format!("Background service: {e}")),
             }
+        } else {
+            ui.set_overlay_enabled(bubble_wish && overlay_ok);
         }
-        // The battery exemption: without it Android puts QuickSTT to sleep
-        // in the background and the bubble stops working.
         ui.set_battery_ok(platform::ignoring_battery_optimizations());
-
-        // Notice when the user comes back from the system settings: that is
-        // when the "display over other apps" permission is granted.
         platform::watch_overlay_permission();
     }
 
     ui
 }
 
-/// Show the window and run the event loop.
 pub fn run() {
     build_ui().run().expect("Slint event loop failed");
 }
 
-/// Is this take silent?
-///
-/// The thresholds are the desktop app's proven ones (`wav_is_silent`),
-/// converted to the f32 scale: a peak floor of 600/32768, an rms floor of
-/// 50/32768 and a minimum length of 0.25 s. Whisper hallucinates short
-/// words ("you", "yeah") on noise-only audio, so a silent take must never
-/// reach the engine.
 fn is_silent(samples: &[f32]) -> bool {
     if samples.is_empty() {
         return true;
@@ -1343,12 +1586,6 @@ fn is_silent(samples: &[f32]) -> bool {
     secs < 0.25 || peak < 600.0 / 32768.0 || rms < 50.0 / 32768.0
 }
 
-/// Transcribe the recorded audio (worker thread) and hand the result to the
-/// UI thread.
-///
-/// `health` is the recorder's input health: a clipped or dead microphone
-/// is reported as such instead of producing a bogus transcript.
-/// `model` is the index of the whisper model to run.
 fn transcribe(
     samples: Vec<f32>,
     health: u8,
@@ -1370,8 +1607,6 @@ fn transcribe(
         fail("Nothing was recorded".into());
         return;
     }
-    // A broken microphone is a setup problem, not a transcription problem:
-    // say exactly that instead of shipping noise to the engine.
     if health == conditioner::HEALTH_SATURATED {
         fail("Microphone input is clipped — lower the input gain".into());
         return;
@@ -1380,22 +1615,20 @@ fn transcribe(
         fail("No audio is arriving from the microphone".into());
         return;
     }
-    // Silence gate: never hand a silent take to whisper — it hallucinates
-    // short words ("you", "yeah") on noise-only audio.
     if is_silent(&samples) {
         fail("No speech detected".into());
         return;
     }
-    let wav = std::env::temp_dir().join("quickstt-turn.wav");
+    let wav = stt::wav_path("quickstt-turn.wav");
     let result = audio::write_wav(&wav, &samples, audio::SAMPLE_RATE as u32)
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("WAV write error ({}): {e}", wav.display()))
         .and_then(|_| stt::transcribe(&wav, model));
     if let Ok(mut slot) = pending.lock() {
         *slot = Some(match result {
             Ok(text) if !text.trim().is_empty() => PendingTurn {
                 text,
                 seconds,
-                status: "Copied to the clipboard".into(),
+                status: "Transcribed & copied to clipboard".into(),
                 ok: true,
             },
             Ok(_) => PendingTurn {
@@ -1414,27 +1647,20 @@ fn transcribe(
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Silence must be caught before the engine sees it — whisper answers
-    /// "you" or "yeah" to noise, which is worse than no answer.
     #[test]
     fn silence_gate_rejects_noise_only_audio() {
         assert!(is_silent(&[]));
-        // A very short take is not worth transcribing.
         assert!(is_silent(&vec![0.2; 100]));
-        // Steady noise far below the speech floor.
         let noise: Vec<f32> = (0..16_000)
             .map(|i| ((i as f32) * 0.01).sin() * 0.001)
             .collect();
         assert!(is_silent(&noise));
     }
 
-    /// Real speech passes the gate.
     #[test]
     fn silence_gate_lets_speech_through() {
         let speech: Vec<f32> = (0..16_000)

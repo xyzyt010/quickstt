@@ -373,11 +373,7 @@ jobs:
             java/ai/quickstt/app/Engine.java java/ai/quickstt/app/SpeechService.java \
             java/ai/quickstt/app/ModelDownloader.java
           "$BUILD_TOOLS"/d8 --min-api 26 --output target/dex/dex \
-            target/dex/classes/ai/quickstt/app/Bubble.class \
-            target/dex/classes/ai/quickstt/app/Overlay.class \
-            target/dex/classes/ai/quickstt/app/Engine.class \
-            target/dex/classes/ai/quickstt/app/SpeechService.class \
-            target/dex/classes/ai/quickstt/app/ModelDownloader.class
+            target/dex/classes/ai/quickstt/app/*.class
           # Our own manifest: it declares the foreground service.
           VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           MAJOR="${VERSION%%.*}"; REST="${VERSION#*.}"
@@ -522,17 +518,17 @@ jobs:
           wget -O /tmp/quickstt.apk https://github.com/${{ github.repository }}/releases/download/${VER}/quickstt-android-release.apk
           adb install -r /tmp/quickstt.apk
           \`\`\`
-          The touch app dictates for real: the microphone is captured with the NDK AAudio API, **three engines** (whisper.cpp, the Cactus \`needle\` and transcribe.cpp — all cross-compiled for arm64-v8a and shipped inside the APK) transcribe on-device, the text is copied to the clipboard and typed into the app in front with real key events, and a floating bubble with **REC** / **TYPE** buttons follows you across apps.
+          The touch app dictates for real: the microphone is captured with the NDK AAudio API, **three engines** (whisper.cpp, the Cactus \`needle\` and transcribe.cpp — all cross-compiled for arm64-v8a and shipped inside the APK) transcribe on-device, the text is copied to the clipboard and typed into the app in front with real key events, and the always-on floating bubble follows you across apps as a rounded-corner icon that expands into a circular waveform pill.
 
-          ### Fixed & improved in this release (Android v2.0.0-alpha.21)
-          - **Microphone recording & transcription live**: Fixed the critical bug in AAudio where `AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_INPUT)` was missing (was defaulting to audio playback instead of microphone capture). Fixed frame count calculations and added automatic fallback to 16-bit PCM with normalized float conversion, guaranteeing mic input and live transcription work across all Android phones.
-          - **Overlay floating bubble fixed**: Fixed JNI `addView` signature mismatch (`ViewGroup.LayoutParams`), added visual context theme wrapper for overlay view instantiation, and declared `FOREGROUND_SERVICE_SPECIAL_USE` for Android 14+. The floating bubble stays reliably on screen over other apps.
-          - **Sleek minimalist monochrome UI**: Complete overhaul adhering to pure black (`#000000`), dark greys (`#121212`), crisp white (`#FFFFFF`) with all green accents removed. Clean modern vector mic iconography and breathing recording orb.
-          - **Proper progress bar**: Download progress starts cleanly at 0% from the left edge and animates smoothly to 100%.
-          - **Model uninstallation**: Added full model uninstallation support to free device storage directly from the Models tab.
+          ### Fixed & improved in this release (Android ${VER})
+          - **Live Expandable Floating Waveform Bubble (No Mic Icons)**: Redesigned `Bubble.java` as a hardware-accelerated Choreographer-driven view: a sleek 48dp rounded-corner icon that smoothly expands on press into a circular stadium pill with a pure black background (`#050508`), slight purple ambient highlights (`#A855F7` / `#7C3AED`), and 60/120fps super-smooth white waveforms driven by real-time AAudio microphone levels.
+          - **Fixed DEX inner-class packaging (`d8`)**: Included all inner classes (`Bubble$BubbleView`, `Bubble$1`, `Bubble$2`, `Overlay$1`, `Overlay$2`) in `classes.dex` and bound JNI callbacks via `RegisterNatives`, eliminating the `NoClassDefFoundError` and `UnsatisfiedLinkError` that previously broke the floating bubble and download progress callbacks.
+          - **Inbuilt Cactus Whistle 16M (`needle`) Model Ready Out-of-the-Box**: Cactus Whistle 16M (`whistle.cact`) is now the default model (`MODELS[0]`), extracted from the APK and onloaded into RAM automatically at startup so the app works immediately on first launch without requiring a download.
+          - **Real RAM Model Onloading & Offloading**: Added persistent `transcribe-cli --worker` sessions and pinned RAM model buffers with live UI status badges (`ONLOADED` / `OFFLOADED`), manual **Onload to RAM** / **Offload RAM** controls, and configurable 2-minute idle auto-offload.
+          - **ARM64 NEON Optimization & Transcription Fixes**: Rebuilt `whisper-cli` and `transcribe-cli` with `-march=armv8.2-a+fp16+dotprod` (`sdot` hardware acceleration) and 16 KB ELF page alignment (`-Wl,-z,max-page-size=16384`). Fixed `platform::native_lib_dir()` (`ApplicationInfo.nativeLibraryDir` field lookup), writable `stt::wav_path()` (replacing `/data/local/tmp`), and `ModelDownloader` `Content-Range` + `Accept-Encoding: identity` handling.
 
           * **Eight real models**: Cactus Whistle 16M (pre-packaged), Whisper Tiny EN, Moonshine Base EN, SenseVoice Small, Canary 180M Flash, Parakeet Unified EN 0.6B, **Nemotron 3.5 ASR Streaming 0.6B**, and Qwen3-ASR 0.6B.
-          * **The bubble is a control, not a read-out**: REC records, TYPE types the transcript into the app in front (or copies to clipboard), and it can be dragged anywhere.
+          * **The bubble is a control, not a read-out**: the rounded icon expands into a live circular pill — tap the waveform to record, tap **STOP** to transcribe, tap **TYPE** to type the transcript into the app in front (or copy it to the clipboard), and drag it anywhere. There are no microphone icons: only smooth white waveforms over black with a slight purple rim.
           * The Listen tab walks through setup: microphone permission → model selection → overlay permission → dictation.
           NOTES
           cat /tmp/notes.md

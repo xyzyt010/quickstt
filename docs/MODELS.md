@@ -174,6 +174,14 @@ Output is one JSON object (`text`, detected `language`, `ttft_ms`,
 (never bundled) into `models/runtimes/whistle/`, and engine detection also
 accepts `tools/whistle/needle` next to the executable for portable builds.
 
+**Android differs:** the APK bundles `whistle.cact` in
+`assets/models/whistle.cact`, extracts it into the app's private model
+directory on first launch and makes it the default model, so dictation works
+offline with no download. The Models tab can onload it into RAM or offload it
+again. The GGUF models run in a persistent `transcribe-cli --worker`
+session so their weights stay resident between turns; the desktop behaviour
+described on this page is unchanged.
+
 Downloaded on demand:
 
 ```bash
@@ -188,7 +196,7 @@ printf 'DOWNLOAD Cactus Whistle\n' | timeout 2 bash -c 'cat > /dev/tcp/127.0.0.1
 - **SenseVoice:** `transcribe-rs` Rust ONNX CTC session (`SenseVoice` family), CPU EP; `model.int8.onnx` + `tokens.txt` from `sensevoice/small_multilingual/`, language token chosen in the dashboard (`Auto` by default).
 - **Nemotron:** `nemotron_engine` (built from `tools/nemotron` `transcribe.cpp` Handy) invoked `nemotron_engine --model *.gguf --audio *.wav --vad` (`engine.rs:find_gguf_file`).
 - **Qwen3-ASR:** same persistent Handy worker (`nemotron_engine`), offline `{"action":"load","language":"auto"}` + `{"action":"transcribe"}`; Linux falls back to `tools/nemotron/transcribe-cli -m *.gguf`.
-- **Cactus Whistle:** one-shot Cactus `needle --model whistle.cact --audio *.wav [--audio-language xx]`; the JSON `text` field is the transcript, and the process exits after each turn (no idle RAM).
+- **Cactus Whistle:** one-shot Cactus `needle --model whistle.cact --audio *.wav [--audio-language xx]`; the JSON `text` field is the transcript, and on desktop the process exits after each turn (no idle RAM). The Android build keeps the model onloaded/offloaded explicitly.
 
 At runtime `RUST_LOG=info quickstt 2>&1 | grep -E "Whisper|Parakeet|Vosk|Nemotron|libvosk|libonnx"` shows which engine fired.
 

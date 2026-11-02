@@ -23,19 +23,20 @@ mod ffi {
 /// preview window still renders (and the record button reports why).
 #[cfg(not(target_os = "android"))]
 mod ffi {
-    pub fn qs_audio_start(_sample_rate: i32) -> i32 {
+    pub unsafe fn qs_audio_start(_sample_rate: i32) -> i32 {
         -2
     }
-    pub fn qs_audio_read(_out: *mut f32, _frames: i32) -> i32 {
+    pub unsafe fn qs_audio_read(_out: *mut f32, _frames: i32) -> i32 {
         -1
     }
-    pub fn qs_audio_channels() -> i32 {
+    pub unsafe fn qs_audio_channels() -> i32 {
         1
     }
-    pub fn qs_audio_sample_rate() -> i32 {
+    #[allow(dead_code)]
+    pub unsafe fn qs_audio_sample_rate() -> i32 {
         0
     }
-    pub fn qs_audio_stop() {}
+    pub unsafe fn qs_audio_stop() {}
 }
 
 /// Sample rate used for capture + transcription (whisper.cpp native rate).

@@ -16,21 +16,21 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * Downloads a model from HuggingFace with the Android HTTP stack.
- *
- * <p>The download runs on its own thread. The number of bytes that really
- * arrived is reported straight back into Rust, so the app can show the real
- * progress.
- *
- * <p>An interrupted download continues where it stopped: the bytes are
- * written to a {@code .part} file and the next attempt asks the server for
- * the rest with a {@code Range} header.
- *
- * <p>Only a complete file is moved into place.
+ * Downloads speech models from HuggingFace with the Android HTTP stack and
+ * extracts pre-bundled models (such as Cactus Whistle {@code whistle.cact})
+ * from the APK.
  */
 public final class ModelDownloader {
 
     private static final String TAG = "QuickSTT";
+
+    static {
+        try {
+            System.loadLibrary("quickstt_android");
+        } catch (Throwable t) {
+            Log.w(TAG, "quickstt_android library not loaded yet for ModelDownloader", t);
+        }
+    }
 
     /** Called on the download thread with the bytes that arrived. */
     private static native void nativeProgress(long done, long total);
@@ -49,28 +49,50 @@ public final class ModelDownloader {
     public static String download(String url, String dest, long minBytes) {
         File target = new File(dest);
         File part = new File(dest + ".part");
+
+        File parent = target.getParentFile();
+        if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+            return "the model folder could not be created (" + parent + ")";
+        }
+
+        // If target is already complete on disk, succeed immediately.
+        if (target.isFile() && target.length() >= minBytes) {
+            reportProgress(target.length(), target.length());
+            return "";
+        }
+
+        long initialResume = part.isFile() ? part.length() : 0L;
+        String firstAttempt = attemptDownload(url, target, part, minBytes, initialResume);
+        if (firstAttempt.isEmpty()) {
+            return "";
+        }
+
+        // If a resumed transfer failed or had a range mismatch, retry cleanly from 0.
+        if (initialResume > 0L) {
+            Log.w(TAG, "Resumed download failed (" + firstAttempt + "), retrying from scratch");
+            part.delete();
+            return attemptDownload(url, target, part, minBytes, 0L);
+        }
+        return firstAttempt;
+    }
+
+    private static String attemptDownload(
+            String url, File target, File part, long minBytes, long already) {
         HttpURLConnection connection = null;
         try {
-            File parent = target.getParentFile();
-            if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
-                return "the model folder could not be created (" + parent + ")";
-            }
-
-            long already = part.isFile() ? part.length() : 0L;
             connection = open(url, already);
             int status = connection.getResponseCode();
 
-            // If the range was not satisfiable, check if we already have the full file
             if (status == 416) {
                 if (already >= minBytes) {
                     if (target.isFile() && !target.delete()) {
                         Log.w(TAG, "the old model file could not be removed");
                     }
                     if (part.renameTo(target)) {
+                        reportProgress(target.length(), target.length());
                         return "";
                     }
                 }
-                // Range invalid: start from scratch
                 already = 0L;
                 connection.disconnect();
                 connection = open(url, 0L);
@@ -83,15 +105,23 @@ public final class ModelDownloader {
 
             long total;
             if (status == 206) {
-                total = already + contentLength(connection, connection.getHeaderField("Content-Range"));
+                long rangeTotal = parseRangeTotal(connection.getHeaderField("Content-Range"));
+                if (rangeTotal > 0L) {
+                    total = rangeTotal;
+                } else {
+                    long rem = contentLengthHeader(connection);
+                    total = rem > 0L ? (already + rem) : 0L;
+                }
             } else {
-                // The server answered 200: start from scratch.
-                total = contentLength(connection, null);
+                // Server answered 200 OK: it is sending the full file from byte 0.
                 already = 0L;
+                total = contentLengthHeader(connection);
             }
             if (total <= 0L) {
                 total = minBytes;
             }
+
+            reportProgress(already, total);
 
             InputStream in = connection.getInputStream();
             try {
@@ -102,21 +132,25 @@ public final class ModelDownloader {
 
             long written = part.isFile() ? part.length() : 0L;
             if (written < minBytes) {
-                part.delete();
-                return "the download was incomplete (" + written + " of " + (total > 0 ? total : minBytes) + " bytes)";
+                return "the download was incomplete ("
+                        + written + " of " + (total > 0 ? total : minBytes) + " bytes)";
             }
-            if (total > 0 && total != minBytes && written != total) {
-                part.delete();
-                return "the download was incomplete (" + written + " of " + total + " bytes)";
-            }
+
             if (target.isFile() && !target.delete()) {
                 Log.w(TAG, "the old model file could not be removed");
             }
             if (!part.renameTo(target)) {
+                // Fallback copy if rename across filesystems or locked handle failed
+                copyFile(part, target);
+                part.delete();
+            }
+            if (!target.isFile() || target.length() < minBytes) {
                 return "the model file could not be moved into place";
             }
+            reportProgress(target.length(), target.length());
             return "";
         } catch (Throwable t) {
+            Log.e(TAG, "ModelDownloader.download failed for " + url, t);
             return describe(t);
         } finally {
             if (connection != null) {
@@ -128,7 +162,7 @@ public final class ModelDownloader {
     /**
      * Extracts a bundled model from the APK assets/zip into the app's models directory.
      *
-     * @param context the context to access assets/package
+     * @param context  the context to access assets/package
      * @param fileName the model file name (e.g. "whistle.cact")
      * @param minBytes the minimum expected size
      * @return true if the model is installed
@@ -145,23 +179,34 @@ public final class ModelDownloader {
             }
 
             File part = new File(modelsDir, fileName + ".part");
+            boolean copied = false;
 
             // 1. Try reading from Context.getAssets()
-            InputStream in = null;
+            InputStream assetIn = null;
             try {
-                in = context.getAssets().open("models/" + fileName);
+                assetIn = context.getAssets().open("models/" + fileName);
             } catch (Throwable ignored) {
                 try {
-                    in = context.getAssets().open(fileName);
+                    assetIn = context.getAssets().open(fileName);
                 } catch (Throwable ignored2) {
                 }
             }
 
-            // 2. Fall back to reading from the APK file directly
-            if (in == null) {
+            if (assetIn != null) {
+                try {
+                    streamToFile(assetIn, part);
+                    copied = true;
+                } finally {
+                    close(assetIn);
+                }
+            }
+
+            // 2. Fall back to reading from the APK zip directly (keeps ZipFile open until copy finishes)
+            if (!copied || !part.isFile() || part.length() < minBytes) {
+                ZipFile zip = null;
                 try {
                     String apkPath = context.getApplicationInfo().sourceDir;
-                    ZipFile zip = new ZipFile(apkPath);
+                    zip = new ZipFile(apkPath);
                     ZipEntry entry = zip.getEntry("assets/models/" + fileName);
                     if (entry == null) {
                         entry = zip.getEntry("assets/" + fileName);
@@ -170,40 +215,36 @@ public final class ModelDownloader {
                         entry = zip.getEntry("models/" + fileName);
                     }
                     if (entry != null) {
-                        in = zip.getInputStream(entry);
+                        InputStream zipIn = zip.getInputStream(entry);
+                        try {
+                            streamToFile(zipIn, part);
+                            copied = true;
+                        } finally {
+                            close(zipIn);
+                        }
                     }
                 } catch (Throwable t) {
-                    Log.w(TAG, "failed to inspect APK zip for " + fileName, t);
-                }
-            }
-
-            if (in == null) {
-                return false;
-            }
-
-            try {
-                OutputStream out = new FileOutputStream(part);
-                try {
-                    byte[] buf = new byte[65536];
-                    int n;
-                    while ((n = in.read(buf)) > 0) {
-                        out.write(buf, 0, n);
-                    }
-                    out.flush();
+                    Log.w(TAG, "failed to extract " + fileName + " from APK zip", t);
                 } finally {
-                    out.close();
+                    if (zip != null) {
+                        try {
+                            zip.close();
+                        } catch (Throwable ignored) {
+                        }
+                    }
                 }
-            } finally {
-                in.close();
             }
 
             if (part.isFile() && part.length() >= minBytes) {
                 if (target.isFile()) {
                     target.delete();
                 }
-                boolean ok = part.renameTo(target);
-                if (ok) {
-                    Log.i(TAG, "Successfully extracted bundled model: " + fileName + " (" + target.length() + " bytes)");
+                if (!part.renameTo(target)) {
+                    copyFile(part, target);
+                    part.delete();
+                }
+                if (target.isFile() && target.length() >= minBytes) {
+                    Log.i(TAG, "Extracted bundled model: " + fileName + " (" + target.length() + " bytes)");
                     return true;
                 }
             }
@@ -214,7 +255,30 @@ public final class ModelDownloader {
         return false;
     }
 
-    /** Open the connection, manually following redirects and asking for the rest of the file when resuming. */
+    private static void streamToFile(InputStream in, File dest) throws IOException {
+        OutputStream out = new FileOutputStream(dest);
+        try {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+            out.flush();
+        } finally {
+            close(out);
+        }
+    }
+
+    private static void copyFile(File src, File dst) throws IOException {
+        java.io.FileInputStream in = new java.io.FileInputStream(src);
+        try {
+            streamToFile(in, dst);
+        } finally {
+            close(in);
+        }
+    }
+
+    /** Open the connection, manually following redirects and asking for raw bytes. */
     private static HttpURLConnection open(String initialUrl, long already) throws IOException {
         String currentUrl = initialUrl;
         HttpURLConnection connection = null;
@@ -225,8 +289,10 @@ public final class ModelDownloader {
             connection.setConnectTimeout(30000);
             connection.setReadTimeout(60000);
             connection.setInstanceFollowRedirects(false);
-            connection.setRequestProperty("User-Agent", "QuickSTT/1.0 (Android)");
+            connection.setRequestProperty("User-Agent", "QuickSTT/2.0 (Android)");
             connection.setRequestProperty("Accept", "*/*");
+            // Prevent transparent gzip so Content-Length and byte offsets stay exact
+            connection.setRequestProperty("Accept-Encoding", "identity");
             if (already > 0L) {
                 connection.setRequestProperty("Range", "bytes=" + already + "-");
             }
@@ -252,7 +318,7 @@ public final class ModelDownloader {
         throw new IOException("Too many HTTP redirects (exceeded 10)");
     }
 
-    /** Write the bytes into the part file and report the progress. */
+    /** Write the bytes into the part file and report progress. */
     private static void write(InputStream in, File part, long already, long total)
             throws IOException {
         RandomAccessFile file = new RandomAccessFile(part, "rw");
@@ -269,10 +335,7 @@ public final class ModelDownloader {
             while ((n = in.read(buffer)) > 0) {
                 file.write(buffer, 0, n);
                 done += n;
-                try {
-                    nativeProgress(done, total);
-                } catch (Throwable ignored) {
-                }
+                reportProgress(done, total > done ? total : done);
             }
             file.getFD().sync();
         } finally {
@@ -280,21 +343,47 @@ public final class ModelDownloader {
         }
     }
 
-    /** The size of the whole file (the range header holds it in a 206 answer). */
-    private static long contentLength(HttpURLConnection connection, String range) {
+    private static void reportProgress(long done, long total) {
+        try {
+            nativeProgress(done, total);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Extract the total length after '/' in Content-Range: bytes X-Y/TOTAL. */
+    private static long parseRangeTotal(String range) {
         if (range != null) {
             int slash = range.lastIndexOf('/');
-            if (slash > 0) {
-                try {
-                    return Long.parseLong(range.substring(slash + 1).trim());
-                } catch (NumberFormatException ignored) {
-                    // Fall through to the content length.
+            if (slash > 0 && slash + 1 < range.length()) {
+                String tail = range.substring(slash + 1).trim();
+                if (!"*".equals(tail)) {
+                    try {
+                        long v = Long.parseLong(tail);
+                        if (v > 0L) {
+                            return v;
+                        }
+                    } catch (NumberFormatException ignored) {
+                    }
                 }
             }
         }
+        return 0L;
+    }
+
+    private static long contentLengthHeader(HttpURLConnection connection) {
+        try {
+            String raw = connection.getHeaderField("Content-Length");
+            if (raw != null && !raw.trim().isEmpty()) {
+                long parsed = Long.parseLong(raw.trim());
+                if (parsed > 0L) {
+                    return parsed;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
         try {
             long len = connection.getContentLengthLong();
-            if (len > 0) {
+            if (len > 0L) {
                 return len;
             }
         } catch (Throwable ignored) {
@@ -307,10 +396,11 @@ public final class ModelDownloader {
     }
 
     private static void close(Closeable stream) {
-        try {
-            stream.close();
-        } catch (Throwable ignored) {
-            // Nothing to do.
+        if (stream != null) {
+            try {
+                stream.close();
+            } catch (Throwable ignored) {
+            }
         }
     }
 
