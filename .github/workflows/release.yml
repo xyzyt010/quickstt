@@ -462,27 +462,44 @@ jobs:
       - name: Collect
         run: |
           mkdir -p release
-          find artifacts -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.tar.gz" -o -name "SHA256SUMS*" -o -name "QuickSTT_Portable.exe" -o -name "QuickSTT.exe" -o -name "quickstt-android.apk" \) -exec cp -f {} release/ \;
+          find artifacts -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.tar.gz" -o -name "QuickSTT_Portable.exe" -o -name "QuickSTT.exe" -o -name "quickstt-android.apk" \) -exec cp -f {} release/ \;
+          rm -f release/SHA256SUMS release/SHA256SUMS.txt
           # The Android asset gets a stable, descriptive name.
           if [ -f release/quickstt-android.apk ]; then
             mv -f release/quickstt-android.apk release/quickstt-android-release.apk
           fi
+          # GitHub rewrites "~" in asset names, so normalise the local name the
+          # same way before hashing — the SHA256SUMS entries must match the
+          # files a user actually downloads.
+          for f in release/*; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f")
+            clean=$(printf '%s' "$base" | tr '~' '.')
+            [ "$base" = "$clean" ] || mv -f "$f" "release/$clean"
+          done
           ls -lh release/
-          (cd release && sha256sum * | tee SHA256SUMS; cat SHA256SUMS)
+          # Never hash SHA256SUMS itself: tee would truncate it while sha256sum
+          # is still reading, producing the hash of an empty file.
+          ( cd release && sha256sum $(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort) > SHA256SUMS && cat SHA256SUMS )
       - name: Release notes
         run: |
           VER="${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
           # Take the name cargo-deb actually produced instead of rebuilding it
           # from the tag: the .deb version comes from the desktop crate, and a
           # tag that moved ahead of it would otherwise link to a 404.
           DEB_NAME=$(basename "$(find release -name '*.deb' -print -quit)")
           echo "DEB_NAME=$DEB_NAME"
-          cat > /tmp/notes.md <<NOTES
-          ## QuickSTT ${VER} — Ubuntu/Debian amd64 (Mint 21/22)
+          # A quoted heredoc: backticked names must reach the notes as text.
+          # An unquoted one runs `Bubble.java`, `d8`, `#050508` … as commands
+          # and silently replaces them with nothing. __TOKENS__ are filled in
+          # after the heredoc, so no shell expansion happens here.
+          cat > /tmp/notes.md <<'NOTES'
+          ## QuickSTT __VER__ — Windows · Linux · Android (arm64-v8a)
 
           Floating offline voice typing pill — wakeword, VAD, tray, global hotkeys.
           Models download in-app: Vosk small EN 50M · Parakeet TDT 0.6B v3 INT8 · Phonon-2 0.6B INT8 (Fermion Research, CC-BY-4.0) · Nemotron 3.5 ASR Streaming 0.6B Q8_0 (716MB, transcribe.cpp).
-          Full C++ Qt widget app included — run \`quickstt-app\` for the classic Dashboard + Pill UI.
+          Full C++ Qt widget app included — run `quickstt-app` for the classic Dashboard + Pill UI.
 
           ### What's new in this release (widget app)
           - New model: **Phonon-2 0.6B INT8** (Fermion Research, CC-BY-4.0) — 5.21% WER compact English model running on the same ONNX Runtime stack as Parakeet (Windows/Linux), with NOTICE + license shipped into the model dir.
@@ -490,20 +507,20 @@ jobs:
           - Models install to ~/.local/share/QuickSTT/models (shared with the Rust app + native service) — no more read-only /usr/lib failures.
           - Real SVG mic/app icons everywhere (pill, tray at all DPI sizes) — no more blue-dot fallback.
           - Robust Quit: engine killed on exit, tray item removed, no restart storms (non-blocking backoff).
-          - **Ctrl+Shift+Space** toggles the new bottom-center micro-pill overlay · hold **Ctrl+Space** = push-to-talk (X11). Wayland: bind a compositor shortcut to \`quickstt-app --toggle-dictation\`.
+          - **Ctrl+Shift+Space** toggles the new bottom-center micro-pill overlay · hold **Ctrl+Space** = push-to-talk (X11). Wayland: bind a compositor shortcut to `quickstt-app --toggle-dictation`.
           - Micro-pill overlay types into any focused window via xdotool (or clipboard), with live waveform + transcribing animation.
           - Polished model dropdown (dark rounded menu, hover selection).
 
           ### Linux Mint / Ubuntu / Debian — one-liner
-          \`\`\`bash
-          wget -O /tmp/quickstt.deb https://github.com/${{ github.repository }}/releases/download/${VER}/${DEB_NAME}
+          ```bash
+          wget -O /tmp/quickstt.deb https://github.com/__REPO__/releases/download/__VER__/__DEB__
           sudo apt install -y /tmp/quickstt.deb && quickstt &
-          \`\`\`
+          ```
           Or tarball (no sudo):
-          \`\`\`bash
-          wget -O /tmp/quickstt.tar.gz https://github.com/${{ github.repository }}/releases/download/${VER}/quickstt-${VER}-x86_64.tar.gz
+          ```bash
+          wget -O /tmp/quickstt.tar.gz https://github.com/__REPO__/releases/download/__VER__/quickstt-__VER__-x86_64.tar.gz
           mkdir -p ~/quickstt && tar xzf /tmp/quickstt.tar.gz -C ~/quickstt && ~/quickstt/QuickSTT &
-          \`\`\`
+          ```
 
           ### First-run setup
           1. Pill appears bottom-center. Right-click it → Dashboard → Models → **Download** next to *Vosk Small EN (50M)* and *Parakeet TDT 0.6B v3*.
@@ -511,16 +528,16 @@ jobs:
           3. Hotkeys: **Ctrl+Shift+Space** toggle micro-pill dictation · hold **Ctrl+Space** push-to-talk · Ctrl+Shift+H show/hide main pill.
 
           ### Checksums
-          See \`SHA256SUMS\`.
+          See `SHA256SUMS`.
 
           ### Android (arm64-v8a)
-          \`\`\`bash
-          wget -O /tmp/quickstt.apk https://github.com/${{ github.repository }}/releases/download/${VER}/quickstt-android-release.apk
+          ```bash
+          wget -O /tmp/quickstt.apk https://github.com/__REPO__/releases/download/__VER__/quickstt-android-release.apk
           adb install -r /tmp/quickstt.apk
-          \`\`\`
-          The touch app dictates for real: the microphone is captured with the NDK AAudio API, **three engines** (whisper.cpp, the Cactus \`needle\` and transcribe.cpp — all cross-compiled for arm64-v8a and shipped inside the APK) transcribe on-device, the text is copied to the clipboard and typed into the app in front with real key events, and the always-on floating bubble follows you across apps as a rounded-corner icon that expands into a circular waveform pill.
+          ```
+          The touch app dictates for real: the microphone is captured with the NDK AAudio API, **three engines** (whisper.cpp, the Cactus `needle` and transcribe.cpp — all cross-compiled for arm64-v8a and shipped inside the APK) transcribe on-device, the text is copied to the clipboard and typed into the app in front with real key events, and the always-on floating bubble follows you across apps as a rounded-corner icon that expands into a circular waveform pill.
 
-          ### Fixed & improved in this release (Android ${VER})
+          ### Fixed & improved in this release (Android __VER__)
           - **Live Expandable Floating Waveform Bubble (No Mic Icons)**: Redesigned `Bubble.java` as a hardware-accelerated Choreographer-driven view: a sleek 48dp rounded-corner icon that smoothly expands on press into a circular stadium pill with a pure black background (`#050508`), slight purple ambient highlights (`#A855F7` / `#7C3AED`), and 60/120fps super-smooth white waveforms driven by real-time AAudio microphone levels.
           - **Fixed DEX inner-class packaging (`d8`)**: Included all inner classes (`Bubble$BubbleView`, `Bubble$1`, `Bubble$2`, `Overlay$1`, `Overlay$2`) in `classes.dex` and bound JNI callbacks via `RegisterNatives`, eliminating the `NoClassDefFoundError` and `UnsatisfiedLinkError` that previously broke the floating bubble and download progress callbacks.
           - **Inbuilt Cactus Whistle 16M (`needle`) Model Ready Out-of-the-Box**: Cactus Whistle 16M (`whistle.cact`) is now the default model (`MODELS[0]`), extracted from the APK and onloaded into RAM automatically at startup so the app works immediately on first launch without requiring a download.
@@ -531,6 +548,7 @@ jobs:
           * **The bubble is a control, not a read-out**: the rounded icon expands into a live circular pill — tap the waveform to record, tap **STOP** to transcribe, tap **TYPE** to type the transcript into the app in front (or copy it to the clipboard), and drag it anywhere. There are no microphone icons: only smooth white waveforms over black with a slight purple rim.
           * The Listen tab walks through setup: microphone permission → model selection → overlay permission → dictation.
           NOTES
+          sed -i "s|__VER__|${VER}|g; s|__REPO__|${REPO}|g; s|__DEB__|${DEB_NAME}|g" /tmp/notes.md
           cat /tmp/notes.md
       - name: Create Release
         uses: softprops/action-gh-release@v2
