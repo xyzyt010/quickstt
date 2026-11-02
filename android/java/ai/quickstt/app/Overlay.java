@@ -199,6 +199,43 @@ public final class Overlay {
         Bubble.setExpanded(expanded);
     }
 
+    /** True when the QuickSTT accessibility auto-typing service is enabled. */
+    public static boolean accessibilityEnabled(Context context) {
+        return QuickSttAccessibilityService.isEnabled(context);
+    }
+
+    /** Open the Android Accessibility settings screen so the user can enable auto-typing. */
+    public static String openAccessibilitySettings(Context context) {
+        try {
+            Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(intent);
+            return "";
+        } catch (Throwable t) {
+            return "accessibility settings could not be opened (" + describe(t) + ")";
+        }
+    }
+
+    /** Reset the live-typing session at the start of a recording turn. */
+    public static void beginTypingTurn() {
+        QuickSttAccessibilityService.beginTurn();
+    }
+
+    /** True when an editable text box is currently focused in the active window. */
+    public static boolean hasFocusedTextBox() {
+        return QuickSttAccessibilityService.hasFocusedTextBox();
+    }
+
+    /** Type a live partial transcript into the focused text box in real time. */
+    public static boolean typeLivePartial(String text) {
+        return QuickSttAccessibilityService.typeLivePartial(text);
+    }
+
+    /** Commit the final transcript into the focused text box when recording stops. */
+    public static boolean commitFinalText(String text) {
+        return QuickSttAccessibilityService.commitFinalText(text);
+    }
+
     /**
      * Is QuickSTT exempt from the battery restrictions?
      *

@@ -88,5 +88,20 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps the microphone bubble of QuickSTT available in the background." />
         </service>
+
+        <!-- Accessibility service for automatic and real-time live typing into
+             any focused text box across apps without requiring root. -->
+        <service
+            android:name="ai.quickstt.app.QuickSttAccessibilityService"
+            android:label="@string/accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/quickstt_accessibility" />
+        </service>
     </application>
 </manifest>

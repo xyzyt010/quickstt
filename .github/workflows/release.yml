@@ -371,10 +371,11 @@ jobs:
             -d target/dex/classes \
             java/ai/quickstt/app/Bubble.java java/ai/quickstt/app/Overlay.java \
             java/ai/quickstt/app/Engine.java java/ai/quickstt/app/SpeechService.java \
-            java/ai/quickstt/app/ModelDownloader.java
+            java/ai/quickstt/app/ModelDownloader.java \
+            java/ai/quickstt/app/QuickSttAccessibilityService.java
           "$BUILD_TOOLS"/d8 --min-api 26 --output target/dex/dex \
             target/dex/classes/ai/quickstt/app/*.class
-          # Our own manifest: it declares the foreground service.
+          # Our own manifest: it declares the foreground service and accessibility service.
           VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           MAJOR="${VERSION%%.*}"; REST="${VERSION#*.}"
           MINOR="${REST%%.*}"; PATCH="${REST#*.}"
@@ -383,8 +384,10 @@ jobs:
             echo "Downloading Cactus Whistle model to embed in APK..."
             curl -L -o prebuilt/whistle.cact "https://huggingface.co/Cactus-Compute/whistle/resolve/main/whistle.cact"
           fi
+          "$BUILD_TOOLS"/aapt2 compile --dir res -o target/manifest/res.zip
           "$BUILD_TOOLS"/aapt2 link -I "$PLATFORM/android.jar" \
-            --manifest AndroidManifest.xml --auto-add-overlay \
+            --manifest AndroidManifest.xml -R target/manifest/res.zip \
+            --auto-add-overlay \
             --min-sdk-version 26 --target-sdk-version 34 \
             --version-code "$VERSION_CODE" --version-name "$VERSION" \
             -o target/manifest/manifest.apk
@@ -400,14 +403,16 @@ jobs:
               ("libneedle.so", "prebuilt/needle-arm64-v8a"),
               ("libtranscribe-cli.so", "prebuilt/transcribe-cli-arm64-v8a"),
           ]
-          # Our own manifest (it declares the foreground service).
+          # Our own manifest and compiled resources (foreground + accessibility services).
+          manifest_entries = {}
           with zipfile.ZipFile("target/manifest/manifest.apk") as zm:
-              manifest = zm.read("AndroidManifest.xml")
+              for mitem in zm.infolist():
+                  manifest_entries[mitem.filename] = (mitem.compress_type, zm.read(mitem.filename))
           with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
               stamp = None
               for item in zin.infolist():
                   stamp = item.date_time
-                  if item.filename == "AndroidManifest.xml":
+                  if item.filename in manifest_entries:
                       continue
                   data = zin.read(item.filename)
                   info = zipfile.ZipInfo(item.filename, date_time=item.date_time)
@@ -415,9 +420,10 @@ jobs:
                   info.external_attr = item.external_attr
                   info.create_system = item.create_system
                   zout.writestr(info, data)
-              info = zipfile.ZipInfo("AndroidManifest.xml", date_time=stamp)
-              info.compress_type = zipfile.ZIP_DEFLATED
-              zout.writestr(info, manifest)
+              for mname, (mcomp, mdata) in manifest_entries.items():
+                  info = zipfile.ZipInfo(mname, date_time=stamp)
+                  info.compress_type = zipfile.ZIP_STORED if mname == "resources.arsc" else zipfile.ZIP_DEFLATED
+                  zout.writestr(info, mdata)
               zout.write("target/dex/dex/classes.dex", "classes.dex")
               # Bundle the Cactus model directly inside the APK assets
               if os.path.isfile("prebuilt/whistle.cact"):
@@ -538,15 +544,12 @@ jobs:
           The touch app dictates for real: the microphone is captured with the NDK AAudio API, **three engines** (whisper.cpp, the Cactus `needle` and transcribe.cpp — all cross-compiled for arm64-v8a and shipped inside the APK) transcribe on-device, the text is copied to the clipboard and typed into the app in front with real key events, and the always-on floating bubble follows you across apps as a rounded-corner icon that expands into a circular waveform pill.
 
           ### Fixed & improved in this release (Android __VER__)
-          - **Live Expandable Floating Waveform Bubble (No Mic Icons)**: Redesigned `Bubble.java` as a hardware-accelerated Choreographer-driven view: a sleek 48dp rounded-corner icon that smoothly expands on press into a circular stadium pill with a pure black background (`#050508`), slight purple ambient highlights (`#A855F7` / `#7C3AED`), and 60/120fps super-smooth white waveforms driven by real-time AAudio microphone levels.
-          - **Fixed DEX inner-class packaging (`d8`)**: Included all inner classes (`Bubble$BubbleView`, `Bubble$1`, `Bubble$2`, `Overlay$1`, `Overlay$2`) in `classes.dex` and bound JNI callbacks via `RegisterNatives`, eliminating the `NoClassDefFoundError` and `UnsatisfiedLinkError` that previously broke the floating bubble and download progress callbacks.
-          - **Inbuilt Cactus Whistle 16M (`needle`) Model Ready Out-of-the-Box**: Cactus Whistle 16M (`whistle.cact`) is now the default model (`MODELS[0]`), extracted from the APK and onloaded into RAM automatically at startup so the app works immediately on first launch without requiring a download.
-          - **Real RAM Model Onloading & Offloading**: Added persistent `transcribe-cli --worker` sessions and pinned RAM model buffers with live UI status badges (`ONLOADED` / `OFFLOADED`), manual **Onload to RAM** / **Offload RAM** controls, and configurable 2-minute idle auto-offload.
-          - **ARM64 NEON Optimization & Transcription Fixes**: Rebuilt `whisper-cli` and `transcribe-cli` with `-march=armv8.2-a+fp16+dotprod` (`sdot` hardware acceleration) and 16 KB ELF page alignment (`-Wl,-z,max-page-size=16384`). Fixed `platform::native_lib_dir()` (`ApplicationInfo.nativeLibraryDir` field lookup), writable `stt::wav_path()` (replacing `/data/local/tmp`), and `ModelDownloader` `Content-Range` + `Accept-Encoding: identity` handling.
-
-          * **Eight real models**: Cactus Whistle 16M (pre-packaged), Whisper Tiny EN, Moonshine Base EN, SenseVoice Small, Canary 180M Flash, Parakeet Unified EN 0.6B, **Nemotron 3.5 ASR Streaming 0.6B**, and Qwen3-ASR 0.6B.
-          * **The bubble is a control, not a read-out**: the rounded icon expands into a live circular pill — tap the waveform to record, tap **STOP** to transcribe, tap **TYPE** to type the transcript into the app in front (or copy it to the clipboard), and drag it anywhere. There are no microphone icons: only smooth white waveforms over black with a slight purple rim.
-          * The Listen tab walks through setup: microphone permission → model selection → overlay permission → dictation.
+          - **Clean Blue & Squircle UI Redesign**: Replaced the purple palette with a high-contrast blue & slate theme (`#2563EB` / `#3B82F6` / `#60A5FA` on `#060A12` / `#0B1220`), squircle cards and controls, and concise copy.
+          - **Static One-Glance Main Screen**: Removed the moving waveform bars from the main Listen tab and redesigned the layout so Dictation Control, Live Transcript, Active Model RAM bar, and 1-Tap Setup fit on a single screen without scrolling.
+          - **Squircle Floating Pill with Explicit START / STOP & Auto-Typing**: Reworked `Bubble.java` with continuous-curvature squircle corners (`13dp` collapsed, `15dp` expanded — no over-rounded stadium shape), blue glow/border, and a dedicated **START** / **STOP** button.
+          - **Automatic & Live Real-Time Typing (`QuickSttAccessibilityService`)**: Added an Accessibility auto-typing service that types partial transcripts in real time into any focused text box while speaking, commits the final transcript automatically on stop, and copies the full transcript all at once to the clipboard when no text box is focused.
+          - **Automatic Model Onload & Offload with Round Loading Spinner**: Automatically onloads the active model when transcription starts and offloads it from RAM when transcription stops, displaying a smooth circular loading spinner in both the main app and the floating squircle pill.
+          - **Inbuilt Cactus Whistle 16M (`needle`) Model Ready Out-of-the-Box**: Cactus Whistle 16M (`whistle.cact`) is embedded inside the APK (`MODELS[0]`) and works offline immediately on first launch alongside 7 downloadable Whisper and transcribe.cpp models.
           NOTES
           sed -i "s|__VER__|${VER}|g; s|__REPO__|${REPO}|g; s|__DEB__|${DEB_NAME}|g" /tmp/notes.md
           cat /tmp/notes.md

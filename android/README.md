@@ -17,15 +17,15 @@ record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window
 | **Runtime permission flow** (system dialog + result pickup) | ✅ implemented |
 | **On-device transcription** (three engines for arm64-v8a) | ✅ implemented |
 | **Clipboard copy** of the finished transcript | ✅ implemented |
-| **Floating bubble over other apps** (`TYPE_APPLICATION_OVERLAY`) | ✅ implemented |
-| **Interactive bubble** (expandable live waveform pill, draggable, tap-to-record/STOP/TYPE) | ✅ implemented (Java helper in a dex) |
+| **Floating squircle pill over other apps** (`TYPE_APPLICATION_OVERLAY`) | ✅ implemented |
+| **Interactive squircle pill** (48dp squircle icon expands to 248x54dp squircle bar with START / STOP & round loader) | ✅ implemented (`Bubble.java`) |
 | **Foreground service** (the bubble keeps working in other apps) | ✅ implemented (`SpeechService`) |
 | **Battery optimisation exemption** (the app is not put to sleep) | ✅ implemented |
 | **Model download in-app** (7 downloads + 1 bundled model, real byte progress) | ✅ implemented (Android HTTP stack) |
 | **Bundled Cactus Whistle 16M** (works offline on first launch, no download) | ✅ implemented (`assets/models/whistle.cact`) |
-| **Onload / offload models in RAM** with live status and idle auto-offload | ✅ implemented (persistent `--worker` + pinned buffers) |
+| **Automatic onload / offload in RAM** on transcription start & stop with round loading spinner | ✅ implemented (persistent `--worker` + pinned buffers) |
 | **Model self-test** ("Test this model" — records 4 s, runs the engine) | ✅ implemented |
-| **Typing into the app in front** (real KeyEvents) | ✅ implemented, needs the INJECT_EVENTS permission |
+| **Automatic & live real-time typing into focused text boxes** (`QuickSttAccessibilityService` + clipboard fallback) | ✅ implemented |
 | **Share sheet** for the last transcript | ✅ implemented |
 | Setup steps / how-to-use card in the Listen tab | ✅ implemented |
 | Activity log + status line (every action says what it did) | ✅ implemented |

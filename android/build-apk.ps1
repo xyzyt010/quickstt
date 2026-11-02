@@ -50,7 +50,7 @@ Write-Host "==> compiling the Java helpers"
 & javac --release 8 -nowarn -classpath $androidJar -d "$work\classes" `
     "java\ai\quickstt\app\Bubble.java" "java\ai\quickstt\app\Overlay.java" `
     "java\ai\quickstt\app\Engine.java" "java\ai\quickstt\app\SpeechService.java" `
-    "java\ai\quickstt\app\ModelDownloader.java"
+    "java\ai\quickstt\app\ModelDownloader.java" "java\ai\quickstt\app\QuickSttAccessibilityService.java"
 if ($LASTEXITCODE -ne 0) { throw "javac failed" }
 
 Write-Host "==> dexing"
@@ -79,7 +79,10 @@ if ($cargoToml -match 'version\s*=\s*"(\d+)\.(\d+)\.(\d+)"') {
 $manifestWork = Join-Path $root "target\manifest"
 Remove-Item $manifestWork -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $manifestWork | Out-Null
+& "$buildTools\aapt2.exe" compile --dir "$root\res" -o "$manifestWork\res.zip"
+if ($LASTEXITCODE -ne 0) { throw "aapt2 compile failed" }
 & "$buildTools\aapt2.exe" link -I $androidJar --manifest "$root\AndroidManifest.xml" `
+    -R "$manifestWork\res.zip" `
     --auto-add-overlay --min-sdk-version 26 --target-sdk-version 34 `
     --version-code $versionCode --version-name $version `
     -o "$manifestWork\manifest.apk"
@@ -143,16 +146,17 @@ src, dst, dex, manifest_apk, cactus_model = sys.argv[1], sys.argv[2], sys.argv[3
 # The engines: the file name in the APK and the binary to put there.
 engines = [(a.split("=")[0], a.split("=", 1)[1]) for a in sys.argv[6:]]
 
-# Our own manifest (the one aapt2 compiled). It declares the foreground
-# service that keeps QuickSTT alive in the background.
+# Our own manifest and compiled resources (foreground + accessibility services).
+manifest_entries = {}
 with zipfile.ZipFile(manifest_apk) as zm:
-    manifest = zm.read("AndroidManifest.xml")
+    for mitem in zm.infolist():
+        manifest_entries[mitem.filename] = (mitem.compress_type, zm.read(mitem.filename))
 
 with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
     stamp = None
     for item in zin.infolist():
         stamp = item.date_time
-        if item.filename == "AndroidManifest.xml":
+        if item.filename in manifest_entries:
             continue
         data = zin.read(item.filename)
         info = zipfile.ZipInfo(item.filename, date_time=item.date_time)
@@ -160,9 +164,11 @@ with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
         info.external_attr = item.external_attr
         info.create_system = item.create_system
         zout.writestr(info, data)
-    info = zipfile.ZipInfo("AndroidManifest.xml", date_time=stamp)
-    info.compress_type = zipfile.ZIP_DEFLATED
-    zout.writestr(info, manifest)
+    for mname, (mcomp, mdata) in manifest_entries.items():
+        info = zipfile.ZipInfo(mname, date_time=stamp)
+        # Android 11+ (targetSdk >= 30) requires resources.arsc to be uncompressed.
+        info.compress_type = zipfile.ZIP_STORED if mname == "resources.arsc" else zipfile.ZIP_DEFLATED
+        zout.writestr(info, mdata)
     zout.write(dex, "classes.dex")
     # Bundle the Cactus model directly inside the APK assets
     if cactus_model and os.path.isfile(cactus_model):

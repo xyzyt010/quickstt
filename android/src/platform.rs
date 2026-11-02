@@ -68,6 +68,9 @@ pub fn inject_text(text: &str) -> Result<(), String> {
     if text.trim().is_empty() {
         return Ok(());
     }
+    if commit_final_text(text) {
+        return Ok(());
+    }
     let app = app().ok_or("the app is not running")?;
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }.map_err(|e| e.to_string())?;
     let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
@@ -1068,6 +1071,143 @@ pub fn watch_overlay_permission() {
             )?;
             Some(())
         });
+    }
+}
+
+/// True when the QuickSTT accessibility auto-typing service is enabled.
+pub fn accessibility_enabled() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "accessibilityEnabled",
+                "(Landroid/content/Context;)Z",
+                &[JValue::from(activity)],
+            )?;
+            value.z().ok()
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    false
+}
+
+/// Open the Android Accessibility settings screen so the user can enable auto-typing.
+pub fn open_accessibility_settings() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let outcome = with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "openAccessibilitySettings",
+                "(Landroid/content/Context;)Ljava/lang/String;",
+                &[JValue::from(activity)],
+            )?;
+            jni_string(env, value)
+        });
+        match outcome {
+            Some(msg) if msg.is_empty() => Ok(()),
+            Some(msg) => Err(msg),
+            None => Err("accessibility settings could not be opened".into()),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Err("accessibility settings only exist on Android".into())
+    }
+}
+
+/// Reset the live-typing session at the start of a recording turn.
+pub fn begin_typing_turn() {
+    #[cfg(target_os = "android")]
+    {
+        let _ = with_activity(|env, activity| {
+            call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "beginTypingTurn",
+                "()V",
+                &[],
+            )?;
+            Some(())
+        });
+    }
+}
+
+/// True when an editable text box is currently focused in the active window.
+pub fn has_focused_text_box() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "hasFocusedTextBox",
+                "()Z",
+                &[],
+            )?;
+            value.z().ok()
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    false
+}
+
+/// Type a live partial transcript into the focused text box in real time.
+pub fn type_live_partial(text: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let body = env.new_string(text).ok()?;
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "typeLivePartial",
+                "(Ljava/lang/String;)Z",
+                &[JValue::from(&body)],
+            )?;
+            value.z().ok()
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = text;
+        false
+    }
+}
+
+/// Commit the final transcript into the focused text box when recording stops.
+pub fn commit_final_text(text: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let body = env.new_string(text).ok()?;
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "commitFinalText",
+                "(Ljava/lang/String;)Z",
+                &[JValue::from(&body)],
+            )?;
+            value.z().ok()
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = text;
+        false
     }
 }
 
