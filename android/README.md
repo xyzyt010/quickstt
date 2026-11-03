@@ -25,7 +25,7 @@ record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window
 | **Bundled Cactus Whistle 16M** (works offline on first launch, no download) | ✅ implemented (`assets/models/whistle.cact`) |
 | **Automatic onload / offload in RAM** on transcription start & stop with round loading spinner | ✅ implemented (persistent `--worker` + pinned buffers) |
 | **Model self-test** ("Test this model" — records 4 s, runs the engine) | ✅ implemented |
-| **Automatic & live real-time typing into focused text boxes** (`QuickSttAccessibilityService` + clipboard fallback) | ✅ implemented |
+| **Automatic & live real-time typing into focused text boxes** (`QuickSttInputMethodService` + clipboard fallback) | ✅ implemented |
 | **Share sheet** for the last transcript | ✅ implemented |
 | Setup steps / how-to-use card in the Listen tab | ✅ implemented |
 | Activity log + status line (every action says what it did) | ✅ implemented |

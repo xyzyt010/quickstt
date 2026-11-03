@@ -807,19 +807,21 @@ pub fn build_ui() -> AppWindow {
         let log = log.clone();
         ui.on_open_auto_type_settings(move || {
             let Some(ui) = weak.upgrade() else { return };
-            if platform::accessibility_enabled() {
-                ui.set_auto_type_ok(true);
-                ui.set_status_text("Auto-typing accessibility service is enabled".into());
-                return;
-            }
+            let already_enabled = platform::accessibility_enabled();
             match platform::open_accessibility_settings() {
                 Ok(()) => {
-                    ui.set_status_text("Enable “QuickSTT auto-typing” in Accessibility".into());
-                    note(&weak, &log, "Opened Accessibility settings for auto-typing.");
+                    ui.set_auto_type_ok(already_enabled);
+                    if already_enabled {
+                        ui.set_status_text("Select “QuickSTT Voice Auto-Type” in the keyboard picker".into());
+                        note(&weak, &log, "Opened keyboard picker for QuickSTT Voice Auto-Type.");
+                    } else {
+                        ui.set_status_text("Enable “QuickSTT Voice Auto-Type” in On-screen keyboards".into());
+                        note(&weak, &log, "Opened keyboard settings for QuickSTT Voice Auto-Type.");
+                    }
                 }
                 Err(e) => {
-                    ui.set_status_text(format!("Could not open Accessibility: {e}").into());
-                    note(&weak, &log, &format!("Accessibility settings error: {e}"));
+                    ui.set_status_text(format!("Could not open keyboard settings: {e}").into());
+                    note(&weak, &log, &format!("Keyboard settings error: {e}"));
                 }
             }
         });

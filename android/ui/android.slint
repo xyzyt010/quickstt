@@ -1379,7 +1379,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 ActionButton {
-                                    label: root.auto-type-ok ? "Accessibility Auto-Type: Enabled ✓" : "Enable Auto-Type in Accessibility Settings";
+                                    label: root.auto-type-ok ? "Voice Auto-Type: Enabled ✓ (Tap to Switch)" : "Enable Voice Auto-Type Keyboard";
                                     primary: !root.auto-type-ok;
                                     blue: !root.auto-type-ok;
                                     clicked => { root.open-auto-type-settings(); }

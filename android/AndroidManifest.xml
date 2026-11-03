@@ -39,12 +39,6 @@
          background. The app asks for this when the user switches the
          bubble on. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <!-- Typing into the app in front. A signature permission: only a rooted
-         phone or a userdebug build can grant it
-         (adb shell pm grant ai.quickstt.app android.permission.INJECT_EVENTS).
-         Without it QuickSTT copies the text to the clipboard instead. -->
-    <uses-permission android:name="android.permission.INJECT_EVENTS"
-        tools:ignore="ProtectedPermissions" />
 
     <uses-feature android:name="android.hardware.microphone" android:required="true" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
@@ -89,19 +83,19 @@
                 android:value="Keeps the microphone bubble of QuickSTT available in the background." />
         </service>
 
-        <!-- Accessibility service for automatic and real-time live typing into
-             any focused text box across apps without requiring root. -->
+        <!-- Voice Input Method (IME) for automatic and real-time live typing into
+             any focused text box across apps without Play Protect sideload blocks. -->
         <service
-            android:name="ai.quickstt.app.QuickSttAccessibilityService"
-            android:label="@string/accessibility_label"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:name="ai.quickstt.app.QuickSttInputMethodService"
+            android:label="@string/ime_label"
+            android:permission="android.permission.BIND_INPUT_METHOD"
             android:exported="true">
             <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
+                <action android:name="android.view.InputMethod" />
             </intent-filter>
             <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/quickstt_accessibility" />
+                android:name="android.view.im"
+                android:resource="@xml/quickstt_method" />
         </service>
     </application>
 </manifest>

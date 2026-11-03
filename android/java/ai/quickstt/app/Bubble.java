@@ -421,6 +421,7 @@ public final class Bubble {
                 this.recording = false;
                 this.busy = false;
             }
+            QuickSttInputMethodService.syncState(this.stateLabel, this.recording, this.busy, this.targetLevel);
             startAnimation();
             invalidate();
         }
@@ -432,6 +433,7 @@ public final class Bubble {
             if (isRecording || isBusy) {
                 this.expanded = true;
             }
+            QuickSttInputMethodService.syncState(this.stateLabel, this.recording, this.busy, this.targetLevel);
             startAnimation();
         }
 

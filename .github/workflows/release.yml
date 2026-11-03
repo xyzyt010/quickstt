@@ -372,7 +372,7 @@ jobs:
             java/ai/quickstt/app/Bubble.java java/ai/quickstt/app/Overlay.java \
             java/ai/quickstt/app/Engine.java java/ai/quickstt/app/SpeechService.java \
             java/ai/quickstt/app/ModelDownloader.java \
-            java/ai/quickstt/app/QuickSttAccessibilityService.java
+            java/ai/quickstt/app/QuickSttInputMethodService.java
           "$BUILD_TOOLS"/d8 --min-api 26 --output target/dex/dex \
             target/dex/classes/ai/quickstt/app/*.class
           # Our own manifest: it declares the foreground service and accessibility service.
@@ -501,7 +501,7 @@ jobs:
           # and silently replaces them with nothing. __TOKENS__ are filled in
           # after the heredoc, so no shell expansion happens here.
           cat > /tmp/notes.md <<'NOTES'
-          ## QuickSTT __VER__ — Windows · Linux · Android (arm64-v8a)
+          ## QuickSTT __VER__ — Ubuntu/Debian amd64 (Mint 21/22)
 
           Floating offline voice typing pill — wakeword, VAD, tray, global hotkeys.
           Models download in-app: Vosk small EN 50M · Parakeet TDT 0.6B v3 INT8 · Phonon-2 0.6B INT8 (Fermion Research, CC-BY-4.0) · Nemotron 3.5 ASR Streaming 0.6B Q8_0 (716MB, transcribe.cpp).
@@ -544,10 +544,11 @@ jobs:
           The touch app dictates for real: the microphone is captured with the NDK AAudio API, **three engines** (whisper.cpp, the Cactus `needle` and transcribe.cpp — all cross-compiled for arm64-v8a and shipped inside the APK) transcribe on-device, the text is copied to the clipboard and typed into the app in front with real key events, and the always-on floating bubble follows you across apps as a rounded-corner icon that expands into a circular waveform pill.
 
           ### Fixed & improved in this release (Android __VER__)
+          - **Fixed Google Play Protect "App blocked to protect your device" Sideload Block**: Replaced `BIND_ACCESSIBILITY_SERVICE` (which Google Play Protect Enhanced Fraud Protection automatically blocks on browser-sideloaded APKs) and removed `INJECT_EVENTS` in favor of Android's standard Voice Input Method API (`QuickSttInputMethodService` / `BIND_INPUT_METHOD`), allowing clean installation without Play Protect blocks.
           - **Clean Blue & Squircle UI Redesign**: Replaced the purple palette with a high-contrast blue & slate theme (`#2563EB` / `#3B82F6` / `#60A5FA` on `#060A12` / `#0B1220`), squircle cards and controls, and concise copy.
           - **Static One-Glance Main Screen**: Removed the moving waveform bars from the main Listen tab and redesigned the layout so Dictation Control, Live Transcript, Active Model RAM bar, and 1-Tap Setup fit on a single screen without scrolling.
           - **Squircle Floating Pill with Explicit START / STOP & Auto-Typing**: Reworked `Bubble.java` with continuous-curvature squircle corners (`13dp` collapsed, `15dp` expanded — no over-rounded stadium shape), blue glow/border, and a dedicated **START** / **STOP** button.
-          - **Automatic & Live Real-Time Typing (`QuickSttAccessibilityService`)**: Added an Accessibility auto-typing service that types partial transcripts in real time into any focused text box while speaking, commits the final transcript automatically on stop, and copies the full transcript all at once to the clipboard when no text box is focused.
+          - **Automatic & Live Real-Time Typing (`QuickSttInputMethodService`)**: Added a native Android Voice Input Method that types partial transcripts in real time (`setComposingText`) into any focused text box while speaking, commits the final transcript automatically on stop (`commitText`), and copies the full transcript all at once to the clipboard when no text box is focused.
           - **Automatic Model Onload & Offload with Round Loading Spinner**: Automatically onloads the active model when transcription starts and offloads it from RAM when transcription stops, displaying a smooth circular loading spinner in both the main app and the floating squircle pill.
           - **Inbuilt Cactus Whistle 16M (`needle`) Model Ready Out-of-the-Box**: Cactus Whistle 16M (`whistle.cact`) is embedded inside the APK (`MODELS[0]`) and works offline immediately on first launch alongside 7 downloadable Whisper and transcribe.cpp models.
           NOTES

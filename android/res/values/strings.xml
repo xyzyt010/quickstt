@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">QuickSTT</string>
-    <string name="accessibility_label">QuickSTT auto-typing</string>
-    <string name="accessibility_description">Types your dictation into the text field you are using. QuickSTT only reads the focused text field while it inserts the transcript.</string>
+    <string name="ime_label">QuickSTT Voice Auto-Type</string>
+    <string name="ime_subtype_label">English (Voice Dictation)</string>
 </resources>
