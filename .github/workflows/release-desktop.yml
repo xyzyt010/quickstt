@@ -1,0 +1,266 @@
+name: Desktop Release
+
+on:
+  push:
+    tags: [ "desktop-v*" ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. desktop-v2.0.0)"
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux-deb-appimage:
+    name: Linux deb + AppImage (Ubuntu 22.04 amd64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: quickstt-rust
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config cmake protobuf-compiler \
+            libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            libasound2-dev libpulse-dev portaudio19-dev \
+            libx11-dev libxi-dev libxtst-dev libxdo-dev libssl-dev \
+            libopenblas-dev \
+            qt6-base-dev libqt6svg6-dev qt6-multimedia-dev \
+            libgl1-mesa-dev \
+            file patchelf zsync desktop-file-utils
+          cargo install cargo-deb --locked || true
+          wget -q -O /tmp/linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x /tmp/linuxdeploy; sudo mv /tmp/linuxdeploy /usr/local/bin/linuxdeploy
+          wget -q -O /tmp/gtk-plugin.sh https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
+          chmod +x /tmp/gtk-plugin.sh; sudo mv /tmp/gtk-plugin.sh /usr/local/bin/linuxdeploy-plugin-gtk.sh
+      - name: Cargo build --release
+        working-directory: quickstt-rust
+        run: cargo build --release
+      - name: Build parakeet_engine (Parakeet TDT runtime)
+        working-directory: parakeet_engine
+        run: |
+          cargo build --release
+          mkdir -p ../quickstt-rust/target/release/tools/parakeet
+          cp -f target/release/parakeet_engine ../quickstt-rust/target/release/tools/parakeet/
+          file ../quickstt-rust/target/release/tools/parakeet/parakeet_engine
+      - name: Stage wakeword models for tarball
+        run: |
+          mkdir -p quickstt-rust/target/release/wakeword_models
+          cp -f wakeword_models/hey_jarvis_v0.1.onnx wakeword_models/alexa_v0.1.onnx quickstt-rust/target/release/wakeword_models/
+          cp -r quickstt-rust/wakeword_models quickstt-rust/target/release/wakeword_models_legacy || true
+      - name: Stage Photon worker (Parakeet Ultra/Redux runtime)
+        run: |
+          mkdir -p quickstt-rust/target/release/tools/photon
+          cp -f quickstt-rust/tools/photon/photon_worker.py quickstt-rust/target/release/tools/photon/
+          ls -lh quickstt-rust/target/release/tools/photon/
+      - name: Stage Canary + disfluency workers (NeMo SALM runtime, filler cleanup)
+        run: |
+          mkdir -p quickstt-rust/target/release/tools/canary quickstt-rust/target/release/tools/disfluency
+          cp -f quickstt-rust/tools/canary/canary_worker.py quickstt-rust/target/release/tools/canary/
+          cp -f quickstt-rust/tools/disfluency/disfluency_worker.py quickstt-rust/target/release/tools/disfluency/
+          ls -lh quickstt-rust/target/release/tools/canary/ quickstt-rust/target/release/tools/disfluency/
+      - name: Build whisper.cpp (Whisper GGML engine)
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/wcpp
+          cmake -S /tmp/wcpp -B /tmp/wcpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_C_FLAGS="-march=x86-64 -mtune=generic" -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
+          cmake --build /tmp/wcpp/build -j"$(nproc)" --target whisper-cli || cmake --build /tmp/wcpp/build -j"$(nproc)"
+          mkdir -p quickstt-rust/target/release/tools/whisper_cpp
+          BIN_W="$(find /tmp/wcpp/build -maxdepth 3 -type f -name whisper-cli | head -1)"
+          if [ -z "$BIN_W" ]; then BIN_W="$(find /tmp/wcpp/build -maxdepth 3 -type f -name main | head -1)"; fi
+          [ -n "$BIN_W" ] || { echo "whisper-cli binary not found"; find /tmp/wcpp/build -maxdepth 3 -type f | head -20; exit 1; }
+          cp -f "$BIN_W" quickstt-rust/target/release/tools/whisper_cpp/whisper-cli
+          file quickstt-rust/target/release/tools/whisper_cpp/whisper-cli
+      - name: Build transcribe.cpp (Nemotron GGUF engine)
+        run: |
+          git clone --depth 1 https://github.com/handy-computer/transcribe.cpp /tmp/tcpp
+          cmake -S /tmp/tcpp -B /tmp/tcpp/build -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DCMAKE_C_FLAGS="-march=x86-64 -mtune=generic" \
+            -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
+          cmake --build /tmp/tcpp/build -j"$(nproc)"
+          mkdir -p quickstt-rust/target/release/tools/nemotron
+          cp -f /tmp/tcpp/build/bin/transcribe-cli quickstt-rust/target/release/tools/nemotron/
+          file quickstt-rust/target/release/tools/nemotron/transcribe-cli
+          ldd quickstt-rust/target/release/tools/nemotron/transcribe-cli | head -20
+      - name: CMake native backend + Qt widget GUI (stt_service + quickstt-app)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DCMAKE_C_FLAGS="-march=x86-64 -mtune=generic" \
+            -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
+          cmake --build build --target stt_service_native QuickSTT_App -j"$(nproc)"
+          file build/stt_service build/quickstt-app
+          ldd build/quickstt-app | grep -i "not found" && exit 1 || true
+          cp -f build/stt_service quickstt-rust/target/release/stt_service
+          cp -f build/quickstt-app quickstt-rust/target/release/quickstt-app
+      - name: cargo deb
+        working-directory: quickstt-rust
+        run: |
+          cargo deb --no-build -p quickstt-slint
+          ls -lh target/debian/*.deb
+          mkdir -p dist
+          cp -f target/debian/*.deb dist/
+      - name: AppImage
+        working-directory: quickstt-rust
+        run: |
+          mkdir -p dist
+          BIN="target/release/quickstt-slint"
+          STT="target/release/stt_service"
+          cp -f assets/icon_app.png assets/quickstt.png
+          EXTRA=""
+          [[ -f "$STT" ]] && EXTRA="-e $STT"
+          linuxdeploy --appdir dist/AppDir -e "$BIN" $EXTRA -d assets/quickstt.desktop -i assets/quickstt.png --plugin gtk --output appimage > dist/linuxdeploy.log 2>&1 || true
+          tail -n 25 dist/linuxdeploy.log || true
+          mkdir -p dist/AppDir/usr/bin/wakeword_models
+          cp -f target/release/wakeword_models/*.onnx dist/AppDir/usr/bin/wakeword_models/ 2>/dev/null || true
+          mkdir -p dist/AppDir/usr/bin/tools/photon
+          cp -f target/release/tools/photon/photon_worker.py dist/AppDir/usr/bin/tools/photon/ 2>/dev/null || true
+          mkdir -p dist/AppDir/usr/bin/tools/canary dist/AppDir/usr/bin/tools/disfluency
+          cp -f target/release/tools/canary/canary_worker.py dist/AppDir/usr/bin/tools/canary/ 2>/dev/null || true
+          cp -f target/release/tools/disfluency/disfluency_worker.py dist/AppDir/usr/bin/tools/disfluency/ 2>/dev/null || true
+          mkdir -p dist/AppDir/usr/bin/tools/whisper_cpp
+          cp -f target/release/tools/whisper_cpp/whisper-cli dist/AppDir/usr/bin/tools/whisper_cpp/ 2>/dev/null || true
+          if ! ls dist/*.AppImage 1>/dev/null 2>&1; then
+            echo "AppImage failed — building plain tarball payload"
+            rm -rf dist/payload && mkdir -p dist/payload
+            cp -f "$BIN" dist/payload/QuickSTT
+            cp -f "$STT" dist/payload/stt_service 2>/dev/null || true
+            cp -f target/release/quickstt-app dist/payload/quickstt-app 2>/dev/null || true
+            cp -f target/release/stt_service dist/payload/stt_service 2>/dev/null || true
+            cp -f ../Source/mic_active.svg ../Source/mic_inactive.svg ../Source/Untitled-1.svg dist/payload/ 2>/dev/null || true
+            cp -f assets/icon_app.png dist/payload/icon_app.png 2>/dev/null || true
+            cp -r target/release/tools dist/payload/tools 2>/dev/null || true
+            cp -r target/release/wakeword_models dist/payload/wakeword_models 2>/dev/null || true
+            mkdir -p dist/payload/assets
+            cp -f assets/quickstt.desktop assets/icon_app.png dist/payload/assets/
+            tar czf "dist/quickstt-${GITHUB_REF_NAME:-local}-x86_64.tar.gz" -C dist/payload .
+            tar tzf "dist/quickstt-${GITHUB_REF_NAME:-local}-x86_64.tar.gz" | head -20
+          fi
+          ls -lh dist/*
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: |
+            quickstt-rust/dist/*.deb
+            quickstt-rust/dist/*.AppImage
+            quickstt-rust/dist/*.tar.gz
+            quickstt-rust/dist/SHA256SUMS
+
+  build-windows:
+    name: Windows Portable (Qt + Rust)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: quickstt-rust
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2019_64
+          modules: 'qtmultimedia'
+      - name: Cargo build (Rust GUI)
+        working-directory: quickstt-rust
+        run: cargo build -p quickstt-slint --release
+      - name: CMake Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release || echo "Qt not available, skipping"
+          cmake --build build --target QuickSTT_App -j 4 || echo "Qt build skipped"
+          cmake --build build --target stt_service_native -j 4 || echo "stt_service build skipped"
+          Get-ChildItem build\*.exe -ErrorAction SilentlyContinue | Select-Object Name,Length
+          Get-ChildItem QuickSTT_App\*.exe -ErrorAction SilentlyContinue | Select-Object Name,Length
+          exit 0
+      - name: Build Portable
+        shell: pwsh
+        if: always()
+        run: |
+          if (Test-Path .\BuildApp.bat) { .\BuildApp.bat } else { echo "BuildApp.bat not found" }
+          if (Test-Path QuickSTT_Portable.exe) { dir QuickSTT_Portable.exe }
+          if (Test-Path QuickSTT_DirectDownload\SHA256SUMS.txt) { Get-Content QuickSTT_DirectDownload\SHA256SUMS.txt | Select-Object -First 10 }
+      - name: Upload Windows artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: |
+            QuickSTT_Portable.exe
+            QuickSTT_DirectDownload/SHA256SUMS.txt
+            QuickSTT_DirectDownload/release_manifest.json
+            build/stt_service.exe
+            QuickSTT_App/QuickSTT_App.exe
+            quickstt-rust/target/release/QuickSTT.exe
+
+  publish-release:
+    name: Publish Desktop Release
+    needs: [build-linux-deb-appimage, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.tar.gz" -o -name "SHA256SUMS*" -o -name "QuickSTT_Portable.exe" -o -name "QuickSTT_DirectDownload/SHA256SUMS.txt" -o -name "QuickSTT.exe" -o -name "QuickSTT_App.exe" \) -exec cp -f {} release/ \;
+          if [ -f release/SHA256SUMS.txt ]; then
+            mv -f release/SHA256SUMS.txt release/SHA256SUMS_PORTABLE_WIN.txt
+          fi
+          ls -lh release/
+          ( cd release && sha256sum $(find . -maxdepth 1 -type f ! -name SHA256SUMS* -printf '%f\n' | sort) > SHA256SUMS && cat SHA256SUMS )
+      - name: Release notes
+        run: |
+          VER="${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
+          # A quoted heredoc: backticked names must reach the notes as text.
+          cat > /tmp/notes.md <<'NOTES'
+          ## QuickSTT Desktop __VER__ — Linux · Windows
+
+          Floating offline voice typing pill — wakeword, VAD, tray, global hotkeys, stt_service, Qt widget app.
+
+          ### Desktop release
+          - Windows: `QuickSTT_Portable.exe` (if attached) — full Qt widget app.
+          - Linux: `.deb` (Mint/Ubuntu/Debian) or portable `.tar.gz`.
+
+          ### Install — Linux
+          ```bash
+          wget -O /tmp/quickstt.deb https://github.com/__REPO__/releases/download/__VER__/quickstt_2.0.0.alpha.18-1_amd64.deb
+          sudo apt install -y /tmp/quickstt.deb && quickstt &
+          ```
+          Or portable tarball:
+          ```bash
+          wget -O /tmp/quickstt.tar.gz https://github.com/__REPO__/releases/download/__VER__/quickstt-v2.0.0-alpha.26-x86_64.tar.gz
+          mkdir -p ~/quickstt && tar xzf /tmp/quickstt.tar.gz -C ~/quickstt && ~/quickstt/QuickSTT &
+          ```
+
+          Windows: download `QuickSTT_Portable.exe` (if attached) — portable, no installer.
+
+          ### Checksums
+          See `SHA256SUMS`.
+          NOTES
+          sed -i "s|__VER__|${VER}|g; s|__REPO__|${REPO}|g" /tmp/notes.md
+          cat /tmp/notes.md
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body_path: /tmp/notes.md
+          generate_release_notes: true
