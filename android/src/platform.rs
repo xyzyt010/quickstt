@@ -1211,6 +1211,57 @@ pub fn commit_final_text(text: &str) -> bool {
     }
 }
 
+/// Discard any live composing text that was typed during the turn.
+pub fn cancel_typing_turn() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "cancelTypingTurn",
+                "()Z",
+                &[],
+            )?;
+            value.z().ok()
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
+}
+
+/// True once the user has finished the onboarding pages at least once.
+pub fn onboarding_done() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        files_dir()
+            .map(|dir| dir.join("quickstt").join("onboarding_done"))
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        true
+    }
+}
+
+/// Remember the onboarding has been completed.
+pub fn save_onboarding_done() {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(dir) = files_dir() {
+            let dir = dir.join("quickstt");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("onboarding_done"), "1");
+        }
+    }
+}
+
 /// Call a static method of the Java bubble helper.
 ///
 /// The helper lives in `java/ai/quickstt/app/Bubble.java` and is compiled

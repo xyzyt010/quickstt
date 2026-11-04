@@ -1,8 +1,13 @@
 # QuickSTT for Android
 
 Touch-first port of QuickSTT. The dashboard is a **new** Slint scene
-(`ui/android.slint`) designed for phones — bottom navigation, a thumb-reachable
-record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window.
+(`ui/android.slint`) designed for phones — bottom navigation, a one-glance
+Listen screen, 48 DIP minimum targets — not a shrunken copy of the desktop
+window.
+
+**Releases of this app are Android-only**: `v2.0.0-alpha.25+` ship the APK and
+`SHA256SUMS` and nothing else. Windows and Linux are not rebuilt or touched by
+an Android release.
 
 ## Status
 
@@ -18,18 +23,18 @@ record orb, 48 DIP minimum targets — not a shrunken copy of the desktop window
 | **On-device transcription** (three engines for arm64-v8a) | ✅ implemented |
 | **Clipboard copy** of the finished transcript | ✅ implemented |
 | **Floating squircle pill over other apps** (`TYPE_APPLICATION_OVERLAY`) | ✅ implemented |
-| **Interactive squircle pill** (48dp squircle icon expands to 248x54dp squircle bar with START / STOP & round loader) | ✅ implemented (`Bubble.java`) |
+| **Interactive squircle pill** (translucent 48dp compact icon → grey borderless 248x54dp expanded bar, white live waveforms from the mic RMS history, sharp ✕ / ✓ buttons, round onload-offload spinner) | ✅ implemented (`Bubble.java`) |
 | **Foreground service** (the bubble keeps working in other apps) | ✅ implemented (`SpeechService`) |
 | **Battery optimisation exemption** (the app is not put to sleep) | ✅ implemented |
 | **Model download in-app** (7 downloads + 1 bundled model, real byte progress) | ✅ implemented (Android HTTP stack) |
 | **Bundled Cactus Whistle 16M** (works offline on first launch, no download) | ✅ implemented (`assets/models/whistle.cact`) |
-| **Automatic onload / offload in RAM** on transcription start & stop with round loading spinner | ✅ implemented (persistent `--worker` + pinned buffers) |
+| **Automatic onload on start & 30 s idle auto-offload** with round loading spinner | ✅ implemented (persistent `--worker` + pinned buffers) |
 | **Model self-test** ("Test this model" — records 4 s, runs the engine) | ✅ implemented |
-| **Automatic & live real-time typing into focused text boxes** (`QuickSttInputMethodService` + clipboard fallback) | ✅ implemented |
+| **Automatic & live real-time typing into focused text boxes** (`QuickSttInputMethodService` voice keyboard — `setComposingText` live, `commitText` on stop; clipboard fallback) | ✅ implemented |
+| **5-page interactive onboarding** (dark grey, vector-drawn; mic / overlay / voice keyboard / bundled model) | ✅ implemented |
 | **Share sheet** for the last transcript | ✅ implemented |
-| Setup steps / how-to-use card in the Listen tab | ✅ implemented |
-| Activity log + status line (every action says what it did) | ✅ implemented |
-| Tab bar with real icons and an active marker | ✅ implemented |
+| **Activity log + status line (every action says what it did)** | ✅ implemented |
+| **Tab bar with real icons and an active marker** | ✅ implemented |
 | Always-on wake word (background mic) | ⏳ needs the foreground service to record |
 
 ## The engines are real
@@ -102,8 +107,10 @@ the bundled engines can really load on a phone:
 
 Cactus Whistle 16M is the **default model** and ships inside the APK
 (`assets/models/whistle.cact`): it is extracted into the app's private model
-directory on first launch and onloaded into RAM, so dictation works
-immediately with no network and no download step. The other models are
+directory on first launch and onloaded, so dictation works immediately with no
+network and no download step. The model onloads automatically when dictation
+starts, and a RAM watchdog offloads it automatically **30 seconds after you
+stop speaking** (Settings → Memory). Every other model is
 downloaded from the same HuggingFace sources the desktop app uses, so one
 download serves both. The Models tab renders the list with the real
 installed / downloading / onloaded state — there is no placeholder row and no
@@ -131,28 +138,35 @@ coming back:
   when the activity is resumed,
 * and the permission is polled once a second as a fallback.
 
-The moment the permission appears, the bubble is shown — without the user
-having to press the button a second time. The button itself shows the state
-of the bubble (**Enable** / **Disable**), not the state of the permission.
+The moment the permission appears, the pill is ready to be shown from
+**Settings → Floating pill** — it is never forced onto the screen and is off at
+launch. (Tap **Show the pill** in Settings to summon it; tap **✕** in the pill
+to discard a take.)
 
 ### The bubble itself
 
 It is built by a small Java helper (`java/ai/quickstt/app/Bubble.java`),
 because a `View.OnClickListener` cannot be created from JNI. The helper:
 
-* draws an always-on **48 dp rounded-corner icon** with a live 5-bar white
-  waveform and a subtle purple rim — no microphone icons,
-* smoothly morphs on press into a **circular stadium pill** (236 × 54 dp,
-  27 dp radius) with a pure black background, slight purple ambient
-  highlights and a 17-bar waveform animated by `Choreographer` at the
-  display refresh rate (60/120 fps) from the real AAudio level,
-* expands and starts recording in one tap; **STOP** finishes the take,
-  **TYPE** types the transcript into the app in front (or copies it), and
-  the chevron folds it back into the icon,
+* draws a **48 dp translucent grey squircle icon** with a live 5-bar white
+  waveform — compact, borderless, no microphone icons; one tap starts
+  dictation immediately,
+* smoothly morphs on press into a **borderless grey squircle bar**
+  (248 × 54 dp, 23 dp radius — a pill-shaped end, never a stadium), driven by
+  `Choreographer` at the display refresh rate (60/120 fps) from a rolling
+  history of the real AAudio RMS level — what you see *is* the microphone,
+* while recording it shows exactly two sharp, minimal buttons: **✕** stop and
+  discard the take (nothing is typed or copied), and **✓** stop and type
+  (or copy when no text box is focused),
+* shows a round circular loading arc while the model onloads / transcribes /
+  offloads — never a progress circle you cannot trust,
 * can be **dragged** anywhere on the screen,
 * uses the *application* context, so it survives the activity that made it,
 * reports every failure back to Rust, so the app can say what went wrong
   instead of showing a bubble that is not there.
+
+The pill **never appears at launch**: it shows up only when the user turns it
+on in Settings (or on onboarding page 2).
 
 The helper is looked up through the **Activity's class loader**, not with
 `FindClass`: on a thread that was attached with `AttachCurrentThread`,
@@ -161,15 +175,14 @@ invisible to it. The JNI entry points are also bound with
 `RegisterNatives` during startup, so a dex class loaded through the app's
 `PathClassLoader` never fails with `UnsatisfiedLinkError`.
 
-The class is compiled with `javac`, turned into a `classes.dex` with `d8`
+The classes are compiled with `javac`, turned into a `classes.dex` with `d8`
 (including every inner class) and added to the APK by `build-apk.ps1`
 (cargo-apk cannot put a dex into an APK). The manifest therefore needs
 `android:hasCode="true"`. When the dex is missing, the app falls back to a
 plain read-out bubble — it never breaks.
 
-The bubble is *persistent*: the Settings tab has a switch that keeps it on
-across apps and across launches. It is also shown automatically while a
-recording runs and when the transcript arrives.
+The bubble is *persistent* only via an explicit opt-in: the Settings tab has a
+switch that keeps it on across apps. It is never shown automatically.
 
 ## Testing it on the phone
 
@@ -195,31 +208,40 @@ installer did not unpack them, `Engine.java` unpacks one itself.
 
 ## Typing into other apps
 
-`platform::inject_text()` types with **real key events**: the characters are
-turned into `KeyEvent`s by `KeyCharacterMap.getEvents()` (so capitals and
-punctuation come out right) and pushed into the input stack with
-`InputManager.injectInputEvent` — the same path a hardware keyboard uses.
+QuickSTT ships a **standard Android voice keyboard**
+(`ai.quickstt.app.QuickSttInputMethodService`, `BIND_INPUT_METHOD` — the same
+API Gboard's voice typing uses). Google Play Protect's *Enhanced Fraud
+Protection* automatically blocks any sideloaded APK that declares
+`RECEIVE_SMS`, `READ_SMS`, `BIND_NOTIFICATION_LISTENER_SERVICE` or
+`BIND_ACCESSIBILITY_SERVICE`, so typing is built on the IME path:
 
-The flow in the app:
+1. The app types **live** while you speak: every partial transcript is pushed
+   with `InputConnection.setComposingText()`, and
+2. the final text is committed with `InputConnection.commitText()` as soon as
+   recording stops — or copied once to the clipboard when no text box is
+   focused.
 
-1. tap the orb (the bubble appears over everything),
-2. switch to the app you want to write in,
-3. speak — after 1.4 s of silence the recording ends by itself, the text is
-   transcribed and **typed into the app in front**.
+There is no root, no accessibility service and no signature permission — by
+design:
 
-The text is *always* copied to the clipboard as well, so a phone that refuses
-the injection still gives the user the text (long-press → Paste), and the
-bubble says which of the two happened.
+* `INJECT_EVENTS` is a **signature** permission; an installed-app grant is
+  impossible without root/userdebug. It was removed from the manifest.
+* Accessibility (`BIND_ACCESSIBILITY_SERVICE`) is what Play Protect blocks the
+  APK for. It was removed from the manifest.
+* `BIND_INPUT_METHOD` is the only supported path for cross-app text injection
+  without either of those. The cost: QuickSTT must be enabled and selected as
+  the on-screen keyboard. Onboarding page 3 and **Settings → Voice Auto-Type**
+  walk through exactly that (`ACTION_INPUT_METHOD_SETTINGS`, then the system
+  input-method picker).
 
-`INJECT_EVENTS` is a system permission, so Android only allows the injection
-for apps that hold it. On a rooted phone or a userdebug build:
-
-```bash
-adb shell pm grant ai.quickstt.app android.permission.INJECT_EVENTS
-```
-
-Without it the app falls back to the clipboard and says so — the Settings tab
-explains this as well.
+While QuickSTT Voice Auto-Type is the active keyboard, a compact 56 dp grey
+Squircle bar with **⌨ Keyboard** (switch back to your previous keyboard in one
+tap), **● START / ■ STOP** and **⌫** replaces the stock keyboard on text
+fields. When QuickSTT is *not* the active keyboard, the floating pill still
+works (tap to dictate) and the finished transcript is copied to the clipboard —
+tap the text field and paste. As a fast on-device spot check, Listen →
+**Send test line to the focused text box** types `QuickSTT ✓ — typing works.`
+through the same path.
 
 ## Four traps that made every button look dead
 
@@ -352,10 +374,13 @@ adb install -r target\release\apk\quickstt-android.apk
 ```
 
 The manifest is generated from `[package.metadata.android]` in `Cargo.toml` —
-cargo-apk 0.10 ignores a hand-written `AndroidManifest.xml`. All eleven
+cargo-apk 0.10 ignores a hand-written `AndroidManifest.xml`. The eleven
 permissions (internet, mic, foreground service, overlay, notifications, wake
-lock, vibrate, input injection) are declared there and verified with
-`aapt2 dump badging`.
+lock, vibrate, battery-optimization exemption) are declared there and verified
+with `aapt2 dump badging`. There is **no** accessibility, SMS, notification or
+input-injection permission — the typing path is the standard
+`BIND_INPUT_METHOD` keyboard, which is why Play Protect does not block
+sideloaded installs.
 
 Preview the exact same UI on Windows/Linux without a device:
 

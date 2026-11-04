@@ -16,238 +16,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-linux-deb-appimage:
-    name: Linux deb + AppImage (Ubuntu 22.04 amd64)
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: quickstt-rust
-      - name: System deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config cmake protobuf-compiler \
-            libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
-            libasound2-dev libpulse-dev portaudio19-dev \
-            libx11-dev libxi-dev libxtst-dev libxdo-dev libssl-dev \
-            libopenblas-dev \
-            qt6-base-dev libqt6svg6-dev qt6-multimedia-dev \
-            libgl1-mesa-dev \
-            file patchelf zsync desktop-file-utils
-          cargo install cargo-deb --locked || true
-          # linuxdeploy
-          wget -q -O /tmp/linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x /tmp/linuxdeploy; sudo mv /tmp/linuxdeploy /usr/local/bin/linuxdeploy
-          wget -q -O /tmp/gtk-plugin.sh https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
-          chmod +x /tmp/gtk-plugin.sh; sudo mv /tmp/gtk-plugin.sh /usr/local/bin/linuxdeploy-plugin-gtk.sh
-      - name: Cargo build --release
-        working-directory: quickstt-rust
-        run: cargo build --release
-      - name: Build parakeet_engine (Parakeet TDT runtime)
-        working-directory: parakeet_engine
-        run: |
-          cargo build --release
-          mkdir -p ../quickstt-rust/target/release/tools/parakeet
-          cp -f target/release/parakeet_engine ../quickstt-rust/target/release/tools/parakeet/
-          file ../quickstt-rust/target/release/tools/parakeet/parakeet_engine
-      - name: Stage wakeword models for tarball
-        run: |
-          mkdir -p quickstt-rust/target/release/wakeword_models
-          cp -f wakeword_models/hey_jarvis_v0.1.onnx wakeword_models/alexa_v0.1.onnx quickstt-rust/target/release/wakeword_models/
-          cp -r quickstt-rust/wakeword_models quickstt-rust/target/release/wakeword_models_legacy || true
-      - name: Stage Photon worker (Parakeet Ultra/Redux runtime)
-        run: |
-          mkdir -p quickstt-rust/target/release/tools/photon
-          cp -f quickstt-rust/tools/photon/photon_worker.py quickstt-rust/target/release/tools/photon/
-          ls -lh quickstt-rust/target/release/tools/photon/
-      - name: Stage Canary + disfluency workers (NeMo SALM runtime, filler cleanup)
-        run: |
-          mkdir -p quickstt-rust/target/release/tools/canary quickstt-rust/target/release/tools/disfluency
-          cp -f quickstt-rust/tools/canary/canary_worker.py quickstt-rust/target/release/tools/canary/
-          cp -f quickstt-rust/tools/disfluency/disfluency_worker.py quickstt-rust/target/release/tools/disfluency/
-          ls -lh quickstt-rust/target/release/tools/canary/ quickstt-rust/target/release/tools/disfluency/
-      - name: Build whisper.cpp (Whisper GGML engine)
-        run: |
-          git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/wcpp
-          # Static link: the deb ships one self-contained binary, no .so to
-          # hunt (a shared build dies with "libwhisper.so.1 not found").
-          # Portable baseline: CI runners carry AVX2/AVX-512 and ggml bakes
-          # compile-time SIMD in — without this the binary dies SIGILL
-          # ("Illegal instruction") on older Mint CPUs. x86-64 baseline runs
-          # everywhere; Tiny is small enough that the speed cost is noise.
-          cmake -S /tmp/wcpp -B /tmp/wcpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_C_FLAGS="-march=x86-64 -mtune=generic" -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
-          cmake --build /tmp/wcpp/build -j"$(nproc)" --target whisper-cli || cmake --build /tmp/wcpp/build -j"$(nproc)"
-          mkdir -p quickstt-rust/target/release/tools/whisper_cpp
-          BIN_W="$(find /tmp/wcpp/build -maxdepth 3 -type f -name whisper-cli | head -1)"
-          if [ -z "$BIN_W" ]; then BIN_W="$(find /tmp/wcpp/build -maxdepth 3 -type f -name main | head -1)"; fi
-          [ -n "$BIN_W" ] || { echo "whisper-cli binary not found"; find /tmp/wcpp/build -maxdepth 3 -type f | head -20; exit 1; }
-          cp -f "$BIN_W" quickstt-rust/target/release/tools/whisper_cpp/whisper-cli
-          file quickstt-rust/target/release/tools/whisper_cpp/whisper-cli
-      - name: Build transcribe.cpp (Nemotron GGUF engine)
-        run: |
-          git clone --depth 1 https://github.com/handy-computer/transcribe.cpp /tmp/tcpp
-          # Portable baseline: ggml bakes -march=native in by default (GGML_NATIVE=ON),
-          # so a runner with AVX-512 produces a binary that dies with SIGILL
-          # ("Illegal instruction") on older CPUs — every transcription then fails
-          # while the model and the audio are fine. x86-64 baseline runs everywhere.
-          cmake -S /tmp/tcpp -B /tmp/tcpp/build -DCMAKE_BUILD_TYPE=Release \
-            -DGGML_NATIVE=OFF \
-            -DCMAKE_C_FLAGS="-march=x86-64 -mtune=generic" \
-            -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
-          cmake --build /tmp/tcpp/build -j"$(nproc)"
-          mkdir -p quickstt-rust/target/release/tools/nemotron
-          cp -f /tmp/tcpp/build/bin/transcribe-cli quickstt-rust/target/release/tools/nemotron/
-          file quickstt-rust/target/release/tools/nemotron/transcribe-cli
-          ldd quickstt-rust/target/release/tools/nemotron/transcribe-cli | head -20
-      - name: CMake native backend + Qt widget GUI (stt_service + quickstt-app)
-        run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -DGGML_NATIVE=OFF \
-            -DCMAKE_C_FLAGS="-march=x86-64 -mtune=generic" \
-            -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
-          cmake --build build --target stt_service_native QuickSTT_App -j"$(nproc)"
-          file build/stt_service build/quickstt-app
-          ldd build/quickstt-app | grep -i "not found" && exit 1 || true
-          cp -f build/stt_service quickstt-rust/target/release/stt_service
-          cp -f build/quickstt-app quickstt-rust/target/release/quickstt-app
-      - name: cargo deb
-        working-directory: quickstt-rust
-        run: |
-          cargo deb --no-build -p quickstt-slint
-          ls -lh target/debian/*.deb
-          mkdir -p dist
-          cp -f target/debian/*.deb dist/
-          dpkg-deb -I dist/*.deb | head -40
-          dpkg -c dist/*.deb | head -30
-      - name: AppImage
-        working-directory: quickstt-rust
-        run: |
-          mkdir -p dist
-          BIN="target/release/quickstt-slint"
-          STT="target/release/stt_service"
-          # linuxdeploy requires the icon basename to match desktop Icon= entry
-          cp -f assets/icon_app.png assets/quickstt.png
-          EXTRA=""
-          [[ -f "$STT" ]] && EXTRA="-e $STT"
-          linuxdeploy --appdir dist/AppDir -e "$BIN" $EXTRA -d assets/quickstt.desktop -i assets/quickstt.png --plugin gtk --output appimage > dist/linuxdeploy.log 2>&1 || true
-          # Surface WHY the AppImage failed (the gtk plugin often cannot
-          # auto-detect the GTK version) instead of silently shipping only
-          # the tarball.
-          tail -n 25 dist/linuxdeploy.log || true
-          # Bundle the OWW wakeword heads next to the binary inside the AppDir
-          # (the app's exe-adjacent lookup finds them there on first run).
-          mkdir -p dist/AppDir/usr/bin/wakeword_models
-          cp -f target/release/wakeword_models/*.onnx dist/AppDir/usr/bin/wakeword_models/ 2>/dev/null || true
-          # Bundle the Photon worker the same way (deb covers it via assets;
-          # AppImage/tarball need it next to the binary).
-          mkdir -p dist/AppDir/usr/bin/tools/photon
-          cp -f target/release/tools/photon/photon_worker.py dist/AppDir/usr/bin/tools/photon/ 2>/dev/null || true
-          # Bundle the Canary + disfluency workers the same way.
-          mkdir -p dist/AppDir/usr/bin/tools/canary dist/AppDir/usr/bin/tools/disfluency
-          cp -f target/release/tools/canary/canary_worker.py dist/AppDir/usr/bin/tools/canary/ 2>/dev/null || true
-          cp -f target/release/tools/disfluency/disfluency_worker.py dist/AppDir/usr/bin/tools/disfluency/ 2>/dev/null || true
-          # Bundle whisper-cli the same way (the Whisper engine binary).
-          mkdir -p dist/AppDir/usr/bin/tools/whisper_cpp
-          cp -f target/release/tools/whisper_cpp/whisper-cli dist/AppDir/usr/bin/tools/whisper_cpp/ 2>/dev/null || true
-          if ! ls dist/*.AppImage 1>/dev/null 2>&1; then
-            echo "AppImage failed — building plain tarball payload"
-            rm -rf dist/payload && mkdir -p dist/payload
-            cp -f "$BIN" dist/payload/QuickSTT
-            cp -f "$STT" dist/payload/stt_service 2>/dev/null || true
-            cp -f target/release/quickstt-app dist/payload/quickstt-app 2>/dev/null || true
-            cp -f target/release/stt_service dist/payload/stt_service 2>/dev/null || true
-            # SVG assets consumed by the Qt widget app at runtime
-            cp -f ../Source/mic_active.svg ../Source/mic_inactive.svg ../Source/Untitled-1.svg dist/payload/ 2>/dev/null || true
-            cp -f assets/icon_app.png dist/payload/icon_app.png 2>/dev/null || true
-            cp -r target/release/tools dist/payload/tools 2>/dev/null || true
-            cp -r target/release/wakeword_models dist/payload/wakeword_models 2>/dev/null || true
-            mkdir -p dist/payload/assets
-            cp -f assets/quickstt.desktop assets/icon_app.png dist/payload/assets/
-            tar czf "dist/quickstt-${GITHUB_REF_NAME:-local}-x86_64.tar.gz" -C dist/payload .
-            tar tzf "dist/quickstt-${GITHUB_REF_NAME:-local}-x86_64.tar.gz" | head -20
-          fi
-          ls -lh dist/*
-      - name: SHA256SUMS
-        working-directory: quickstt-rust
-        run: |
-          cd dist
-          rm -f SHA256SUMS
-          sha256sum *.deb 2>/dev/null >> SHA256SUMS || true
-          sha256sum *.AppImage 2>/dev/null >> SHA256SUMS || true
-          sha256sum *.tar.gz 2>/dev/null >> SHA256SUMS || true
-          cat SHA256SUMS
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-dist
-          path: |
-            quickstt-rust/dist/*.deb
-            quickstt-rust/dist/*.AppImage
-            quickstt-rust/dist/*.tar.gz
-            quickstt-rust/dist/SHA256SUMS
-
-  build-windows:
-    name: Windows Portable (Qt + Rust)
-    runs-on: windows-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: quickstt-rust
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.7.3'
-          host: windows
-          target: desktop
-          arch: win64_msvc2019_64
-          modules: 'qtmultimedia'
-      - name: Cargo build (Rust GUI)
-        working-directory: quickstt-rust
-        run: cargo build -p quickstt-slint --release
-      - name: CMake Configure
-        shell: pwsh
-        # `dir <wildcard>` throws when nothing matches, and the runner runs
-        # pwsh with $ErrorActionPreference = 'stop' — that alone failed the
-        # step (and with it the whole Windows job).
-        run: |
-          cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release || echo "Qt not available, skipping"
-          cmake --build build --target QuickSTT_App -j 4 || echo "Qt build skipped"
-          cmake --build build --target stt_service_native -j 4 || echo "stt_service build skipped"
-          Get-ChildItem build\*.exe -ErrorAction SilentlyContinue | Select-Object Name,Length
-          Get-ChildItem QuickSTT_App\*.exe -ErrorAction SilentlyContinue | Select-Object Name,Length
-          exit 0
-      - name: Build Portable
-        shell: pwsh
-        if: always()
-        run: |
-          if (Test-Path .\BuildApp.bat) { .\BuildApp.bat } else { echo "BuildApp.bat not found" }
-          if (Test-Path QuickSTT_Portable.exe) { dir QuickSTT_Portable.exe }
-          if (Test-Path QuickSTT_DirectDownload\SHA256SUMS.txt) { Get-Content QuickSTT_DirectDownload\SHA256SUMS.txt | Select-Object -First 10 }
-      - name: Upload Windows artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-dist
-          path: |
-            QuickSTT_Portable.exe
-            QuickSTT_DirectDownload/SHA256SUMS.txt
-            QuickSTT_DirectDownload/release_manifest.json
-            build/stt_service.exe
-            QuickSTT_App/QuickSTT_App.exe
-            quickstt-rust/target/release/QuickSTT.exe
-
   build-android:
     name: Android APK (arm64-v8a)
     runs-on: ubuntu-22.04
-    # A broken Android build must never block the desktop release.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -375,7 +146,9 @@ jobs:
             java/ai/quickstt/app/QuickSttInputMethodService.java
           "$BUILD_TOOLS"/d8 --min-api 26 --output target/dex/dex \
             target/dex/classes/ai/quickstt/app/*.class
-          # Our own manifest: it declares the foreground service and accessibility service.
+          # Our own manifest: it declares the foreground service and the
+          # Voice Auto-Type input method (no accessibility service, so
+          # Play Protect does not block sideloaded installs).
           VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           MAJOR="${VERSION%%.*}"; REST="${VERSION#*.}"
           MINOR="${REST%%.*}"; PATCH="${REST#*.}"
@@ -403,7 +176,7 @@ jobs:
               ("libneedle.so", "prebuilt/needle-arm64-v8a"),
               ("libtranscribe-cli.so", "prebuilt/transcribe-cli-arm64-v8a"),
           ]
-          # Our own manifest and compiled resources (foreground + accessibility services).
+          # Our own manifest and compiled resources (foreground service + IME).
           manifest_entries = {}
           with zipfile.ZipFile("target/manifest/manifest.apk") as zm:
               for mitem in zm.infolist():
@@ -457,7 +230,7 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
-    needs: [build-linux-deb-appimage, build-android]
+    needs: [build-android]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -468,91 +241,46 @@ jobs:
       - name: Collect
         run: |
           mkdir -p release
-          find artifacts -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.tar.gz" -o -name "QuickSTT_Portable.exe" -o -name "QuickSTT.exe" -o -name "quickstt-android.apk" \) -exec cp -f {} release/ \;
-          rm -f release/SHA256SUMS release/SHA256SUMS.txt
-          # The Android asset gets a stable, descriptive name.
-          if [ -f release/quickstt-android.apk ]; then
-            mv -f release/quickstt-android.apk release/quickstt-android-release.apk
-          fi
-          # GitHub rewrites "~" in asset names, so normalise the local name the
-          # same way before hashing — the SHA256SUMS entries must match the
-          # files a user actually downloads.
-          for f in release/*; do
-            [ -f "$f" ] || continue
-            base=$(basename "$f")
-            clean=$(printf '%s' "$base" | tr '~' '.')
-            [ "$base" = "$clean" ] || mv -f "$f" "release/$clean"
-          done
+          # Android-only releases from this tag on: no desktop artifacts.
+          find artifacts -type f -name "quickstt-android.apk" -exec cp -f {} release/ \;
+          mv -f release/quickstt-android.apk release/quickstt-android-release.apk
           ls -lh release/
-          # Never hash SHA256SUMS itself: tee would truncate it while sha256sum
-          # is still reading, producing the hash of an empty file.
-          ( cd release && sha256sum $(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort) > SHA256SUMS && cat SHA256SUMS )
+          ( cd release && sha256sum quickstt-android-release.apk > SHA256SUMS && cat SHA256SUMS )
       - name: Release notes
         run: |
           VER="${{ github.ref_name }}"
           REPO="${{ github.repository }}"
-          # Take the name cargo-deb actually produced instead of rebuilding it
-          # from the tag: the .deb version comes from the desktop crate, and a
-          # tag that moved ahead of it would otherwise link to a 404.
-          DEB_NAME=$(basename "$(find release -name '*.deb' -print -quit)")
-          echo "DEB_NAME=$DEB_NAME"
           # A quoted heredoc: backticked names must reach the notes as text.
-          # An unquoted one runs `Bubble.java`, `d8`, `#050508` … as commands
-          # and silently replaces them with nothing. __TOKENS__ are filled in
-          # after the heredoc, so no shell expansion happens here.
+          # __TOKENS__ are filled in afterwards via sed.
           cat > /tmp/notes.md <<'NOTES'
-          ## QuickSTT __VER__ — Ubuntu/Debian amd64 (Mint 21/22)
+          ## QuickSTT __VER__ — Android (arm64-v8a)
 
-          Floating offline voice typing pill — wakeword, VAD, tray, global hotkeys.
-          Models download in-app: Vosk small EN 50M · Parakeet TDT 0.6B v3 INT8 · Phonon-2 0.6B INT8 (Fermion Research, CC-BY-4.0) · Nemotron 3.5 ASR Streaming 0.6B Q8_0 (716MB, transcribe.cpp).
-          Full C++ Qt widget app included — run `quickstt-app` for the classic Dashboard + Pill UI.
+          On-device, offline voice dictation for Android: a translucent floating
+          pill you tap anywhere, plus a standard Voice Auto-Type keyboard that
+          types live into any text box — no accessibility service, no root,
+          nothing leaves the phone.
 
-          ### What's new in this release (widget app)
-          - New model: **Phonon-2 0.6B INT8** (Fermion Research, CC-BY-4.0) — 5.21% WER compact English model running on the same ONNX Runtime stack as Parakeet (Windows/Linux), with NOTICE + license shipped into the model dir.
-          - Fixed backend crash-loop on Linux: libvosk.so now auto-provisioned with Vosk models; missing runtime no longer kills stt_service.
-          - Models install to ~/.local/share/QuickSTT/models (shared with the Rust app + native service) — no more read-only /usr/lib failures.
-          - Real SVG mic/app icons everywhere (pill, tray at all DPI sizes) — no more blue-dot fallback.
-          - Robust Quit: engine killed on exit, tray item removed, no restart storms (non-blocking backoff).
-          - **Ctrl+Shift+Space** toggles the new bottom-center micro-pill overlay · hold **Ctrl+Space** = push-to-talk (X11). Wayland: bind a compositor shortcut to `quickstt-app --toggle-dictation`.
-          - Micro-pill overlay types into any focused window via xdotool (or clipboard), with live waveform + transcribing animation.
-          - Polished model dropdown (dark rounded menu, hover selection).
-
-          ### Linux Mint / Ubuntu / Debian — one-liner
-          ```bash
-          wget -O /tmp/quickstt.deb https://github.com/__REPO__/releases/download/__VER__/__DEB__
-          sudo apt install -y /tmp/quickstt.deb && quickstt &
-          ```
-          Or tarball (no sudo):
-          ```bash
-          wget -O /tmp/quickstt.tar.gz https://github.com/__REPO__/releases/download/__VER__/quickstt-__VER__-x86_64.tar.gz
-          mkdir -p ~/quickstt && tar xzf /tmp/quickstt.tar.gz -C ~/quickstt && ~/quickstt/QuickSTT &
-          ```
-
-          ### First-run setup
-          1. Pill appears bottom-center. Right-click it → Dashboard → Models → **Download** next to *Vosk Small EN (50M)* and *Parakeet TDT 0.6B v3*.
-          2. Tray icon in panel: left-click toggles pill, menu has Show / Hide / Dashboard / Quit.
-          3. Hotkeys: **Ctrl+Shift+Space** toggle micro-pill dictation · hold **Ctrl+Space** push-to-talk · Ctrl+Shift+H show/hide main pill.
-
-          ### Checksums
-          See `SHA256SUMS`.
+          ### Fixed & improved in this release (Android __VER__)
+          - **Google Play Protect no longer blocks the install**: `BIND_ACCESSIBILITY_SERVICE` was removed in favour of Android's standard Voice Input Method (`QuickSttInputMethodService`, `BIND_INPUT_METHOD`). No SMS, notification-listener or accessibility permissions are declared.
+          - **Floating pill only on tap**: the compact 48dp squircle is translucent grey and never appears at launch — enable it in Settings → Floating pill. One tap starts dictation immediately.
+          - **Grey, borderless expanded pill** (23dp squircle radius): no border, grey body, white bars driven by a rolling history of real microphone RMS levels.
+          - **Two sharp minimal buttons while recording**: ✕ stop &amp; discard (nothing is typed or copied) and ✓ stop &amp; type.
+          - **Direct typing into the native keyboard**: partial transcripts stream live via `setComposingText` while you speak and commit on stop; with no text box focused, the transcript is copied once to the clipboard. Enable “QuickSTT Voice Auto-Type” in Settings → Voice Auto-Type (or the onboarding) to use it.
+          - **Fast onload, 30 s idle auto-offload**: the model onloads when dictation starts (in-RAM worker / pinned weights), and the RAM watchdog offloads it 30 seconds after you stop speaking. Round loading spinner throughout.
+          - **5-page interactive onboarding**: dark grey, vector-drawn pages for microphone, floating pill, Voice Auto-Type keyboard and the built-in model — all permissions moved out of the app.
+          - **Lean main screen**: testing surface only (transcript, dictate, downloaded-model strip, keyboard test). All bubble and permission controls live in Settings.
 
           ### Android (arm64-v8a)
           ```bash
           wget -O /tmp/quickstt.apk https://github.com/__REPO__/releases/download/__VER__/quickstt-android-release.apk
           adb install -r /tmp/quickstt.apk
           ```
-          The touch app dictates for real: the microphone is captured with the NDK AAudio API, **three engines** (whisper.cpp, the Cactus `needle` and transcribe.cpp — all cross-compiled for arm64-v8a and shipped inside the APK) transcribe on-device, the text is copied to the clipboard and typed into the app in front with real key events, and the always-on floating bubble follows you across apps as a rounded-corner icon that expands into a circular waveform pill.
+          The bundled Cactus Whistle 16M model (`whistle.cact`) is embedded in the APK and transcribes offline on first launch. Additional real models (Whisper, Moonshine, SenseVoice, Canary, Parakeet, Nemotron, Qwen3-ASR) are one tap away in Models.
 
-          ### Fixed & improved in this release (Android __VER__)
-          - **Fixed Google Play Protect "App blocked to protect your device" Sideload Block**: Replaced `BIND_ACCESSIBILITY_SERVICE` (which Google Play Protect Enhanced Fraud Protection automatically blocks on browser-sideloaded APKs) and removed `INJECT_EVENTS` in favor of Android's standard Voice Input Method API (`QuickSttInputMethodService` / `BIND_INPUT_METHOD`), allowing clean installation without Play Protect blocks.
-          - **Clean Blue & Squircle UI Redesign**: Replaced the purple palette with a high-contrast blue & slate theme (`#2563EB` / `#3B82F6` / `#60A5FA` on `#060A12` / `#0B1220`), squircle cards and controls, and concise copy.
-          - **Static One-Glance Main Screen**: Removed the moving waveform bars from the main Listen tab and redesigned the layout so Dictation Control, Live Transcript, Active Model RAM bar, and 1-Tap Setup fit on a single screen without scrolling.
-          - **Squircle Floating Pill with Explicit START / STOP & Auto-Typing**: Reworked `Bubble.java` with continuous-curvature squircle corners (`13dp` collapsed, `15dp` expanded — no over-rounded stadium shape), blue glow/border, and a dedicated **START** / **STOP** button.
-          - **Automatic & Live Real-Time Typing (`QuickSttInputMethodService`)**: Added a native Android Voice Input Method that types partial transcripts in real time (`setComposingText`) into any focused text box while speaking, commits the final transcript automatically on stop (`commitText`), and copies the full transcript all at once to the clipboard when no text box is focused.
-          - **Automatic Model Onload & Offload with Round Loading Spinner**: Automatically onloads the active model when transcription starts and offloads it from RAM when transcription stops, displaying a smooth circular loading spinner in both the main app and the floating squircle pill.
-          - **Inbuilt Cactus Whistle 16M (`needle`) Model Ready Out-of-the-Box**: Cactus Whistle 16M (`whistle.cact`) is embedded inside the APK (`MODELS[0]`) and works offline immediately on first launch alongside 7 downloadable Whisper and transcribe.cpp models.
+          ### Checksums
+          See `SHA256SUMS`.
           NOTES
-          sed -i "s|__VER__|${VER}|g; s|__REPO__|${REPO}|g; s|__DEB__|${DEB_NAME}|g" /tmp/notes.md
+          sed -i "s|__VER__|${VER}|g; s|__REPO__|${REPO}|g" /tmp/notes.md
           cat /tmp/notes.md
       - name: Create Release
         uses: softprops/action-gh-release@v2

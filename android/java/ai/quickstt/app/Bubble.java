@@ -2,13 +2,10 @@ package ai.quickstt.app;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
-import android.graphics.RadialGradient;
 import android.graphics.RectF;
-import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Handler;
@@ -23,28 +20,30 @@ import android.view.View;
 import android.view.WindowManager;
 
 /**
- * Always-on floating squircle overlay for QuickSTT.
+ * Always-on floating overlay for QuickSTT.
  *
  * <ul>
- *   <li><b>Collapsed state:</b> 48dp squircle icon (14dp squircle corners) with deep
- *       navy-black surface, electric blue border, and 5 white waveform bars (or a round
- *       spinning loader while onloading/offloading).
- *   <li><b>Expanded state:</b> 248x54dp squircle bar (15dp squircle corners — never an
- *       over-rounded stadium pill) with live waveform, round circular loading animation
- *       for automatic model onload/offload/transcribe, and an explicit <b>START</b> /
- *       <b>STOP</b> button.
+ *   <li><b>Collapsed (compact) state:</b> 48dp translucent grey squircle icon —
+ *       tapping it starts transcription immediately (or expands while busy).</li>
+ *   <li><b>Expanded state:</b> 248x54dp grey squircle bar with squircle ends
+ *       (23dp radius), no border, white bars driven 1:1 by the microphone
+ *       input (a rolling history of real RMS levels), a round circular loading
+ *       arc, and exactly two sharp minimal buttons:
+ *       <b>✕</b> stop without output and <b>✓</b> stop &amp; type.</li>
  * </ul>
  */
 public final class Bubble {
 
     private static final String TAG = "QuickSTT";
 
-    /** Start or stop the recording. */
+    /** Start or stop the recording (expand on idle / stop &amp; type while recording). */
     public static final int ACTION_RECORD = 1;
     /** Type the last transcript into the app that has the focus. */
     public static final int ACTION_TYPE = 2;
     /** Hide the bubble completely. */
     public static final int ACTION_CLOSE = 3;
+    /** Stop transcription and throw the audio away — no text is produced. */
+    public static final int ACTION_DISCARD = 4;
 
     /** TYPE_APPLICATION_OVERLAY: drawn above other apps on Android 8+. */
     private static final int TYPE_APPLICATION_OVERLAY = 2038;
@@ -154,7 +153,7 @@ public final class Bubble {
         }
     }
 
-    /** Update the bubble state & transcript without recreating the window. */
+    /** Update the bubble state &amp; transcript without recreating the window. */
     public static String update(String state, String transcript) {
         try {
             if (current != null) {
@@ -276,10 +275,7 @@ public final class Bubble {
     }
 
     /**
-     * Custom hardware-accelerated squircle overlay view:
-     * 1) Collapsed 48dp squircle icon (14dp squircle radius) with 5 white bars or round spinner.
-     * 2) Expanded 248x54dp squircle bar (15dp squircle radius) with blue accents, round
-     *    onload/offload/transcribe spinner, and explicit START / STOP button.
+     * Custom hardware-accelerated squircle overlay view.
      */
     private static final class BubbleView extends View implements Choreographer.FrameCallback {
 
@@ -293,27 +289,25 @@ public final class Bubble {
         private final float expandedRadius;
 
         private final Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint wavePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint subWavePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint chipPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint chipBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint statusPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint subTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint spinnerTrackPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint spinnerArcPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint glyphPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
         private final RectF cardRect = new RectF();
         private final RectF barRect = new RectF();
-        private final RectF chipRect = new RectF();
-        private final RectF closeRect = new RectF();
+        private final RectF discardBtnRect = new RectF();
+        private final RectF acceptBtnRect = new RectF();
         private final RectF spinnerRect = new RectF();
         private final Path squirclePath = new Path();
-        private final Path chipPath = new Path();
+        private final Path glyphPath = new Path();
 
-        private final float[] barHeights = new float[BAR_COUNT];
+        /** Rolling history of real microphone levels, oldest → newest. */
+        private final float[] history = new float[BAR_COUNT];
+        private int historyHead = 0;
+        private final float[] ordered = new float[BAR_COUNT];
 
         private boolean expanded = false;
         private float expandProgress = 0.0f;
@@ -321,7 +315,6 @@ public final class Bubble {
         private boolean busy = false;
         private float targetLevel = 0.0f;
         private float smoothLevel = 0.0f;
-        private float phase = 0.0f;
         private float spinnerAngle = 0.0f;
         private long lastFrameNanos = 0L;
         private boolean animating = false;
@@ -339,57 +332,37 @@ public final class Bubble {
             collapsedSize = dp(context, 48f);
             expandedWidth = dp(context, 248f);
             expandedHeight = dp(context, 54f);
-            // Squircle corners on both collapsed (13dp) and expanded (15dp) — never a circular stadium!
-            collapsedRadius = dp(context, 13f);
-            expandedRadius = dp(context, 15f);
+            collapsedRadius = dp(context, 15f);
+            // Slightly more rounded — a pill-shaped squircle end, still not a stadium.
+            expandedRadius = dp(context, 23f);
 
             bgPaint.setStyle(Paint.Style.FILL);
-            bgPaint.setColor(0xF6070C16);
-
-            glowPaint.setStyle(Paint.Style.FILL);
-
-            borderPaint.setStyle(Paint.Style.STROKE);
-            borderPaint.setStrokeWidth(dp(context, 1.4f));
+            bgPaint.setColor(0x8C232329);
 
             wavePaint.setStyle(Paint.Style.FILL);
             wavePaint.setColor(0xFFFFFFFF);
 
             subWavePaint.setStyle(Paint.Style.FILL);
-            subWavePaint.setColor(0x443B82F6);
+            subWavePaint.setColor(0x38FFFFFF);
 
             chipPaint.setStyle(Paint.Style.FILL);
-            chipBorderPaint.setStyle(Paint.Style.STROKE);
-            chipBorderPaint.setStrokeWidth(dp(context, 1.1f));
-
-            textPaint.setColor(0xFFFFFFFF);
-            textPaint.setTextSize(TypedValue.applyDimension(
-                    TypedValue.COMPLEX_UNIT_SP, 10.5f, context.getResources().getDisplayMetrics()));
-            textPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-            textPaint.setTextAlign(Paint.Align.CENTER);
-
-            statusPaint.setColor(0xFFE2E8F0);
-            statusPaint.setTextSize(TypedValue.applyDimension(
-                    TypedValue.COMPLEX_UNIT_SP, 11f, context.getResources().getDisplayMetrics()));
-            statusPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-            statusPaint.setTextAlign(Paint.Align.LEFT);
-
-            subTextPaint.setColor(0xFF93C5FD);
-            subTextPaint.setTextSize(TypedValue.applyDimension(
-                    TypedValue.COMPLEX_UNIT_SP, 13f, context.getResources().getDisplayMetrics()));
-            subTextPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-            subTextPaint.setTextAlign(Paint.Align.CENTER);
 
             spinnerTrackPaint.setStyle(Paint.Style.STROKE);
-            spinnerTrackPaint.setStrokeWidth(dp(context, 2.4f));
-            spinnerTrackPaint.setColor(0x3860A5FA);
+            spinnerTrackPaint.setStrokeWidth(dp(context, 2.3f));
+            spinnerTrackPaint.setColor(0x2EFFFFFF);
 
             spinnerArcPaint.setStyle(Paint.Style.STROKE);
-            spinnerArcPaint.setStrokeWidth(dp(context, 2.4f));
+            spinnerArcPaint.setStrokeWidth(dp(context, 2.3f));
             spinnerArcPaint.setStrokeCap(Paint.Cap.ROUND);
-            spinnerArcPaint.setColor(0xFF60A5FA);
+            spinnerArcPaint.setColor(0xFFF5F5F8);
+
+            glyphPaint.setStyle(Paint.Style.STROKE);
+            glyphPaint.setStrokeCap(Paint.Cap.BUTT);
+            glyphPaint.setStrokeJoin(Paint.Join.MITER);
+            glyphPaint.setColor(0xFFFFFFFF);
 
             for (int i = 0; i < BAR_COUNT; i++) {
-                barHeights[i] = 0.20f;
+                history[i] = 0.06f;
             }
             startAnimation();
         }
@@ -433,6 +406,9 @@ public final class Bubble {
             if (isRecording || isBusy) {
                 this.expanded = true;
             }
+            // Push the real microphone level into the rolling history — oldest shifts out.
+            history[historyHead] = 0.06f + this.targetLevel;
+            historyHead = (historyHead + 1) % BAR_COUNT;
             QuickSttInputMethodService.syncState(this.stateLabel, this.recording, this.busy, this.targetLevel);
             startAnimation();
         }
@@ -479,56 +455,30 @@ public final class Bubble {
             resizeWindow(curW, curH);
 
             float activeTarget = recording
-                    ? Math.max(0.16f, Math.min(1.0f, targetLevel * 2.6f))
-                    : (busy ? 0.35f : 0.10f);
+                    ? Math.max(0.10f, Math.min(1.0f, targetLevel * 2.6f))
+                    : (busy ? 0.35f : 0.08f);
             float alpha = activeTarget > smoothLevel
-                    ? Math.min(1.0f, dt * 22.0f)
-                    : Math.min(1.0f, dt * 8.5f);
+                    ? Math.min(1.0f, dt * 24.0f)
+                    : Math.min(1.0f, dt * 9.0f);
             smoothLevel += (activeTarget - smoothLevel) * alpha;
 
-            float phaseSpeed = recording ? (4.8f + smoothLevel * 5.2f) : (busy ? 5.0f : 1.8f);
-            phase += dt * phaseSpeed;
-            if (phase > 628.3185f) {
-                phase -= 628.3185f;
-            }
+            spinnerAngle = (spinnerAngle + dt * 330.0f) % 360.0f;
 
-            spinnerAngle = (spinnerAngle + dt * 320.0f) % 360.0f;
-
-            float center = (BAR_COUNT - 1) * 0.5f;
+            // Re-order the rolling history oldest → newest for drawing.
             for (int i = 0; i < BAR_COUNT; i++) {
-                float dist = Math.abs(i - center) / center;
-                float envelope = (float) Math.cos(dist * 1.25f);
-                envelope = Math.max(0.20f, envelope * envelope);
-
-                float w1 = (float) Math.sin(phase + i * 0.55f);
-                float w2 = (float) Math.cos(phase * 0.70f - i * 0.38f);
-                float wave = 0.5f + 0.32f * w1 + 0.18f * w2;
-
-                float desired;
-                if (recording) {
-                    desired = 0.16f + envelope * (0.18f + smoothLevel * 0.82f) * (0.45f + 0.55f * wave);
-                } else {
-                    desired = 0.18f + envelope * 0.14f;
-                }
-                desired = Math.max(0.14f, Math.min(1.0f, desired));
-
-                float stiffness = recording ? 26.0f : 14.0f;
-                barHeights[i] += (desired - barHeights[i]) * Math.min(1.0f, dt * stiffness);
+                ordered[i] = history[(historyHead + i) % BAR_COUNT];
             }
 
             invalidate();
             Choreographer.getInstance().postFrameCallback(this);
         }
 
-        /**
-         * Builds a true continuous-curvature squircle path inside {@code rect}.
-         */
+        /** Builds a true continuous-curvature squircle path inside {@code rect}. */
         private static void buildSquirclePath(Path path, RectF rect, float radius) {
             path.reset();
             float w = rect.width();
             float h = rect.height();
-            float r = Math.min(radius, Math.min(w, h) * 0.42f);
-            // Smooth superellipse control offset (squircle factor)
+            float r = Math.min(radius, Math.min(w, h) * 0.46f);
             float c = r * 0.12f;
             float l = rect.left;
             float t = rect.top;
@@ -553,6 +503,20 @@ public final class Bubble {
             canvas.drawArc(spinnerRect, spinnerAngle, 250f, false, spinnerArcPaint);
         }
 
+        /** Bar height: today's truth is the rolling microphone history. */
+        private float barNorm(int i) {
+            float v;
+            if (recording) {
+                v = ordered[Math.max(0, Math.min(BAR_COUNT - 1, i))];
+                v = Math.max(0.10f, Math.min(1.0f, v));
+            } else if (busy) {
+                v = 0.28f + 0.18f * (float) Math.abs(Math.sin(i * 0.9f));
+            } else {
+                v = 0.08f + 0.02f * (float) Math.abs(Math.sin(i * 0.7f));
+            }
+            return v;
+        }
+
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
@@ -562,40 +526,15 @@ public final class Bubble {
                 return;
             }
 
-            float strokeHalf = borderPaint.getStrokeWidth() * 0.5f + 1f;
-            cardRect.set(strokeHalf, strokeHalf, w - strokeHalf, h - strokeHalf);
+            cardRect.set(0f, 0f, w, h);
 
             float radius = collapsedRadius + (expandedRadius - collapsedRadius) * expandProgress;
             buildSquirclePath(squirclePath, cardRect, radius);
 
-            // 1. Deep navy-black squircle body
+            // Translucent grey body — more translucent when compact.
+            int alpha = (int) (0x8C + (0xF0 - 0x8C) * expandProgress);
+            bgPaint.setColor((alpha << 24) | 0x232329);
             canvas.drawPath(squirclePath, bgPaint);
-
-            // 2. Subtle blue ambient glow inside the squircle
-            float glowIntensity = 0.18f + 0.22f * smoothLevel + (recording ? 0.12f : 0.0f);
-            int blueCore = (((int) (glowIntensity * 255)) << 24) | 0x2563EB;
-            int blueMid = (((int) (glowIntensity * 135)) << 24) | 0x1D4ED8;
-            RadialGradient radial = new RadialGradient(
-                    w * 0.35f,
-                    h * 0.5f,
-                    Math.max(w, h) * 0.78f,
-                    new int[]{blueCore, blueMid, 0x00070C16},
-                    new float[]{0f, 0.55f, 1f},
-                    Shader.TileMode.CLAMP);
-            glowPaint.setShader(radial);
-            canvas.drawPath(squirclePath, glowPaint);
-
-            // 3. Crisp blue squircle border rim
-            int rimAlpha = recording ? 0xEA : 0xB0;
-            int rimBright = (rimAlpha << 24) | 0x3B82F6;
-            int rimDeep = ((rimAlpha - 0x24) << 24) | 0x1D4ED8;
-            int rimSoft = (rimAlpha << 24) | 0x60A5FA;
-            borderPaint.setShader(new LinearGradient(
-                    0f, 0f, w, h,
-                    new int[]{rimBright, rimDeep, rimSoft},
-                    new float[]{0f, 0.5f, 1f},
-                    Shader.TileMode.CLAMP));
-            canvas.drawPath(squirclePath, borderPaint);
 
             if (expandProgress < 0.35f) {
                 drawCollapsedSquircle(canvas, w, h);
@@ -613,17 +552,14 @@ public final class Bubble {
             float gap = dp(getContext(), 3.2f);
             float totalW = COLLAPSED_BARS * barW + (COLLAPSED_BARS - 1) * gap;
             float startX = (w - totalW) * 0.5f;
-            float maxBarH = h * 0.50f;
+            float maxBarH = h * 0.52f;
             float centerY = h * 0.5f;
 
             for (int i = 0; i < COLLAPSED_BARS; i++) {
                 int srcIdx = (i * (BAR_COUNT - 1)) / (COLLAPSED_BARS - 1);
-                float norm = barHeights[srcIdx];
+                float norm = barNorm(srcIdx);
                 float bh = Math.max(barW, norm * maxBarH);
                 float x = startX + i * (barW + gap);
-
-                barRect.set(x - 0.8f, centerY - bh * 0.58f, x + barW + 0.8f, centerY + bh * 0.58f);
-                canvas.drawRoundRect(barRect, barW, barW, subWavePaint);
 
                 barRect.set(x, centerY - bh * 0.5f, x + barW, centerY + bh * 0.5f);
                 canvas.drawRoundRect(barRect, barW * 0.5f, barW * 0.5f, wavePaint);
@@ -632,24 +568,21 @@ public final class Bubble {
 
         private void drawExpandedSquircle(Canvas canvas, float w, float h, float contentAlpha) {
             float padLeft = dp(getContext(), 14f);
-            float closeSize = dp(getContext(), 24f);
-            float closeRight = w - dp(getContext(), 8f);
-            float closeLeft = closeRight - closeSize;
             float centerY = h * 0.5f;
 
-            closeRect.set(closeLeft, centerY - closeSize * 0.5f, closeRight, centerY + closeSize * 0.5f);
+            float btnH = dp(getContext(), 32f);
+            float tap = dp(getContext(), 6f);
+            // Discard (left button) then Confirm (right button). Sharp minimal glyphs.
+            float acceptRight = w - dp(getContext(), 10f);
+            float acceptW = dp(getContext(), 46f);
+            acceptBtnRect.set(acceptRight - acceptW, centerY - btnH * 0.5f, acceptRight, centerY + btnH * 0.5f);
+            float discardRight = acceptBtnRect.left - dp(getContext(), 6f);
+            float discardW = dp(getContext(), 46f);
+            discardBtnRect.set(discardRight - discardW, centerY - btnH * 0.5f, discardRight, centerY + btnH * 0.5f);
 
-            // Dedicated START / STOP squircle button
-            float chipW = dp(getContext(), 64f);
-            float chipH = dp(getContext(), 32f);
-            float chipRight = closeLeft - dp(getContext(), 6f);
-            float chipLeft = chipRight - chipW;
-            chipRect.set(chipLeft, centerY - chipH * 0.5f, chipRight, centerY + chipH * 0.5f);
-
-            float waveRight = chipLeft - dp(getContext(), 10f);
+            float waveRight = discardBtnRect.left - dp(getContext(), 10f);
 
             if (busy) {
-                // Proper round circular loading animation for Onloading / Transcribing / Offloading
                 float spinR = dp(getContext(), 9.5f);
                 float spinCx = padLeft + spinR + dp(getContext(), 2f);
                 drawRoundSpinner(canvas, spinCx, centerY, spinR);
@@ -663,17 +596,23 @@ public final class Bubble {
                 } else if (low.contains("load")) {
                     shortStatus = "Loading…";
                 }
-                Paint.FontMetrics sfm = statusPaint.getFontMetrics();
-                float sBase = centerY - (sfm.ascent + sfm.descent) * 0.5f;
+                Paint.FontMetrics sfm = new Paint(Paint.ANTI_ALIAS_FLAG).getFontMetrics();
+                Paint statusPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                statusPaint.setColor(0xFFE5E5EA);
+                statusPaint.setTextSize(TypedValue.applyDimension(
+                        TypedValue.COMPLEX_UNIT_SP, 11f, getResources().getDisplayMetrics()));
+                statusPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+                Paint.FontMetrics m = statusPaint.getFontMetrics();
+                float sBase = centerY - (m.ascent + m.descent) * 0.5f;
                 canvas.drawText(shortStatus, spinCx + spinR + dp(getContext(), 8f), sBase, statusPaint);
             } else {
                 float waveRegionW = Math.max(dp(getContext(), 54f), waveRight - padLeft);
-                float barW = dp(getContext(), 2.8f);
+                float barW = dp(getContext(), 2.9f);
                 float gap = (waveRegionW - BAR_COUNT * barW) / Math.max(1, BAR_COUNT - 1);
-                float maxBarH = h * 0.58f;
+                float maxBarH = h * 0.56f;
 
                 for (int i = 0; i < BAR_COUNT; i++) {
-                    float norm = barHeights[i];
+                    float norm = barNorm(i);
                     float bh = Math.max(barW, norm * maxBarH);
                     float x = padLeft + i * (barW + gap);
 
@@ -685,43 +624,60 @@ public final class Bubble {
                 }
             }
 
-            if (contentAlpha <= 0.05f) {
-                return;
-            }
             int alphaInt = Math.min(255, Math.max(0, Math.round(contentAlpha * 255f)));
-
-            // Squircle START / STOP button (10dp squircle radius)
-            buildSquirclePath(chipPath, chipRect, dp(getContext(), 9.5f));
-            String chipLabel;
-            if (recording) {
-                chipLabel = "■ STOP";
-                chipPaint.setColor(0xFFDC2626);
-                chipBorderPaint.setColor(0xFFF87171);
-            } else if (busy) {
-                chipLabel = "WAIT";
-                chipPaint.setColor(0xFF1E293B);
-                chipBorderPaint.setColor(0xFF475569);
-            } else {
-                chipLabel = "● START";
-                chipPaint.setColor(0xFF2563EB);
-                chipBorderPaint.setColor(0xFF60A5FA);
+            if (busy) {
+                alphaInt = Math.round(alphaInt * 0.30f);
             }
-            chipPaint.setAlpha(Math.min(alphaInt, 235));
-            canvas.drawPath(chipPath, chipPaint);
 
-            chipBorderPaint.setAlpha(Math.min(alphaInt, 230));
-            canvas.drawPath(chipPath, chipBorderPaint);
+            drawDiscardButton(canvas, discardBtnRect, alphaInt);
+            drawAcceptButton(canvas, acceptBtnRect, alphaInt);
+        }
 
-            textPaint.setAlpha(alphaInt);
-            Paint.FontMetrics fm = textPaint.getFontMetrics();
-            float textBaseline = centerY - (fm.ascent + fm.descent) * 0.5f;
-            canvas.drawText(chipLabel, chipRect.centerX(), textBaseline, textPaint);
+        private void drawDiscardButton(Canvas canvas, RectF r, int alpha) {
+            Path chip = squircleForGlyph(r);
+            // Grey chip, sharp white ✕ glyph.
+            chipPaint.setColor(0xFF3F3F46);
+            chipPaint.setAlpha(Math.min(alpha, 235));
+            canvas.drawPath(chip, chipPaint);
 
-            // Collapse icon on far right
-            subTextPaint.setAlpha(Math.min(alphaInt, 210));
-            Paint.FontMetrics cfm = subTextPaint.getFontMetrics();
-            float subBaseline = centerY - (cfm.ascent + cfm.descent) * 0.5f;
-            canvas.drawText("‹", closeRect.centerX(), subBaseline, subTextPaint);
+            float cx = r.centerX();
+            float cy = r.centerY();
+            float half = dp(getContext(), 7.2f);
+            glyphPaint.setAlpha(alpha);
+            glyphPaint.setStrokeWidth(dp(getContext(), 2.3f));
+            glyphPath.reset();
+            glyphPath.moveTo(cx - half, cy - half);
+            glyphPath.lineTo(cx + half, cy + half);
+            glyphPath.moveTo(cx + half, cy - half);
+            glyphPath.lineTo(cx - half, cy + half);
+            canvas.drawPath(glyphPath, glyphPaint);
+        }
+
+        private void drawAcceptButton(Canvas canvas, RectF r, int alpha) {
+            Path chip = squircleForGlyph(r);
+            // Blue chip, sharp white ✓ glyph.
+            chipPaint.setColor(0xFF2563EB);
+            chipPaint.setAlpha(Math.min(alpha, 245));
+            canvas.drawPath(chip, chipPaint);
+
+            float cx = r.centerX();
+            float cy = r.centerY();
+            float hw = dp(getContext(), 8.5f);
+            float hh = dp(getContext(), 6.2f);
+            glyphPaint.setAlpha(alpha);
+            glyphPaint.setStrokeWidth(dp(getContext(), 2.4f));
+            glyphPath.reset();
+            glyphPath.moveTo(cx - hw, cy + hh * 0.15f);
+            glyphPath.lineTo(cx - hw * 0.28f, cy + hh);
+            glyphPath.lineTo(cx + hw, cy - hh);
+            canvas.drawPath(glyphPath, glyphPaint);
+        }
+
+        private final Path scratchPath = new Path();
+
+        private Path squircleForGlyph(RectF r) {
+            buildSquirclePath(scratchPath, r, dp(getContext(), 8f));
+            return scratchPath;
         }
 
         @Override
@@ -768,25 +724,29 @@ public final class Bubble {
                 expanded = true;
                 startAnimation();
                 if (!recording && !busy) {
+                    // One tap on the compact pill starts transcription immediately.
                     dispatchAction(ACTION_RECORD);
                 }
                 return;
             }
 
-            // 1. Far-right collapse zone -> fold back into the 48dp squircle icon
-            if (x >= closeRect.left - dp(getContext(), 4f)) {
-                if (recording) {
-                    dispatchAction(ACTION_RECORD);
+            if (discardBtnRect.contains(x, y)) {
+                // ✕ — stop without producing any text output.
+                if (recording && !busy) {
+                    dispatchAction(ACTION_DISCARD);
                 }
-                expanded = false;
-                startAnimation();
                 return;
             }
-
-            // 2. START / STOP button or waveform tap -> always starts or stops transcription!
-            if (!busy || recording) {
-                dispatchAction(ACTION_RECORD);
+            if (acceptBtnRect.contains(x, y)) {
+                // ✓ — stop and type the transcript.
+                if (!busy) {
+                    dispatchAction(ACTION_RECORD);
+                }
+                return;
             }
+            // Tapping the body of the expanded bar collapses it back to the compact pill.
+            expanded = false;
+            startAnimation();
         }
     }
 }

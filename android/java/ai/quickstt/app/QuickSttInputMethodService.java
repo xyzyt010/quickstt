@@ -189,6 +189,60 @@ public final class QuickSttInputMethodService extends InputMethodService {
         }
     }
 
+    /**
+     * Discard any live composing text that was streamed into the focused field
+     * (used when the user cancels a turn with the ✕ button).
+     *
+     * @return {@code true} if a composing region was cleared.
+     */
+    public static boolean cancelLiveTyping() {
+        final QuickSttInputMethodService svc = instance;
+        if (svc == null) {
+            return false;
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return svc.finishCancel();
+        }
+        final AtomicBoolean ok = new AtomicBoolean(false);
+        final CountDownLatch latch = new CountDownLatch(1);
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ok.set(svc.finishCancel());
+                } catch (Throwable t) {
+                    Log.w(TAG, "cancelLiveTyping failed", t);
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+        try {
+            latch.await(250, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException ignored) {
+        }
+        return ok.get();
+    }
+
+    private synchronized boolean finishCancel() {
+        if (!turnStartedComposing) {
+            return false;
+        }
+        try {
+            InputConnection ic = getCurrentInputConnection();
+            if (ic != null) {
+                ic.beginBatchEdit();
+                ic.setComposingText("", 1);
+                ic.finishComposingText();
+                ic.endBatchEdit();
+            }
+        } catch (Throwable ignored) {
+        }
+        turnStartedComposing = false;
+        turnNeedsLeadingSpace = false;
+        return true;
+    }
+
     /** Reset composing state at the start of a new recording turn. */
     public static synchronized void beginTurn() {
         turnStartedComposing = false;
@@ -398,14 +452,14 @@ public final class QuickSttInputMethodService extends InputMethodService {
             barHeightPx = Bubble.dp(context, 56f);
 
             bgPaint.setStyle(Paint.Style.FILL);
-            bgPaint.setColor(0xFF060A12);
+            bgPaint.setColor(0xFF0F0F12);
 
             cardPaint.setStyle(Paint.Style.FILL);
-            cardPaint.setColor(0xFF0B1220);
+            cardPaint.setColor(0xFF1E1E24);
 
             borderPaint.setStyle(Paint.Style.STROKE);
-            borderPaint.setStrokeWidth(Bubble.dp(context, 1.2f));
-            borderPaint.setColor(0xFF2563EB);
+            borderPaint.setStrokeWidth(Bubble.dp(context, 1.0f));
+            borderPaint.setColor(0xFF2C2C33);
 
             btnPaint.setStyle(Paint.Style.FILL);
             btnBorderPaint.setStyle(Paint.Style.STROKE);
@@ -417,7 +471,7 @@ public final class QuickSttInputMethodService extends InputMethodService {
             textPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
             textPaint.setTextAlign(Paint.Align.CENTER);
 
-            statusPaint.setColor(0xFFE2E8F0);
+            statusPaint.setColor(0xFFEDEDF0);
             statusPaint.setTextSize(TypedValue.applyDimension(
                     TypedValue.COMPLEX_UNIT_SP, 12f, context.getResources().getDisplayMetrics()));
             statusPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
@@ -425,12 +479,12 @@ public final class QuickSttInputMethodService extends InputMethodService {
 
             spinnerTrackPaint.setStyle(Paint.Style.STROKE);
             spinnerTrackPaint.setStrokeWidth(Bubble.dp(context, 2.2f));
-            spinnerTrackPaint.setColor(0x3860A5FA);
+            spinnerTrackPaint.setColor(0x2EFFFFFF);
 
             spinnerArcPaint.setStyle(Paint.Style.STROKE);
             spinnerArcPaint.setStrokeWidth(Bubble.dp(context, 2.2f));
             spinnerArcPaint.setStrokeCap(Paint.Cap.ROUND);
-            spinnerArcPaint.setColor(0xFF60A5FA);
+            spinnerArcPaint.setColor(0xFFF5F5F8);
 
             startAnimation();
         }
@@ -493,7 +547,7 @@ public final class QuickSttInputMethodService extends InputMethodService {
             cardRect.set(padH, padV, w - padH, h - padV);
             float r = Bubble.dp(getContext(), 13f);
             canvas.drawRoundRect(cardRect, r, r, cardPaint);
-            borderPaint.setColor(liveRecording ? 0xFFEF4444 : 0xFF2563EB);
+            borderPaint.setColor(liveRecording ? 0xFFEF4444 : 0xFF2C2C33);
             canvas.drawRoundRect(cardRect, r, r, borderPaint);
 
             float cy = h * 0.5f;
@@ -504,8 +558,8 @@ public final class QuickSttInputMethodService extends InputMethodService {
             float kbdLeft = cardRect.left + Bubble.dp(getContext(), 6f);
             float kbdW = Bubble.dp(getContext(), 76f);
             kbdBtnRect.set(kbdLeft, cy - btnH * 0.5f, kbdLeft + kbdW, cy + btnH * 0.5f);
-            btnPaint.setColor(0xFF131E32);
-            btnBorderPaint.setColor(0xFF26354D);
+            btnPaint.setColor(0xFF2A2A31);
+            btnBorderPaint.setColor(0xFF3F3F46);
             canvas.drawRoundRect(kbdBtnRect, btnR, btnR, btnPaint);
             canvas.drawRoundRect(kbdBtnRect, btnR, btnR, btnBorderPaint);
 

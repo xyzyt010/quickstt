@@ -70,11 +70,16 @@ pub fn android_main(app: slint::android::AndroidApp) {
 /// The UI handle used by JNI callbacks from the Java overlay bubble.
 static BUBBLE_UI: Mutex<Option<slint::Weak<AppWindow>>> = Mutex::new(None);
 
+/// Set when the user taps the ✕ button in the floating pill: stop and throw
+/// the audio away instead of transcribing it.
+static DISCARD_RECORDING: AtomicBool = AtomicBool::new(false);
+
 /// Called by the Java bubble when the user taps one of its interactive zones.
 ///
 /// * 1 = start/stop recording
 /// * 2 = type the last transcript into the focused app
 /// * 3 = hide the bubble
+/// * 4 = stop recording and discard the audio (no text output)
 #[no_mangle]
 pub extern "C" fn Java_ai_quickstt_app_Bubble_nativeBubbleAction(
     _env: *mut std::ffi::c_void,
@@ -96,6 +101,11 @@ fn bubble_action(action: i32) {
             }
             2 => ui.invoke_type_into_app(),
             3 => platform::hide_overlay(),
+            4 => {
+                DISCARD_RECORDING.store(true, Ordering::SeqCst);
+                ui.set_bubble_expanded(true);
+                ui.invoke_toggle_record();
+            }
             _ => {}
         }
     });
@@ -265,31 +275,16 @@ fn bubble(
 fn refresh_overlay_state(ui: &AppWindow) {
     ui.set_auto_type_ok(platform::accessibility_enabled());
     let granted = platform::can_draw_overlays();
-    let changed = granted != ui.get_overlay_ok();
     ui.set_overlay_ok(granted);
-    if !changed {
+    if !ui.get_overlay_enabled() {
+        // The pill only appears when the user enables it in Settings.
         return;
     }
-    if granted {
-        if platform::overlay_enabled() {
-            match platform::show_overlay("QuickSTT ready", "") {
-                Ok(()) => {
-                    ui.set_overlay_enabled(true);
-                    let _ = platform::start_service();
-                    ui.set_background_ok(true);
-                    ui.set_status_text("Floating squircle pill active".into());
-                }
-                Err(e) => {
-                    ui.set_status_text(format!("Pill could not be shown: {e}").into());
-                }
-            }
-        } else {
-            ui.set_status_text("Overlay allowed — tap Show Pill to enable".into());
-        }
-    } else {
+    if !granted {
         platform::hide_overlay();
         ui.set_overlay_enabled(false);
-        ui.set_status_text("Overlay permission withdrawn".into());
+        platform::save_overlay_enabled(false);
+        ui.set_status_text("The “display over other apps” permission was withdrawn".into());
     }
 }
 
@@ -698,8 +693,8 @@ pub fn build_ui() -> AppWindow {
                 let started = std::time::Instant::now();
                 let res = stt::onload_model(index);
                 let elapsed = started.elapsed();
-                if elapsed < std::time::Duration::from_millis(320) {
-                    std::thread::sleep(std::time::Duration::from_millis(320) - elapsed);
+                if elapsed < std::time::Duration::from_millis(150) {
+                    std::thread::sleep(std::time::Duration::from_millis(150) - elapsed);
                 }
                 platform::update_overlay_level(0.0, false, false);
                 on_ui(move || {
@@ -743,8 +738,8 @@ pub fn build_ui() -> AppWindow {
                 let started = std::time::Instant::now();
                 let res = stt::offload_model();
                 let elapsed = started.elapsed();
-                if elapsed < std::time::Duration::from_millis(320) {
-                    std::thread::sleep(std::time::Duration::from_millis(320) - elapsed);
+                if elapsed < std::time::Duration::from_millis(150) {
+                    std::thread::sleep(std::time::Duration::from_millis(150) - elapsed);
                 }
                 platform::update_overlay_level(0.0, false, false);
                 on_ui(move || {
@@ -826,6 +821,39 @@ pub fn build_ui() -> AppWindow {
             }
         });
     }
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
+        ui.on_test_keyboard(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let line = "QuickSTT ✓ — typing works.";
+            if platform::commit_final_text(line) {
+                ui.set_status_text("Typed into the focused text box".into());
+                note(&weak, &log, "Test line typed into the focused text box.");
+            } else {
+                platform::copy_to_clipboard(line);
+                ui.set_status_text("No text box focused — test line copied to clipboard".into());
+                note(&weak, &log, "Test line copied to clipboard (no focused text box).");
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_onboarding_finish(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            platform::save_onboarding_done();
+            ui.set_show_onboarding(false);
+            ui.set_status_text("All set — dictate anywhere".into());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_restart_onboarding(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_onboarding_page(0);
+            ui.set_show_onboarding(true);
+        });
+    }
 
     // ── Floating Bubble & Overlay Settings ─────────────────────────────────
     {
@@ -876,8 +904,8 @@ pub fn build_ui() -> AppWindow {
                 platform::stop_service();
                 ui.set_overlay_enabled(false);
                 platform::save_overlay_enabled(false);
-                note(&weak, &log, "Floating waveform bubble disabled.");
-                ui.set_status_text("Floating waveform bubble off".into());
+                note(&weak, &log, "Floating pill hidden.");
+                ui.set_status_text("Floating pill off".into());
                 return;
             }
             platform::save_overlay_enabled(true);
@@ -1173,6 +1201,28 @@ pub fn build_ui() -> AppWindow {
                     }
                 }
                 session.recorder.stop();
+                if DISCARD_RECORDING.swap(false, Ordering::SeqCst) {
+                    let _ = platform::cancel_typing_turn();
+                    let discard_weak = weak.clone();
+                    let discard_log = log_rec.clone();
+                    on_ui(move || {
+                        if let Some(ui) = discard_weak.upgrade() {
+                            ui.set_recording(false);
+                            ui.set_busy(false);
+                            ui.set_audio_level(0.0);
+                            ui.set_loading_label("".into());
+                            ui.set_live_text("Discarded.".into());
+                            ui.set_has_text(false);
+                            ui.set_mic_health("".into());
+                            ui.set_status_text("Discarded — no text was output".into());
+                            platform::update_overlay_level(0.0, false, false);
+                            if ui.get_overlay_enabled() {
+                                bubble("Discarded", "", &discard_weak, &discard_log);
+                            }
+                        }
+                    });
+                    return;
+                }
                 platform::update_overlay_level(0.0, false, true);
                 let samples = std::mem::take(&mut session.samples);
                 let health = session.recorder.health();
@@ -1563,7 +1613,7 @@ pub fn build_ui() -> AppWindow {
                         && !ui.get_busy()
                         && !ui.get_model_loading()
                     {
-                        if let Some(offload_msg) = stt::check_idle_offload(120) {
+                        if let Some(offload_msg) = stt::check_idle_offload(30) {
                             sync_model_ui(&ui);
                             ui.set_status_text(offload_msg.clone().into());
                             note(&weak, &log, &offload_msg);
@@ -1628,46 +1678,12 @@ pub fn build_ui() -> AppWindow {
                         turn.status.clone()
                     };
 
-                    // Automatic offload on stop (with round circular loading icon)
-                    if ui.get_auto_offload() && stt::loaded_model_index().is_some() {
-                        ui.set_model_loading(true);
-                        ui.set_loading_label("Offloading…".into());
-                        platform::update_overlay_level(0.0, false, true);
-                        if ui.get_overlay_enabled() {
-                            bubble("Offloading…", &turn.text, &weak, &log);
-                        }
-                        let off_weak = weak.clone();
-                        let off_log = log.clone();
-                        let off_text = turn.text.clone();
-                        let status_after = final_status.clone();
-                        std::thread::spawn(move || {
-                            let started = std::time::Instant::now();
-                            let _ = stt::offload_model();
-                            let elapsed = started.elapsed();
-                            if elapsed < std::time::Duration::from_millis(320) {
-                                std::thread::sleep(std::time::Duration::from_millis(320) - elapsed);
-                            }
-                            platform::update_overlay_level(0.0, false, false);
-                            on_ui(move || {
-                                if let Some(ui) = off_weak.upgrade() {
-                                    ui.set_model_loading(false);
-                                    ui.set_loading_label("".into());
-                                    sync_model_ui(&ui);
-                                    ui.set_status_text(
-                                        format!("{status_after} · RAM offloaded").into(),
-                                    );
-                                    if ui.get_overlay_enabled() {
-                                        bubble(&status_after, &off_text, &off_weak, &off_log);
-                                    }
-                                }
-                            });
-                        });
-                    } else {
-                        ui.set_loading_label("".into());
-                        platform::update_overlay_level(0.0, false, false);
-                        if ui.get_overlay_enabled() {
-                            bubble(&final_status, &turn.text, &weak, &log);
-                        }
+                    // Offload is NOT immediate: the model stays in RAM and is
+                    // released automatically after 30 s of silence (idle watchdog).
+                    ui.set_loading_label("".into());
+                    platform::update_overlay_level(0.0, false, false);
+                    if ui.get_overlay_enabled() {
+                        bubble(&final_status, &turn.text, &weak, &log);
                     }
                 }
             },
@@ -1711,18 +1727,12 @@ pub fn build_ui() -> AppWindow {
         let overlay_ok = platform::can_draw_overlays();
         ui.set_mic_ok(mic_ok);
         ui.set_overlay_ok(overlay_ok);
-        ui.set_status_text(if !mic_ok {
-            "Step 1: Allow microphone access below".into()
-        } else if !model_ok {
-            "Step 2: Tap Onload / Download model".into()
-        } else if initial_onload {
+        ui.set_status_text(if initial_onload {
             format!("Onloading {} into RAM…", stt::model(index).name).into()
+        } else if model_ok {
+            format!("{} is ready", stt::model(index).name).into()
         } else {
-            format!(
-                "{} is ready — press the waveform pill to dictate",
-                stt::model(index).name
-            )
-            .into()
+            format!("{} is not downloaded", stt::model(index).name).into()
         });
         note(
             &weak,
@@ -1748,21 +1758,16 @@ pub fn build_ui() -> AppWindow {
             ui.set_touch_probe(text.into());
         }
 
-        // Show the floating bubble automatically whenever overlay permission is granted
-        let bubble_wish = platform::overlay_enabled();
-        if overlay_ok {
-            platform::save_overlay_enabled(true);
-            ui.set_overlay_enabled(true);
-            bubble("QuickSTT ready", "", &weak, &log);
-            match platform::start_service() {
-                Ok(()) => ui.set_background_ok(true),
-                Err(e) => note(&weak, &log, &format!("Background service: {e}")),
-            }
-        } else {
-            ui.set_overlay_enabled(bubble_wish && overlay_ok);
-        }
+        // The floating pill appears only when the user asks for it
+        // (Settings → Floating pill), never automatically at launch.
+        ui.set_overlay_enabled(false);
         ui.set_battery_ok(platform::ignoring_battery_optimizations());
         platform::watch_overlay_permission();
+
+        // First-run onboarding pages (dark grey, interactive).
+        let done = platform::onboarding_done();
+        ui.set_show_onboarding(!done);
+        ui.set_onboarding_page(0);
     }
 
     ui

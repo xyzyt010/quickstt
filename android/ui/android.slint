@@ -1,6 +1,6 @@
-// QuickSTT for Android — Clean Blue & Squircle UI
-// Static one-glance Listen screen, automatic RAM onload/offload with round
-// circular spinner, real-time live typing, and concise onboarding.
+// QuickSTT for Android — Dark Grey & Blue, minimal, one-glance.
+// Listen tab = testing surface (model strip + transcript + test keyboard).
+// All permissions live in the interactive 5-page onboarding.
 
 export struct Turn {
     text: string,
@@ -22,7 +22,9 @@ export struct ModelItem {
     engine: string,
 }
 
-// ── Building Blocks (Blue Palette + Squircle Geometry) ─────────────────────
+// ── Palette (dark grey + single blue accent) ───────────────────────────────
+// base #0F0F12 · card #17171C · elevated #1E1E24 · stroke #26262E
+// text #F5F5F6 · secondary #9C9CA3 · muted #76767E · accent #3B82F6
 
 component StatusDot inherits Rectangle {
     in property <bool> active;
@@ -30,28 +32,26 @@ component StatusDot inherits Rectangle {
     width: 8px;
     height: 8px;
     border-radius: 4px;
-    background: root.recording ? #EF4444 : (root.active ? #3B82F6 : #475569);
+    background: root.recording ? #EF4444 : (root.active ? #3B82F6 : #4A4A52);
 }
 
-// Proper round circular loading icon for automatic onload, offload, and transcription.
+// Round circular loading icon for onload / offload / transcribe.
 component RoundSpinner inherits Rectangle {
     in property <float> phase: 0.0;
-    in property <color> tint: #60A5FA;
+    in property <color> tint: #F5F5F6;
     width: 20px;
     height: 20px;
     background: transparent;
 
-    // Circular ring track
     Rectangle {
         width: parent.width;
         height: parent.height;
         border-radius: parent.width / 2;
         border-width: 2px;
-        border-color: #1E3A8A;
+        border-color: #2C2C33;
         background: transparent;
     }
 
-    // Smooth rotating circular arc (10 overlapping round segments along 225 deg)
     for seg[idx] in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] : Rectangle {
         property <angle> ang: (root.phase * 360deg) - (idx * 22deg);
         property <length> rad: (parent.width / 2) - 1.5px;
@@ -67,15 +67,15 @@ component RoundSpinner inherits Rectangle {
 
 component Body inherits Text {
     horizontal-alignment: left;
-    color: #F8FAFC;
+    color: #F5F5F6;
     wrap: word-wrap;
 }
 
 component SectionLabel inherits Text {
     font-size: 10px;
     font-weight: 700;
-    letter-spacing: 0.9px;
-    color: #60A5FA;
+    letter-spacing: 1px;
+    color: #8E8E96;
     horizontal-alignment: left;
     wrap: word-wrap;
 }
@@ -84,9 +84,9 @@ component ProgressBar inherits Rectangle {
     in property <float> progress: 0.0;
     height: 6px;
     border-radius: 3px;
-    background: #0F172A;
+    background: #1E1E24;
     border-width: 1px;
-    border-color: #1E293B;
+    border-color: #26262E;
     clip: true;
 
     Rectangle {
@@ -95,18 +95,17 @@ component ProgressBar inherits Rectangle {
         width: parent.width * Math.max(0.0, Math.min(1.0, root.progress));
         height: parent.height;
         border-radius: 3px;
-        background: @linear-gradient(90deg, #1D4ED8 0%, #3B82F6 60%, #93C5FD 100%);
+        background: @linear-gradient(90deg, #2563EB 0%, #3B82F6 60%, #93C5FD 100%);
     }
 }
 
-// ── Minimal Vector Icons ───────────────────────────────────────────────────
+// ── Minimal vector icons ───────────────────────────────────────────────────
 
 component IconWave inherits Rectangle {
     in property <color> tint: #FFFFFF;
     width: 20px;
     height: 20px;
     background: transparent;
-
     Rectangle { x: 2px;  y: 7px;  width: 2.2px; height: 6px;  border-radius: 1.1px; background: root.tint; }
     Rectangle { x: 6px;  y: 4px;  width: 2.2px; height: 12px; border-radius: 1.1px; background: root.tint; }
     Rectangle { x: 10px; y: 2px;  width: 2.2px; height: 16px; border-radius: 1.1px; background: root.tint; }
@@ -129,8 +128,8 @@ component IconLayers inherits Rectangle {
     width: 20px;
     height: 20px;
     background: transparent;
-    Rectangle { width: 14px; height: 2.8px; x: 3px; y: 4px;   border-radius: 1.4px; background: root.tint; }
-    Rectangle { width: 14px; height: 2.8px; x: 3px; y: 8.6px; border-radius: 1.4px; background: root.tint; }
+    Rectangle { width: 14px; height: 2.8px; x: 3px; y: 4px;    border-radius: 1.4px; background: root.tint; }
+    Rectangle { width: 14px; height: 2.8px; x: 3px; y: 8.6px;  border-radius: 1.4px; background: root.tint; }
     Rectangle { width: 14px; height: 2.8px; x: 3px; y: 13.2px; border-radius: 1.4px; background: root.tint; }
 }
 
@@ -139,13 +138,13 @@ component IconSliders inherits Rectangle {
     width: 20px;
     height: 20px;
     background: transparent;
-    Rectangle { width: 14px; height: 1.5px; x: 3px;  y: 6.5px;  border-radius: 1px; background: root.tint; }
-    Rectangle { width: 4px;  height: 4px;   x: 5px;  y: 5.25px; border-radius: 2px; background: root.tint; }
-    Rectangle { width: 14px; height: 1.5px; x: 3px;  y: 13.5px; border-radius: 1px; background: root.tint; }
+    Rectangle { width: 14px; height: 1.5px; x: 3px;  y: 6.5px;   border-radius: 1px; background: root.tint; }
+    Rectangle { width: 4px;  height: 4px;   x: 5px;  y: 5.25px;  border-radius: 2px; background: root.tint; }
+    Rectangle { width: 14px; height: 1.5px; x: 3px;  y: 13.5px;  border-radius: 1px; background: root.tint; }
     Rectangle { width: 4px;  height: 4px;   x: 11px; y: 12.25px; border-radius: 2px; background: root.tint; }
 }
 
-// ── Squircle Controls ──────────────────────────────────────────────────────
+// ── Controls (squircle) ────────────────────────────────────────────────────
 
 component Toggle inherits Rectangle {
     in-out property <bool> on;
@@ -153,10 +152,10 @@ component Toggle inherits Rectangle {
 
     width: 44px;
     height: 24px;
-    border-radius: 8px; // Squircle toggle
-    background: root.on ? #2563EB : #162032;
+    border-radius: 8px;
+    background: root.on ? #2563EB : #2A2A31;
     border-width: 1px;
-    border-color: root.on ? #60A5FA : #293548;
+    border-color: root.on ? #3B82F6 : #3F3F46;
 
     Rectangle {
         width: 18px;
@@ -183,22 +182,22 @@ component ActionButton inherits Rectangle {
     callback clicked();
 
     height: 36px;
-    border-radius: 11px; // Squircle corners instead of stadium pill
+    border-radius: 11px;
     background: !root.enabled
-        ? #0F172A
+        ? #1A1A1F
         : (root.destructive
-            ? #2A1218
+            ? #33191D
             : (root.primary
-                ? (root.blue ? #2563EB : #F8FAFC)
-                : #131E32));
+                ? (root.blue ? #2563EB : #F5F5F6)
+                : #232329));
     border-width: 1px;
     border-color: !root.enabled
-        ? #1E293B
+        ? #26262E
         : (root.destructive
             ? #EF4444
             : (root.primary
-                ? (root.blue ? #60A5FA : #F8FAFC)
-                : #26354D));
+                ? (root.blue ? #3B82F6 : #F5F5F6)
+                : #33333B));
 
     Text {
         width: parent.width;
@@ -207,12 +206,12 @@ component ActionButton inherits Rectangle {
         font-size: 12px;
         font-weight: 600;
         color: !root.enabled
-            ? #475569
+            ? #4A4A52
             : (root.destructive
                 ? #FCA5A5
                 : (root.primary
-                    ? (root.blue ? #FFFFFF : #070B12)
-                    : #E2E8F0));
+                    ? (root.blue ? #FFFFFF : #0F0F12)
+                    : #F5F5F6));
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -232,10 +231,10 @@ component Badge inherits Rectangle {
 
     height: 20px;
     width: label.preferred-width + 14px;
-    border-radius: 6px; // Squircle badge
-    background: root.active ? #172554 : (root.highlight ? #111C33 : #0F172A);
+    border-radius: 6px;
+    background: root.active ? #17203A : (root.highlight ? #1E1E24 : #1A1A1F);
     border-width: 1px;
-    border-color: root.active ? #3B82F6 : (root.highlight ? #2563EB : #1E293B);
+    border-color: root.active ? #3B82F6 : (root.highlight ? #33333B : #26262E);
 
     label := Text {
         width: parent.width;
@@ -243,7 +242,7 @@ component Badge inherits Rectangle {
         text: root.text;
         font-size: 10px;
         font-weight: 700;
-        color: root.active ? #93C5FD : (root.highlight ? #60A5FA : #94A3B8);
+        color: root.active ? #93C5FD : (root.highlight ? #C7C7CE : #9C9CA3);
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -251,55 +250,10 @@ component Badge inherits Rectangle {
 
 component Card inherits Rectangle {
     in property <bool> highlighted: false;
-    border-radius: 16px; // Squircle card
-    background: root.highlighted ? #0F1A2E : #0B1220;
+    border-radius: 18px;
+    background: root.highlighted ? #1E1E24 : #17171C;
     border-width: 1px;
-    border-color: root.highlighted ? #2563EB : #1E293B;
-}
-
-component SetupChip inherits Rectangle {
-    in property <string> title;
-    in property <string> state-label;
-    in property <bool> done: false;
-    callback clicked();
-
-    horizontal-stretch: 1;
-    height: 46px;
-    border-radius: 12px;
-    background: root.done ? #0E1B33 : #111927;
-    border-width: 1px;
-    border-color: root.done ? #2563EB : #283548;
-
-    VerticalLayout {
-        width: parent.width;
-        height: parent.height;
-        alignment: center;
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 2px;
-
-        Text {
-            text: root.title;
-            font-size: 11px;
-            font-weight: 700;
-            color: #F8FAFC;
-            horizontal-alignment: center;
-        }
-
-        Text {
-            text: root.state-label;
-            font-size: 10px;
-            font-weight: 600;
-            color: root.done ? #60A5FA : #94A3B8;
-            horizontal-alignment: center;
-        }
-    }
-
-    TouchArea {
-        width: parent.width;
-        height: parent.height;
-        clicked => { root.clicked(); }
-    }
+    border-color: root.highlighted ? #3B82F6 : #26262E;
 }
 
 component NavItem inherits Rectangle {
@@ -332,17 +286,17 @@ component NavItem inherits Rectangle {
             x: (parent.width - self.width) / 2;
             background: transparent;
 
-            if root.icon == 0 : IconWave    { tint: root.active ? #60A5FA : #64748B; }
-            if root.icon == 1 : IconList    { tint: root.active ? #60A5FA : #64748B; }
-            if root.icon == 2 : IconLayers  { tint: root.active ? #60A5FA : #64748B; }
-            if root.icon == 3 : IconSliders { tint: root.active ? #60A5FA : #64748B; }
+            if root.icon == 0 : IconWave    { tint: root.active ? #F5F5F6 : #76767E; }
+            if root.icon == 1 : IconList    { tint: root.active ? #F5F5F6 : #76767E; }
+            if root.icon == 2 : IconLayers  { tint: root.active ? #F5F5F6 : #76767E; }
+            if root.icon == 3 : IconSliders { tint: root.active ? #F5F5F6 : #76767E; }
         }
 
         Text {
             text: root.label;
             font-size: 10px;
             font-weight: root.active ? 700 : 500;
-            color: root.active ? #F8FAFC : #64748B;
+            color: root.active ? #F5F5F6 : #76767E;
             horizontal-alignment: center;
         }
     }
@@ -375,14 +329,14 @@ component TurnRow inherits Rectangle {
             width: 30px;
             height: 30px;
             border-radius: 9px;
-            background: #101B30;
+            background: #1E1E24;
             border-width: 1px;
-            border-color: #2563EB;
+            border-color: #26262E;
 
             IconWave {
                 x: 5px;
                 y: 5px;
-                tint: #60A5FA;
+                tint: #3B82F6;
             }
         }
 
@@ -399,7 +353,7 @@ component TurnRow inherits Rectangle {
             Text {
                 text: "\{root.when} · \{root.seconds}s";
                 font-size: 11px;
-                color: #64748B;
+                color: #76767E;
                 horizontal-alignment: left;
             }
         }
@@ -414,20 +368,241 @@ component TurnRow inherits Rectangle {
     }
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+//  Onboarding primitives (dark grey, vector-drawn, fully interactive)
+// ────────────────────────────────────────────────────────────────────────────
+
+component OnboardDot inherits Rectangle {
+    in property <bool> active;
+    width: 7px;
+    height: 7px;
+    border-radius: 3.5px;
+    background: root.active ? #3B82F6 : #33333B;
+}
+
+component OnboardHeroGlow inherits Rectangle {
+    width: 168px;
+    height: 168px;
+    border-radius: 34px;
+    background: @radial-gradient(circle, #23232C 0%, #1A1A20 70%, #17171C 100%);
+    border-width: 1px;
+    border-color: #2C2C34;
+}
+
+// Page 0 hero: floating squircle pill above an app window.
+component HeroPill inherits Rectangle {
+    width: 150px;
+    height: 150px;
+    background: transparent;
+
+    Rectangle {
+        width: 118px;
+        height: 78px;
+        x: 16px;
+        y: 56px;
+        border-radius: 12px;
+        background: #1E1E24;
+        border-width: 1px;
+        border-color: #2C2C34;
+
+        Rectangle { width: 70px; height: 6px; x: 12px; y: 12px; border-radius: 3px; background: #33333B; }
+        Rectangle { width: 92px; height: 6px; x: 12px; y: 28px; border-radius: 3px; background: #2C2C33; }
+        Rectangle { width: 54px; height: 6px; x: 12px; y: 44px; border-radius: 3px; background: #2C2C33; }
+    }
+
+    Rectangle {
+        width: 96px;
+        height: 26px;
+        x: 27px;
+        y: 26px;
+        border-radius: 11px;
+        background: #2A2A31;
+        border-width: 1px;
+        border-color: #3B82F6;
+
+        for i in [0, 1, 2, 3, 4] : Rectangle {
+            property <int> idx: i;
+            width: 3.4px;
+            height: [8px, 13px, 17px, 13px, 8px][self.idx];
+            border-radius: 1.7px;
+            x: 22px + i * 13px;
+            y: (parent.height - self.height) / 2;
+            background: #FFFFFF;
+        }
+    }
+}
+
+// Page 1 hero: microphone inside rings.
+component HeroMic inherits Rectangle {
+    width: 150px;
+    height: 150px;
+    background: transparent;
+
+    Rectangle { width: 122px; height: 122px; x: 14px; y: 14px; border-radius: 61px; border-width: 1px; border-color: #2C2C34; background: transparent; }
+    Rectangle { width: 88px;  height: 88px;  x: 31px; y: 31px; border-radius: 44px; border-width: 1px; border-color: #33333B; background: #1E1E24; }
+
+    // Mic capsule
+    Rectangle {
+        width: 22px;
+        height: 34px;
+        x: 64px;
+        y: 52px;
+        border-radius: 11px;
+        background: #F5F5F6;
+    }
+    // Mic cradle
+    Rectangle {
+        width: 36px;
+        height: 18px;
+        x: 57px;
+        y: 76px;
+        border-radius: 18px;
+        background: transparent;
+        border-width: 3px;
+        border-color: #9C9CA3;
+    }
+    Rectangle { width: 3px; height: 12px; x: 73px; y: 92px; background: #9C9CA3; }
+    Rectangle { width: 20px; height: 3px; x: 65px; y: 104px; border-radius: 1.5px; background: #9C9CA3; }
+}
+
+// Page 2 hero: pill above stacked app cards with ✓ and ✕.
+component HeroStack inherits Rectangle {
+    width: 150px;
+    height: 150px;
+    background: transparent;
+
+    Rectangle { width: 104px; height: 56px; x: 30px; y: 84px; border-radius: 12px; background: #1E1E24; border-width: 1px; border-color: #2C2C34; }
+    Rectangle { width: 104px; height: 56px; x: 20px; y: 62px; border-radius: 12px; background: #222229; border-width: 1px; border-color: #2C2C34; }
+    Rectangle { width: 104px; height: 56px; x: 38px; y: 40px; border-radius: 12px; background: #17171C; border-width: 1px; border-color: #3B82F6; }
+
+    // ✓ glyph
+    Rectangle { width: 26px; height: 26px; x: 66px; y: 16px; border-radius: 13px; background: #2563EB;
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: "✓";
+            font-size: 13px;
+            font-weight: 700;
+            color: #FFFFFF;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    // ✕ glyph
+    Rectangle { width: 26px; height: 26px; x: 96px; y: 34px; border-radius: 13px; background: #3F3F46;
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: "✕";
+            font-size: 12px;
+            font-weight: 700;
+            color: #FFFFFF;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Page 3 hero: keyboard with wave spacebar.
+component HeroKeyboard inherits Rectangle {
+    width: 150px;
+    height: 150px;
+    background: transparent;
+
+    Rectangle {
+        width: 138px;
+        height: 82px;
+        x: 6px;
+        y: 48px;
+        border-radius: 14px;
+        background: #1E1E24;
+        border-width: 1px;
+        border-color: #2C2C34;
+
+        for row in [0, 1, 2] : HorizontalLayout {
+            x: 10px;
+            y: 10px + row * 16px;
+            height: 11px;
+            spacing: 4px;
+
+            for key in [0, 1, 2, 3, 4, 5, 6, 7, 8] : Rectangle {
+                width: 11px;
+                height: 11px;
+                border-radius: 3px;
+                background: #2C2C34;
+            }
+        }
+        // Spacebar with wave glyph
+        Rectangle {
+            width: 78px;
+            height: 11px;
+            x: 30px;
+            y: 58px;
+            border-radius: 3px;
+            background: #2563EB;
+
+            for i in [0, 1, 2] : Rectangle {
+                property <int> idx: i;
+                width: 2.4px;
+                height: [4px, 8px, 4px][self.idx];
+                border-radius: 1.2px;
+                x: 30px + i * 8px;
+                y: (parent.height - self.height) / 2;
+                background: #FFFFFF;
+            }
+        }
+    }
+
+    // Floating cursor dot
+    Rectangle { width: 8px; height: 8px; x: 70px; y: 22px; border-radius: 4px; background: #3B82F6; }
+}
+
+// Page 4 hero: model + round loader + RAM badge.
+component HeroModel inherits Rectangle {
+    width: 150px;
+    height: 150px;
+    background: transparent;
+
+    Rectangle { width: 96px; height: 96px; x: 27px; y: 27px; border-radius: 24px; background: #1E1E24; border-width: 1px; border-color: #3B82F6; }
+    IconLayers { x: 63px; y: 47px; tint: #3B82F6; width: 24px; height: 24px; }
+
+    Rectangle {
+        width: 62px;
+        height: 18px;
+        x: 44px;
+        y: 104px;
+        border-radius: 9px;
+        background: #17203A;
+        border-width: 1px;
+        border-color: #3B82F6;
+
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: "READY";
+            font-size: 10px;
+            font-weight: 700;
+            color: #93C5FD;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  MAIN APP WINDOW
 // ══════════════════════════════════════════════════════════════════════════════
 
 export component AppWindow inherits Window {
     title: "QuickSTT";
-    background: #060A12;
+    background: #0F0F12;
     default-font-size: 14px;
     preferred-width: 412px;
     preferred-height: 760px;
 
     in-out property <int> tab: 0;
     in-out property <bool> recording: false;
-    in-out property <string> live-text: "Tap Start or press the floating pill to dictate.";
+    in-out property <string> live-text: "Tap the mic or the pill to dictate.";
     in-out property <int> selected-model: 0;
     in-out property <bool> auto-offload: true;
     in-out property <bool> haptics: true;
@@ -444,7 +619,7 @@ export component AppWindow inherits Window {
     in-out property <bool> model-loaded: false;
     in-out property <bool> model-loading: false;
     in-out property <string> loading-label: "";
-    in-out property <string> model-ram-status: "Ready in RAM · Cactus Whistle 16M";
+    in-out property <string> model-ram-status: "Cactus Whistle 16M";
     in-out property <bool> overlay-ok: false;
     in-out property <bool> overlay-enabled: false;
     in-out property <bool> auto-type-ok: false;
@@ -459,6 +634,8 @@ export component AppWindow inherits Window {
     in-out property <string> diagnostics: "";
     in-out property <bool> background-ok: false;
     in-out property <bool> battery-ok: false;
+    in-out property <bool> show-onboarding: false;
+    in-out property <int> onboarding-page: 0;
     in property <[string]> tabs: ["Listen", "History", "Models", "Settings"];
 
     in-out property <[Turn]> turns: [];
@@ -488,21 +665,24 @@ export component AppWindow inherits Window {
     callback copy-turn(string);
     callback clear-history();
     callback report-tap(float, float);
+    callback test-keyboard();
+    callback onboarding-finish();
+    callback restart-onboarding();
 
     Rectangle {
-        background: #060A12;
+        background: #0F0F12;
 
         VerticalLayout {
             width: parent.width;
             height: parent.height;
 
             // Status bar spacer
-            Rectangle { height: 18px; background: #060A12; }
+            Rectangle { height: 18px; background: #0F0F12; }
 
-            // ── Compact Header ─────────────────────────────────────────────
+            // ── Header ─────────────────────────────────────────────────────
             Rectangle {
                 height: 48px;
-                background: #060A12;
+                background: #0F0F12;
 
                 HorizontalLayout {
                     width: parent.width;
@@ -511,21 +691,16 @@ export component AppWindow inherits Window {
                     padding-right: 16px;
                     spacing: 10px;
 
-                    // Squircle brand mark
                     Rectangle {
                         width: 32px;
                         height: 32px;
                         y: (parent.height - self.height) / 2;
                         border-radius: 10px;
-                        background: #0D182C;
+                        background: #1E1E24;
                         border-width: 1px;
-                        border-color: #2563EB;
+                        border-color: #2C2C34;
 
-                        IconWave {
-                            x: 6px;
-                            y: 6px;
-                            tint: #60A5FA;
-                        }
+                        IconWave { x: 6px; y: 6px; tint: #3B82F6; }
                     }
 
                     VerticalLayout {
@@ -536,29 +711,28 @@ export component AppWindow inherits Window {
                             text: "QuickSTT";
                             font-size: 16px;
                             font-weight: 700;
-                            color: #F8FAFC;
+                            color: #F5F5F6;
                             horizontal-alignment: left;
                         }
 
                         Text {
                             text: root.models.length > 0 ? root.models[root.selected-model].name : "Cactus Whistle 16M";
                             font-size: 11px;
-                            color: #94A3B8;
+                            color: #9C9CA3;
                             horizontal-alignment: left;
                         }
                     }
 
                     Rectangle { horizontal-stretch: 1; }
 
-                    // Live status squircle chip with round loading icon when onloading/offloading/busy
                     Rectangle {
-                        width: 118px;
+                        width: 112px;
                         height: 30px;
                         y: (parent.height - self.height) / 2;
                         border-radius: 10px;
-                        background: root.recording ? #2A1218 : (root.busy || root.model-loading ? #10203B : #0C1424);
+                        background: root.recording ? #33191D : (root.busy || root.model-loading ? #1E1E24 : #17171C);
                         border-width: 1px;
-                        border-color: root.recording ? #EF4444 : (root.busy || root.model-loading ? #3B82F6 : #1E293B);
+                        border-color: root.recording ? #EF4444 : (root.busy || root.model-loading ? #3B82F6 : #26262E);
 
                         HorizontalLayout {
                             width: parent.width;
@@ -585,10 +759,10 @@ export component AppWindow inherits Window {
                                     ? (root.loading-label != "" ? root.loading-label : "Loading…")
                                     : (root.recording
                                         ? "Recording"
-                                        : (root.busy ? "Decoding…" : (root.model-loaded ? "In RAM" : "Standby")));
+                                        : (root.busy ? "Working…" : (root.model-loaded ? "In RAM" : "Standby")));
                                 font-size: 11px;
                                 font-weight: 600;
-                                color: #F8FAFC;
+                                color: #F5F5F6;
                                 horizontal-alignment: left;
                                 vertical-alignment: center;
                                 overflow: elide;
@@ -598,28 +772,27 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ── Main Content Area ──────────────────────────────────────────
+            // ── Content ────────────────────────────────────────────────────
             Rectangle {
                 vertical-stretch: 1;
-                background: #060A12;
+                background: #0F0F12;
                 clip: true;
 
-                // ══ TAB 0: LISTEN (Static, One-Glance, No Moving Bars) ════
+                // ══ TAB 0: LISTEN (testing surface, one glance) ═══════════
                 if root.tab == 0 : VerticalLayout {
                     width: parent.width;
                     height: parent.height;
                     alignment: start;
                     padding-left: 14px;
                     padding-right: 14px;
-                    padding-top: 4px;
+                    padding-top: 2px;
                     padding-bottom: 8px;
                     spacing: 10px;
 
-                    // 1. Dictation Control Squircle Card (Static, Clean, One-Tap)
+                    // Live transcript card (probe target)
                     Card {
                         highlighted: root.recording || root.busy || root.model-loading;
 
-                        // Touch probe handler at top of card so automated UI wiring test hits (30, 110)
                         probe := TouchArea {
                             width: parent.width;
                             height: parent.height;
@@ -631,42 +804,40 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             width: parent.width;
                             padding: 12px;
-                            spacing: 10px;
+                            spacing: 8px;
 
                             HorizontalLayout {
                                 spacing: 8px;
 
                                 if (root.busy || root.model-loading) : RoundSpinner {
-                                    width: 18px;
-                                    height: 18px;
+                                    width: 16px;
+                                    height: 16px;
                                     y: (parent.height - self.height) / 2;
                                     phase: root.wave-phase;
                                 }
 
-                                Body {
-                                    text: root.status-text;
-                                    font-size: 13px;
-                                    font-weight: 600;
-                                    color: #F8FAFC;
+                                SectionLabel {
+                                    text: root.recording
+                                        ? (root.live-mode ? "LIVE" : "LISTENING")
+                                        : "TRANSCRIPT";
                                     horizontal-stretch: 1;
                                 }
 
-                                // Live vs On-Stop mode squircle toggle button
                                 Rectangle {
-                                    width: 92px;
-                                    height: 24px;
+                                    width: 78px;
+                                    height: 22px;
                                     border-radius: 7px;
-                                    background: root.live-mode ? #172554 : #111827;
+                                    background: root.live-mode ? #17203A : #1E1E24;
                                     border-width: 1px;
-                                    border-color: root.live-mode ? #3B82F6 : #1E293B;
+                                    border-color: root.live-mode ? #3B82F6 : #2C2C33;
 
                                     Text {
                                         width: parent.width;
                                         height: parent.height;
-                                        text: root.live-mode ? "Live Type: ON" : "On Stop Only";
+                                        text: root.live-mode ? "Live: ON" : "On stop";
                                         font-size: 10px;
                                         font-weight: 700;
-                                        color: root.live-mode ? #93C5FD : #94A3B8;
+                                        color: root.live-mode ? #93C5FD : #9C9CA3;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }
@@ -679,66 +850,12 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // Primary Start / Stop & Floating Pill buttons
-                            HorizontalLayout {
-                                spacing: 8px;
-
-                                ActionButton {
-                                    horizontal-stretch: 2;
-                                    height: 44px;
-                                    label: root.recording
-                                        ? "■  Stop & Auto-Type"
-                                        : (root.model-loading
-                                            ? (root.loading-label != "" ? root.loading-label : "Loading Model…")
-                                            : (root.busy ? "Transcribing…" : "●  Start Dictation"));
-                                    primary: !root.recording;
-                                    blue: !root.recording;
-                                    destructive: root.recording;
-                                    enabled: !root.busy;
-                                    clicked => { root.toggle-record(); }
-                                }
-
-                                ActionButton {
-                                    horizontal-stretch: 1;
-                                    height: 44px;
-                                    label: root.overlay-enabled ? "Pill: Active" : "Show Pill";
-                                    primary: false;
-                                    clicked => { root.toggle-overlay(); }
-                                }
-                            }
-                        }
-                    }
-
-                    // 2. Transcript Output Squircle Card
-                    Card {
-                        VerticalLayout {
-                            width: parent.width;
-                            padding: 12px;
-                            spacing: 8px;
-
-                            HorizontalLayout {
-                                spacing: 8px;
-
-                                SectionLabel {
-                                    text: root.recording
-                                        ? (root.live-mode ? "LIVE REAL-TIME TRANSCRIPT" : "RECORDING")
-                                        : "TRANSCRIPT";
-                                    horizontal-stretch: 1;
-                                }
-
-                                Text {
-                                    text: root.auto-type-ok ? "Auto-types into text box" : "Copies if no text box";
-                                    font-size: 10px;
-                                    color: #64748B;
-                                }
-                            }
-
                             Rectangle {
-                                min-height: 68px;
+                                min-height: 58px;
                                 border-radius: 12px;
-                                background: #070C16;
+                                background: #121217;
                                 border-width: 1px;
-                                border-color: root.recording ? #2563EB : #162032;
+                                border-color: root.recording ? #3B82F6 : #232329;
 
                                 VerticalLayout {
                                     width: parent.width;
@@ -747,7 +864,7 @@ export component AppWindow inherits Window {
                                     Body {
                                         text: root.live-text;
                                         font-size: 14px;
-                                        color: root.has-text || root.recording ? #F8FAFC : #94A3B8;
+                                        color: root.has-text || root.recording ? #F5F5F6 : #8A8A92;
                                     }
                                 }
                             }
@@ -786,7 +903,30 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // 3. Active Model & Automatic Onload/Offload Bar
+                    // Dictation control
+                    Card {
+                        VerticalLayout {
+                            width: parent.width;
+                            padding: 12px;
+                            spacing: 8px;
+
+                            ActionButton {
+                                height: 52px;
+                                label: root.recording
+                                    ? "■  Stop & Type"
+                                    : (root.model-loading
+                                        ? (root.loading-label != "" ? root.loading-label : "Loading…")
+                                        : (root.busy ? "Transcribing…" : "●  Dictate"));
+                                primary: !root.recording;
+                                blue: !root.recording;
+                                destructive: root.recording;
+                                enabled: !root.busy;
+                                clicked => { root.toggle-record(); }
+                            }
+                        }
+                    }
+
+                    // Model strip — pick a downloaded model, test in keyboard
                     Card {
                         VerticalLayout {
                             width: parent.width;
@@ -796,9 +936,87 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 spacing: 8px;
 
+                                SectionLabel {
+                                    text: "MODEL";
+                                    horizontal-stretch: 1;
+                                }
+
+                                ActionButton {
+                                    width: 72px;
+                                    height: 26px;
+                                    label: "All Models ›";
+                                    primary: false;
+                                    clicked => { root.nav(2); }
+                                }
+                            }
+
+                            Flickable {
+                                height: 40px;
+                                content-width: strip.width;
+                                content-height: parent.height;
+
+                                strip := HorizontalLayout {
+                                    width: 1280px;
+                                    spacing: 6px;
+
+                                    for m[i] in root.models : Rectangle {
+                                        width: 150px;
+                                        height: 36px;
+                                        border-radius: 10px;
+                                        background: root.selected-model == i
+                                            ? (m.installed ? #2563EB : #1A1A1F)
+                                            : #1E1E24;
+                                        border-width: 1px;
+                                        border-color: root.selected-model == i
+                                            ? (m.installed ? #3B82F6 : #33333B)
+                                            : #2C2C33;
+                                        opacity: m.installed ? 1.0 : 0.55;
+
+                                        VerticalLayout {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            alignment: center;
+                                            padding-left: 10px;
+                                            padding-right: 8px;
+                                            spacing: 1px;
+
+                                            Text {
+                                                text: m.name;
+                                                font-size: 11px;
+                                                font-weight: 700;
+                                                color: root.selected-model == i && m.installed ? #FFFFFF : #F5F5F6;
+                                                horizontal-alignment: left;
+                                                overflow: elide;
+                                            }
+
+                                            Text {
+                                                text: m.loaded ? "In RAM" : (m.installed ? "Ready" : m.size);
+                                                font-size: 9px;
+                                                color: root.selected-model == i && m.installed ? #DBEAFE : #9C9CA3;
+                                                horizontal-alignment: left;
+                                            }
+                                        }
+
+                                        TouchArea {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            clicked => {
+                                                root.pick-model(i);
+                                                if !m.installed {
+                                                    root.nav(2);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+
                                 if (root.model-loading || root.busy) : RoundSpinner {
-                                    width: 18px;
-                                    height: 18px;
+                                    width: 16px;
+                                    height: 16px;
                                     y: (parent.height - self.height) / 2;
                                     phase: root.wave-phase;
                                 }
@@ -808,31 +1026,20 @@ export component AppWindow inherits Window {
                                     active: root.model-loaded;
                                 }
 
-                                VerticalLayout {
+                                Text {
+                                    text: root.model-loading
+                                        ? (root.loading-label != "" ? root.loading-label : "Working…")
+                                        : root.model-ram-status;
+                                    font-size: 10px;
+                                    color: root.model-loaded ? #93C5FD : #9C9CA3;
+                                    horizontal-alignment: left;
+                                    vertical-alignment: center;
+                                    overflow: elide;
                                     horizontal-stretch: 1;
-                                    spacing: 1px;
-
-                                    Text {
-                                        text: root.models.length > 0 ? root.models[root.selected-model].name : "Cactus Whistle 16M";
-                                        font-size: 13px;
-                                        font-weight: 700;
-                                        color: #F8FAFC;
-                                        horizontal-alignment: left;
-                                    }
-
-                                    Text {
-                                        text: root.model-loading
-                                            ? (root.loading-label != "" ? root.loading-label : "Loading model…")
-                                            : root.model-ram-status;
-                                        font-size: 11px;
-                                        color: root.model-loaded ? #60A5FA : #94A3B8;
-                                        horizontal-alignment: left;
-                                        overflow: elide;
-                                    }
                                 }
 
                                 ActionButton {
-                                    width: 72px;
+                                    width: 66px;
                                     height: 30px;
                                     label: root.model-loaded ? "Offload" : "Onload";
                                     primary: !root.model-loaded;
@@ -846,95 +1053,37 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-
-                                ActionButton {
-                                    width: 74px;
-                                    height: 30px;
-                                    label: "Models ›";
-                                    primary: false;
-                                    clicked => { root.nav(2); }
-                                }
                             }
                         }
                     }
 
-                    // 4. Concise Onboarding: 1-Tap Setup & How to Use
+                    // Test typing in the native keyboard
                     Card {
                         VerticalLayout {
                             width: parent.width;
                             padding: 12px;
-                            spacing: 8px;
+                            spacing: 6px;
 
                             HorizontalLayout {
                                 spacing: 8px;
+
                                 SectionLabel {
-                                    text: "SETUP & HOW TO USE";
+                                    text: "NATIVE KEYBOARD TEST";
                                     horizontal-stretch: 1;
                                 }
-                                Text {
-                                    text: (root.mic-ok && root.overlay-enabled && root.auto-type-ok)
-                                        ? "All ready ✓"
-                                        : "Tap any step to enable";
-                                    font-size: 10px;
-                                    color: (root.mic-ok && root.overlay-enabled && root.auto-type-ok) ? #60A5FA : #94A3B8;
+
+                                if root.auto-type-ok : Badge {
+                                    text: "IME ON";
+                                    active: true;
                                 }
                             }
 
-                            // 3 One-Tap Permission Squircle Chips
-                            HorizontalLayout {
-                                spacing: 6px;
-
-                                SetupChip {
-                                    title: "1. Microphone";
-                                    state-label: root.mic-ok ? "Ready ✓" : "Tap to Allow";
-                                    done: root.mic-ok;
-                                    clicked => {
-                                        if root.mic-ok { root.test-mic(); } else { root.grant-mic(); }
-                                    }
-                                }
-
-                                SetupChip {
-                                    title: "2. Floating Pill";
-                                    state-label: root.overlay-enabled ? "Active ✓" : (root.overlay-ok ? "Tap to Show" : "Tap to Allow");
-                                    done: root.overlay-enabled;
-                                    clicked => { root.toggle-overlay(); }
-                                }
-
-                                SetupChip {
-                                    title: "3. Auto-Type";
-                                    state-label: root.auto-type-ok ? "Enabled ✓" : "Tap to Enable";
-                                    done: root.auto-type-ok;
-                                    clicked => { root.open-auto-type-settings(); }
-                                }
-                            }
-
-                            // Simple 3-line guide
-                            VerticalLayout {
-                                spacing: 3px;
-
-                                Text {
-                                    text: "• Tap the floating squircle pill in any app to start (auto-onloads model).";
-                                    font-size: 11px;
-                                    color: #94A3B8;
-                                    horizontal-alignment: left;
-                                    wrap: word-wrap;
-                                }
-
-                                Text {
-                                    text: "• Speak into a focused text box for live typing, or tap STOP when done.";
-                                    font-size: 11px;
-                                    color: #94A3B8;
-                                    horizontal-alignment: left;
-                                    wrap: word-wrap;
-                                }
-
-                                Text {
-                                    text: "• With no text box focused, the full transcript copies on STOP & auto-offloads.";
-                                    font-size: 11px;
-                                    color: #94A3B8;
-                                    horizontal-alignment: left;
-                                    wrap: word-wrap;
-                                }
+                            ActionButton {
+                                height: 38px;
+                                label: "Send test line to the focused text box";
+                                primary: true;
+                                blue: true;
+                                clicked => { root.test-keyboard(); }
                             }
                         }
                     }
@@ -960,13 +1109,13 @@ export component AppWindow inherits Window {
                                 text: "History";
                                 font-size: 20px;
                                 font-weight: 700;
-                                color: #F8FAFC;
+                                color: #F5F5F6;
                                 horizontal-alignment: left;
                                 horizontal-stretch: 1;
                             }
 
                             if root.turns.length > 0 : ActionButton {
-                                width: 80px;
+                                width: 84px;
                                 height: 30px;
                                 label: "Clear All";
                                 primary: false;
@@ -988,9 +1137,9 @@ export component AppWindow inherits Window {
                                 }
 
                                 Body {
-                                    text: "Tap Start on the Listen tab or use the floating squircle pill.";
+                                    text: "Dictate on the Listen tab.";
                                     font-size: 12px;
-                                    color: #94A3B8;
+                                    color: #9C9CA3;
                                 }
                             }
                         }
@@ -1027,14 +1176,13 @@ export component AppWindow inherits Window {
                         spacing: 10px;
 
                         Text {
-                            text: "Speech Models";
+                            text: "Models";
                             font-size: 20px;
                             font-weight: 700;
-                            color: #F8FAFC;
+                            color: #F5F5F6;
                             horizontal-alignment: left;
                         }
 
-                        // Active RAM Status Card with Round Spinner
                         Card {
                             highlighted: root.model-loaded || root.model-loading;
 
@@ -1054,7 +1202,7 @@ export component AppWindow inherits Window {
                                     }
 
                                     SectionLabel {
-                                        text: "AUTOMATIC RAM LIFECYCLE";
+                                        text: "RAM";
                                         horizontal-stretch: 1;
                                     }
 
@@ -1068,7 +1216,7 @@ export component AppWindow inherits Window {
 
                                 Body {
                                     text: root.model-loading
-                                        ? (root.loading-label != "" ? root.loading-label : "Updating model RAM…")
+                                        ? (root.loading-label != "" ? root.loading-label : "Updating RAM…")
                                         : root.model-ram-status;
                                     font-size: 13px;
                                     font-weight: 600;
@@ -1080,7 +1228,7 @@ export component AppWindow inherits Window {
                                     ActionButton {
                                         horizontal-stretch: 1;
                                         height: 32px;
-                                        label: "Onload to RAM";
+                                        label: "Onload";
                                         primary: true;
                                         blue: true;
                                         enabled: root.model-installed && !root.busy && !root.model-loading;
@@ -1090,7 +1238,7 @@ export component AppWindow inherits Window {
                                     ActionButton {
                                         horizontal-stretch: 1;
                                         height: 32px;
-                                        label: "Offload RAM";
+                                        label: "Offload";
                                         primary: false;
                                         enabled: root.model-loaded && !root.busy && !root.model-loading;
                                         clicked => { root.offload-model(); }
@@ -1105,12 +1253,12 @@ export component AppWindow inherits Window {
                                 padding: 12px;
                                 spacing: 4px;
 
-                                SectionLabel { text: "BENCHMARK RESULT"; }
+                                SectionLabel { text: "SELF TEST"; }
 
                                 Body {
                                     text: root.test-result;
                                     font-size: 12px;
-                                    color: #E2E8F0;
+                                    color: #EDEDF0;
                                 }
                             }
                         }
@@ -1130,7 +1278,7 @@ export component AppWindow inherits Window {
                                         text: m.name;
                                         font-size: 14px;
                                         font-weight: 700;
-                                        color: #F8FAFC;
+                                        color: #F5F5F6;
                                         horizontal-alignment: left;
                                         horizontal-stretch: 1;
                                         overflow: elide;
@@ -1151,14 +1299,7 @@ export component AppWindow inherits Window {
                                 Body {
                                     text: m.detail;
                                     font-size: 12px;
-                                    color: #94A3B8;
-                                }
-
-                                Text {
-                                    text: m.ram-status;
-                                    font-size: 11px;
-                                    color: m.loaded ? #60A5FA : #64748B;
-                                    horizontal-alignment: left;
+                                    color: #9C9CA3;
                                 }
 
                                 if m.downloading : VerticalLayout {
@@ -1176,7 +1317,7 @@ export component AppWindow inherits Window {
                                             text: Math.round(m.progress * 100.0) + "%";
                                             font-size: 11px;
                                             font-weight: 700;
-                                            color: #F8FAFC;
+                                            color: #F5F5F6;
                                             horizontal-alignment: right;
                                         }
                                     }
@@ -1206,26 +1347,11 @@ export component AppWindow inherits Window {
                                     if m.installed : ActionButton {
                                         horizontal-stretch: 1;
                                         height: 32px;
-                                        label: root.selected-model == i ? "Selected" : "Use Model";
+                                        label: root.selected-model == i ? "Selected" : "Use";
                                         primary: root.selected-model != i;
                                         blue: root.selected-model != i;
                                         enabled: root.selected-model != i;
                                         clicked => { root.pick-model(i); }
-                                    }
-
-                                    if m.installed : ActionButton {
-                                        horizontal-stretch: 1;
-                                        height: 32px;
-                                        label: m.loaded ? "Offload" : "Onload";
-                                        primary: false;
-                                        enabled: !root.busy && !root.model-loading;
-                                        clicked => {
-                                            if m.loaded {
-                                                root.offload-model();
-                                            } else {
-                                                root.pick-model(i);
-                                            }
-                                        }
                                     }
 
                                     if m.installed : ActionButton {
@@ -1269,11 +1395,11 @@ export component AppWindow inherits Window {
                             text: "Settings";
                             font-size: 20px;
                             font-weight: 700;
-                            color: #F8FAFC;
+                            color: #F5F5F6;
                             horizontal-alignment: left;
                         }
 
-                        // 1. Floating Squircle Pill
+                        // Floating pill
                         Card {
                             highlighted: root.overlay-enabled;
 
@@ -1282,7 +1408,7 @@ export component AppWindow inherits Window {
                                 padding: 12px;
                                 spacing: 8px;
 
-                                SectionLabel { text: "FLOATING SQUIRCLE PILL"; }
+                                SectionLabel { text: "FLOATING PILL"; }
 
                                 HorizontalLayout {
                                     spacing: 12px;
@@ -1292,17 +1418,17 @@ export component AppWindow inherits Window {
                                         spacing: 2px;
 
                                         Body {
-                                            text: "Floating dictation pill";
+                                            text: "Show the pill";
                                             font-size: 14px;
                                             font-weight: 600;
                                         }
 
                                         Body {
                                             text: root.overlay-ok
-                                                ? (root.overlay-enabled ? "Active above apps" : "Ready to show")
-                                                : "Needs Display over other apps permission";
+                                                ? "Appears only when you turn it on"
+                                                : "Needs “Display over other apps”";
                                             font-size: 11px;
-                                            color: #94A3B8;
+                                            color: #9C9CA3;
                                         }
                                     }
 
@@ -1312,36 +1438,16 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                HorizontalLayout {
-                                    spacing: 8px;
-
-                                    if !root.overlay-ok : ActionButton {
-                                        horizontal-stretch: 1;
-                                        label: "Allow Overlay";
-                                        primary: true;
-                                        blue: true;
-                                        clicked => { root.open-overlay-settings(); }
-                                    }
-
-                                    if root.overlay-ok : ActionButton {
-                                        horizontal-stretch: 1;
-                                        label: root.overlay-enabled ? "Hide Pill" : "Show Pill";
-                                        primary: !root.overlay-enabled;
-                                        blue: !root.overlay-enabled;
-                                        clicked => { root.toggle-overlay(); }
-                                    }
-
-                                    ActionButton {
-                                        horizontal-stretch: 1;
-                                        label: root.bubble-expanded ? "Collapse Pill" : "Expand Pill";
-                                        primary: false;
-                                        clicked => { root.toggle-bubble-expand(); }
-                                    }
+                                if !root.overlay-ok : ActionButton {
+                                    label: "Allow Overlay";
+                                    primary: true;
+                                    blue: true;
+                                    clicked => { root.open-overlay-settings(); }
                                 }
                             }
                         }
 
-                        // 2. Auto-Typing & Live Mode
+                        // Voice auto-type keyboard
                         Card {
                             highlighted: root.auto-type-ok;
 
@@ -1350,7 +1456,7 @@ export component AppWindow inherits Window {
                                 padding: 12px;
                                 spacing: 8px;
 
-                                SectionLabel { text: "AUTOMATIC & LIVE TYPING"; }
+                                SectionLabel { text: "VOICE AUTO-TYPE"; }
 
                                 HorizontalLayout {
                                     spacing: 12px;
@@ -1360,15 +1466,15 @@ export component AppWindow inherits Window {
                                         spacing: 2px;
 
                                         Body {
-                                            text: "Live real-time typing";
+                                            text: "Typing via the system keyboard";
                                             font-size: 14px;
                                             font-weight: 600;
                                         }
 
                                         Body {
-                                            text: "Types into the focused text box while speaking, or copies all at once if no text box is focused.";
+                                            text: "Types into the focused text box live, or copies if none is focused.";
                                             font-size: 11px;
-                                            color: #94A3B8;
+                                            color: #9C9CA3;
                                         }
                                     }
 
@@ -1379,7 +1485,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 ActionButton {
-                                    label: root.auto-type-ok ? "Voice Auto-Type: Enabled ✓ (Tap to Switch)" : "Enable Voice Auto-Type Keyboard";
+                                    label: root.auto-type-ok ? "Voice Auto-Type: Enabled ✓" : "Enable Voice Auto-Type";
                                     primary: !root.auto-type-ok;
                                     blue: !root.auto-type-ok;
                                     clicked => { root.open-auto-type-settings(); }
@@ -1387,14 +1493,14 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // 3. Automatic Onload / Offload
+                        // Automatic offload
                         Card {
                             VerticalLayout {
                                 width: parent.width;
                                 padding: 12px;
                                 spacing: 8px;
 
-                                SectionLabel { text: "AUTOMATIC MODEL MEMORY"; }
+                                SectionLabel { text: "MEMORY"; }
 
                                 HorizontalLayout {
                                     spacing: 12px;
@@ -1404,15 +1510,15 @@ export component AppWindow inherits Window {
                                         spacing: 2px;
 
                                         Body {
-                                            text: "Auto-onload on start & offload on stop";
+                                            text: "Auto-offload after 30 s";
                                             font-size: 14px;
                                             font-weight: 600;
                                         }
 
                                         Body {
-                                            text: "Loads the model when recording starts and frees RAM when transcription finishes.";
+                                            text: "Onloaded on start, freed 30 s after you stop speaking.";
                                             font-size: 11px;
-                                            color: #94A3B8;
+                                            color: #9C9CA3;
                                         }
                                     }
 
@@ -1424,21 +1530,21 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // 4. Background Keep-Alive
+                        // Background
                         Card {
                             VerticalLayout {
                                 width: parent.width;
                                 padding: 12px;
                                 spacing: 8px;
 
-                                SectionLabel { text: "BACKGROUND SERVICE"; }
+                                SectionLabel { text: "BACKGROUND"; }
 
                                 Body {
                                     text: root.battery-ok
                                         ? "Unrestricted background run is active."
-                                        : "Allow unrestricted battery usage so the floating pill stays active across apps.";
+                                        : "Allow unrestricted battery usage so the pill survives across apps.";
                                     font-size: 12px;
-                                    color: #94A3B8;
+                                    color: #9C9CA3;
                                 }
 
                                 if !root.battery-ok : ActionButton {
@@ -1449,7 +1555,24 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // 5. Diagnostics
+                        // Onboarding
+                        Card {
+                            VerticalLayout {
+                                width: parent.width;
+                                padding: 12px;
+                                spacing: 8px;
+
+                                SectionLabel { text: "WALKTHROUGH"; }
+
+                                ActionButton {
+                                    label: "Show the onboarding again";
+                                    primary: false;
+                                    clicked => { root.restart-onboarding(); }
+                                }
+                            }
+                        }
+
+                        // Diagnostics
                         Card {
                             VerticalLayout {
                                 width: parent.width;
@@ -1461,9 +1584,9 @@ export component AppWindow inherits Window {
                                 Body {
                                     text: root.diagnostics != ""
                                         ? root.diagnostics
-                                        : (root.log-text != "" ? root.log-text : "Tap Run Check to inspect permissions, engines, and models.");
+                                        : (root.log-text != "" ? root.log-text : "Run a check to inspect permissions and engines.");
                                     font-size: 11px;
-                                    color: #94A3B8;
+                                    color: #9C9CA3;
                                 }
 
                                 HorizontalLayout {
@@ -1490,15 +1613,15 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ── Bottom Navigation Bar ──────────────────────────────────────
+            // ── Bottom nav ─────────────────────────────────────────────────
             Rectangle {
                 height: 1px;
-                background: #1E293B;
+                background: #26262E;
             }
 
             Rectangle {
                 height: 60px;
-                background: #080E1A;
+                background: #121217;
 
                 HorizontalLayout {
                     width: parent.width;
@@ -1540,7 +1663,246 @@ export component AppWindow inherits Window {
 
             Rectangle {
                 height: 12px;
-                background: #080E1A;
+                background: #121217;
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  ONBOARDING OVERLAY (first run; dark grey; fully interactive)
+        // ═══════════════════════════════════════════════════════════════════
+        if root.show-onboarding : Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: #0F0F12;
+
+            VerticalLayout {
+                width: parent.width;
+                height: parent.height;
+
+                // Skip button (top right)
+                Rectangle {
+                    height: 54px;
+                    width: parent.width;
+
+                    Text {
+                        text: "Skip";
+                        font-size: 13px;
+                        font-weight: 600;
+                        color: #9C9CA3;
+                        x: parent.width - 66px;
+                        y: 16px;
+                        width: 48px;
+                        horizontal-alignment: right;
+
+                        TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => { root.onboarding-finish(); }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    height: 168px;
+
+                    OnboardHeroGlow {
+                        if root.onboarding-page == 0 : HeroPill {
+                            x: (parent.width - self.width) / 2;
+                            y: 9px;
+                        }
+                        if root.onboarding-page == 1 : HeroMic {
+                            x: (parent.width - self.width) / 2;
+                            y: 9px;
+                        }
+                        if root.onboarding-page == 2 : HeroStack {
+                            x: (parent.width - self.width) / 2;
+                            y: 9px;
+                        }
+                        if root.onboarding-page == 3 : HeroKeyboard {
+                            x: (parent.width - self.width) / 2;
+                            y: 9px;
+                        }
+                        if root.onboarding-page == 4 : HeroModel {
+                            x: (parent.width - self.width) / 2;
+                            y: 9px;
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    width: parent.width;
+                    padding-left: 28px;
+                    padding-right: 28px;
+                    padding-top: 18px;
+                    spacing: 10px;
+
+                    Text {
+                        text: root.onboarding-page == 0 ? "QuickSTT"
+                            : root.onboarding-page == 1 ? "Hear you"
+                            : root.onboarding-page == 2 ? "The pill, anywhere"
+                            : root.onboarding-page == 3 ? "Types like a keyboard"
+                            : "Ready on arrival";
+                        font-size: 26px;
+                        font-weight: 700;
+                        color: #F5F5F6;
+                        horizontal-alignment: center;
+                    }
+
+                    Text {
+                        text: root.onboarding-page == 0
+                            ? "Speak anywhere on your phone — your words appear in any text box, on-device and offline."
+                            : root.onboarding-page == 1
+                                ? "Dictation uses the microphone. Audio is processed on this phone and never leaves it."
+                                : root.onboarding-page == 2
+                                    ? "Allow “Display over other apps” to keep the pill above everything. It only appears when you enable it in Settings."
+                                    : root.onboarding-page == 3
+                                        ? "Turn on QuickSTT Voice Auto-Type — a standard Android keyboard. It types live as you speak, with no accessibility service and no root."
+                                        : "A 16 MB speech model is built in. Dictation works offline from the first second, with bigger models a tap away.";
+                        font-size: 13px;
+                        color: #9C9CA3;
+                        wrap: word-wrap;
+                        horizontal-alignment: center;
+                    }
+
+                    // Permission action rows (pages 1-3)
+                    if root.onboarding-page == 1 : Rectangle {
+                        height: 46px;
+                        border-radius: 12px;
+                        background: root.mic-ok ? #17203A : #1E1E24;
+                        border-width: 1px;
+                        border-color: root.mic-ok ? #3B82F6 : #2C2C33;
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: root.mic-ok ? "Microphone: Allowed ✓" : "Tap to allow the microphone";
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: root.mic-ok ? #93C5FD : #EDEDF0;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => {
+                                if !root.mic-ok { root.grant-mic(); }
+                            }
+                        }
+                    }
+
+                    if root.onboarding-page == 2 : Rectangle {
+                        height: 46px;
+                        border-radius: 12px;
+                        background: root.overlay-ok ? #17203A : #1E1E24;
+                        border-width: 1px;
+                        border-color: root.overlay-ok ? #3B82F6 : #2C2C33;
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: root.overlay-ok ? "Display over apps: Allowed ✓" : "Tap to allow the overlay";
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: root.overlay-ok ? #93C5FD : #EDEDF0;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => {
+                                if !root.overlay-ok { root.open-overlay-settings(); }
+                            }
+                        }
+                    }
+
+                    if root.onboarding-page == 3 : Rectangle {
+                        height: 46px;
+                        border-radius: 12px;
+                        background: root.auto-type-ok ? #17203A : #1E1E24;
+                        border-width: 1px;
+                        border-color: root.auto-type-ok ? #3B82F6 : #2C2C33;
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: root.auto-type-ok ? "Voice Auto-Type: Enabled ✓" : "Tap to enable the keyboard";
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: root.auto-type-ok ? #93C5FD : #EDEDF0;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => {
+                                if !root.auto-type-ok { root.open-auto-type-settings(); }
+                            }
+                        }
+                    }
+
+                    if root.onboarding-page == 4 : Rectangle {
+                        height: 46px;
+                        border-radius: 12px;
+                        background: #17203A;
+                        border-width: 1px;
+                        border-color: #3B82F6;
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "Cactus Whistle 16M · built in ✓";
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: #93C5FD;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                // Dots + Next / Start
+                HorizontalLayout {
+                    width: parent.width;
+                    height: 76px;
+                    padding-left: 28px;
+                    padding-right: 28px;
+                    spacing: 10px;
+                    alignment: center;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 8px;
+
+                        for i in [0, 1, 2, 3, 4] : OnboardDot {
+                            active: root.onboarding-page == i;
+                        }
+                    }
+
+                    ActionButton {
+                        width: 150px;
+                        height: 46px;
+                        label: root.onboarding-page == 4 ? "Start Dictating" : "Continue";
+                        primary: true;
+                        blue: true;
+                        clicked => {
+                            if root.onboarding-page == 4 {
+                                root.onboarding-finish();
+                            } else {
+                                root.onboarding-page = root.onboarding-page + 1;
+                            }
+                        }
+                    }
+                }
             }
         }
     }

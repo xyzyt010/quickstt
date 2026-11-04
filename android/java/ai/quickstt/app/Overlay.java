@@ -229,6 +229,11 @@ public final class Overlay {
         return QuickSttInputMethodService.commitFinalText(text);
     }
 
+    /** Discard any live composing text that was typed during this turn. */
+    public static boolean cancelTypingTurn() {
+        return QuickSttInputMethodService.cancelLiveTyping();
+    }
+
     /**
      * Is QuickSTT exempt from the battery restrictions?
      *
