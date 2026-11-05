@@ -261,14 +261,13 @@ jobs:
           nothing leaves the phone.
 
           ### Fixed & improved in this release (Android __VER__)
+          - **Whole app redesigned**: dark grey, near-minimal UI — one blue accent, squircle shapes, one-glance Listen screen (big transcript hero, single big Dictate/Stop action, downloaded-model strip, RAM state at a glance).
+          - **Pill pops up only over focused text boxes**: the floating pill appears while a text box is focused (via QuickSTT Voice Auto-Type) and disappears when you leave it — never at launch, never always-on. One-toggle setting: **Settings → Pill on text fields**.
+          - **✕ closes the pill immediately**: tap ✕ mid-anything (recording, loading, transcribing) — the pill hides, nothing is typed or copied, and the model offloads in the background. ✓ stops and types.
+          - **Loading spinner inside the pill during onload**: round circular spinner while the model loads into RAM; mic-RMS-driven white waveforms otherwise; 30 s idle auto-offload.
+          - **Voice typing, done properly**: partial transcripts stream live via `setComposingText` while you speak and commit on stop; with no text box focused, the transcript is copied once to the clipboard. Enable “QuickSTT Voice Auto-Type” in Settings → Keyboard (or the onboarding) to use it.
           - **Google Play Protect no longer blocks the install**: `BIND_ACCESSIBILITY_SERVICE` was removed in favour of Android's standard Voice Input Method (`QuickSttInputMethodService`, `BIND_INPUT_METHOD`). No SMS, notification-listener or accessibility permissions are declared.
-          - **Floating pill only on tap**: the compact 48dp squircle is translucent grey and never appears at launch — enable it in Settings → Floating pill. One tap starts dictation immediately.
-          - **Grey, borderless expanded pill** (23dp squircle radius): no border, grey body, white bars driven by a rolling history of real microphone RMS levels.
-          - **Two sharp minimal buttons while recording**: ✕ stop &amp; discard (nothing is typed or copied) and ✓ stop &amp; type.
-          - **Direct typing into the native keyboard**: partial transcripts stream live via `setComposingText` while you speak and commit on stop; with no text box focused, the transcript is copied once to the clipboard. Enable “QuickSTT Voice Auto-Type” in Settings → Voice Auto-Type (or the onboarding) to use it.
-          - **Fast onload, 30 s idle auto-offload**: the model onloads when dictation starts (in-RAM worker / pinned weights), and the RAM watchdog offloads it 30 seconds after you stop speaking. Round loading spinner throughout.
-          - **5-page interactive onboarding**: dark grey, vector-drawn pages for microphone, floating pill, Voice Auto-Type keyboard and the built-in model — all permissions moved out of the app.
-          - **Lean main screen**: testing surface only (transcript, dictate, downloaded-model strip, keyboard test). All bubble and permission controls live in Settings.
+          - **5-page interactive onboarding**: dark grey, animated pages for microphone, floating pill, Voice Auto-Type keyboard and the built-in model — all permissions handled there, not inside the app.
 
           ### Android (arm64-v8a)
           ```bash

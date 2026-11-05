@@ -96,6 +96,10 @@ if (-not $env:ANDROID_NDK_ROOT) {
     $ndk = (Get-ChildItem "$sdk\ndk" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
     $env:ANDROID_NDK_ROOT = $ndk
 }
+# skia-bindings (used by Slint's renderer) reads ANDROID_NDK, not ANDROID_NDK_ROOT.
+if (-not $env:ANDROID_NDK) {
+    $env:ANDROID_NDK = $env:ANDROID_NDK_ROOT
+}
 # The `cc` crate compiles the AAudio shim and only finds the compiler on PATH
 # ("aarch64-linux-android21-clang"); the NDK is not there by default.
 $ndkHost = if ($env:OS -eq "Windows_NT") { "windows-x86_64" } else { "linux-x86_64" }

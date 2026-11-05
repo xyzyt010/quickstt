@@ -276,43 +276,6 @@ pub fn take_overlay_error() -> Option<String> {
     }
 }
 
-/// Remember whether the floating bubble should be on.
-pub fn save_overlay_enabled(enabled: bool) {
-    #[cfg(target_os = "android")]
-    {
-        if let Some(dir) = files_dir() {
-            let dir = dir.join("quickstt");
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(
-                dir.join("bubble"),
-                if enabled { "1" } else { "0" },
-            );
-        }
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = enabled;
-    }
-}
-
-/// Should the floating bubble be on?
-///
-/// This is the *wish*: it is remembered even when the permission is still
-/// missing, so the bubble can appear by itself as soon as the user grants
-/// the permission in the system settings.
-pub fn overlay_enabled() -> bool {
-    #[cfg(target_os = "android")]
-    {
-        files_dir()
-            .map(|dir| dir.join("quickstt").join("bubble"))
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| s.trim() == "1")
-            .unwrap_or(false)
-    }
-    #[cfg(not(target_os = "android"))]
-    false
-}
-
 /// Print to logcat (stdout/stderr are forwarded to logcat by android-activity).
 #[cfg(target_os = "android")]
 pub fn log(message: &str) {
@@ -1259,6 +1222,50 @@ pub fn save_onboarding_done() {
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(dir.join("onboarding_done"), "1");
         }
+    }
+}
+
+/// True when the floating pill may pop up above focused text boxes.
+pub fn pill_on_focus() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        let dir = files_dir().map(|dir| dir.join("quickstt"));
+        let fresh = dir
+            .as_ref()
+            .map(|d| d.join("pillfocus"))
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.trim() != "0");
+        if let Some(v) = fresh {
+            return v;
+        }
+        // Legacy migration: users who turned the old bubble off keep it off.
+        dir.map(|d| d.join("bubble"))
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.trim() == "1")
+            .unwrap_or(true)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        true
+    }
+}
+
+/// Remember whether the pill may auto-appear on focused text boxes.
+pub fn save_pill_on_focus(enabled: bool) {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(dir) = files_dir() {
+            let dir = dir.join("quickstt");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("pillfocus"), if enabled { "1" } else { "0" });
+        }
+        if !enabled {
+            hide_overlay();
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = enabled;
     }
 }
 

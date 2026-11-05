@@ -179,8 +179,11 @@ public final class Overlay {
         }
     }
 
-    /** Show the floating bubble (see {@link Bubble}). */
+    /** Show the floating bubble (see {@link Bubble}) — only while a text box is focused. */
     public static String show(Context context, String state, String transcript) {
+        if (!QuickSttInputMethodService.hasFocusedTextBox()) {
+            return "";
+        }
         return Bubble.show(context, state, transcript);
     }
 

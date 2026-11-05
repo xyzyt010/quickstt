@@ -74,12 +74,17 @@ static BUBBLE_UI: Mutex<Option<slint::Weak<AppWindow>>> = Mutex::new(None);
 /// the audio away instead of transcribing it.
 static DISCARD_RECORDING: AtomicBool = AtomicBool::new(false);
 
+/// Set when the user taps the ✕ button while the model is busy (onloading,
+/// transcribing or offloading) — a pending result must not be published.
+static DISCARD_TURN: AtomicBool = AtomicBool::new(false);
+
 /// Called by the Java bubble when the user taps one of its interactive zones.
 ///
 /// * 1 = start/stop recording
 /// * 2 = type the last transcript into the focused app
 /// * 3 = hide the bubble
-/// * 4 = stop recording and discard the audio (no text output)
+/// * 4 = close the pill immediately; stop recording and discard the audio
+///   (no text output, model offloads in the background)
 #[no_mangle]
 pub extern "C" fn Java_ai_quickstt_app_Bubble_nativeBubbleAction(
     _env: *mut std::ffi::c_void,
@@ -102,9 +107,22 @@ fn bubble_action(action: i32) {
             2 => ui.invoke_type_into_app(),
             3 => platform::hide_overlay(),
             4 => {
-                DISCARD_RECORDING.store(true, Ordering::SeqCst);
-                ui.set_bubble_expanded(true);
-                ui.invoke_toggle_record();
+                // ✕ — close the pill immediately and drop any pending output.
+                let recording = ui.get_recording();
+                let busy = ui.get_busy();
+                if recording {
+                    DISCARD_RECORDING.store(true, Ordering::SeqCst);
+                    DISCARD_TURN.store(true, Ordering::SeqCst);
+                    ui.invoke_toggle_record();
+                } else if busy {
+                    DISCARD_TURN.store(true, Ordering::SeqCst);
+                }
+                platform::hide_overlay();
+                ui.set_overlay_enabled(platform::pill_on_focus());
+                ui.set_status_text("Pill closed".into());
+                let _ = std::thread::spawn(|| {
+                    let _ = stt::offload_model();
+                });
             }
             _ => {}
         }
@@ -283,7 +301,7 @@ fn refresh_overlay_state(ui: &AppWindow) {
     if !granted {
         platform::hide_overlay();
         ui.set_overlay_enabled(false);
-        platform::save_overlay_enabled(false);
+        platform::save_pill_on_focus(false);
         ui.set_status_text("The “display over other apps” permission was withdrawn".into());
     }
 }
@@ -899,66 +917,35 @@ pub fn build_ui() -> AppWindow {
         ui.on_toggle_overlay(move || {
             let Some(ui) = weak.upgrade() else { return };
             let wanted = !ui.get_overlay_enabled();
+            platform::save_pill_on_focus(wanted);
+            ui.set_overlay_enabled(wanted);
             if !wanted {
                 platform::hide_overlay();
-                platform::stop_service();
-                ui.set_overlay_enabled(false);
-                platform::save_overlay_enabled(false);
-                note(&weak, &log, "Floating pill hidden.");
-                ui.set_status_text("Floating pill off".into());
+                note(&weak, &log, "Pill won't pop up over text boxes.");
+                ui.set_status_text("Pill won't pop up over text boxes".into());
                 return;
             }
-            platform::save_overlay_enabled(true);
             if !platform::can_draw_overlays() {
-                note(
-                    &weak,
-                    &log,
-                    "Allow “Display over other apps” in system settings — the bubble will appear automatically.",
-                );
                 ui.set_status_text("Allow “Display over other apps”, then come back".into());
                 if let Err(e) = platform::open_overlay_settings() {
-                    note(&weak, &log, &format!("Could not open settings: {e}"));
                     ui.set_status_text(format!("Could not open settings: {e}").into());
                 }
                 return;
             }
-            match platform::show_overlay("QuickSTT ready", "") {
-                Ok(()) => {
-                    ui.set_overlay_enabled(true);
-                    if !platform::can_post_notifications() {
-                        platform::request_permissions(&[
-                            "android.permission.POST_NOTIFICATIONS",
-                        ]);
-                    }
-                    match platform::start_service() {
-                        Ok(()) => {
-                            ui.set_background_ok(true);
-                            note(
-                                &weak,
-                                &log,
-                                "Floating waveform bubble active — press the rounded icon to expand into the circular pill.",
-                            );
-                        }
-                        Err(e) => {
-                            note(
-                                &weak,
-                                &log,
-                                &format!("Bubble active, background service warning: {e}"),
-                            );
-                        }
-                    }
-                    ui.set_status_text(
-                        "Floating bubble active — press icon to expand into circular waveform pill"
-                            .into(),
-                    );
-                }
-                Err(e) => {
-                    ui.set_overlay_enabled(false);
-                    platform::save_overlay_enabled(false);
-                    note(&weak, &log, &format!("Bubble failed: {e}"));
-                    ui.set_status_text(format!("Bubble failed: {e}").into());
-                }
+            if let Err(e) = platform::start_service() {
+                note(
+                    &weak,
+                    &log,
+                    &format!("Background service: {e}"),
+                );
             }
+            ui.set_background_ok(true);
+            ui.set_status_text("Pill pops up over text boxes — nothing else".into());
+            note(
+                &weak,
+                &log,
+                "Pill will pop up only while a text box is focused.",
+            );
         });
     }
 
@@ -1026,6 +1013,9 @@ pub fn build_ui() -> AppWindow {
             }
             let live_mode = ui.get_live_mode();
             let needs_onload = stt::loaded_model_index() != Some(model_index);
+            // Shared with the capture thread: while this is true the pill and
+            // the IME bar show the round loading spinner, not the wave bars.
+            let onload_pending = Arc::new(AtomicBool::new(needs_onload));
             stop_flag.store(false, Ordering::SeqCst);
             ui.set_recording(true);
             ui.set_bubble_expanded(true);
@@ -1047,6 +1037,7 @@ pub fn build_ui() -> AppWindow {
             {
                 let onload_weak = weak.clone();
                 let onload_log = log.clone();
+                let onload_done = onload_pending.clone();
                 std::thread::spawn(move || {
                     let started = std::time::Instant::now();
                     if needs_onload {
@@ -1056,6 +1047,7 @@ pub fn build_ui() -> AppWindow {
                     if elapsed < std::time::Duration::from_millis(280) {
                         std::thread::sleep(std::time::Duration::from_millis(280) - elapsed);
                     }
+                    onload_done.store(false, Ordering::SeqCst);
                     on_ui(move || {
                         if let Some(ui) = onload_weak.upgrade() {
                             ui.set_model_loading(false);
@@ -1079,6 +1071,7 @@ pub fn build_ui() -> AppWindow {
             let log_rec = log.clone();
             let stop_flag = stop_flag.clone();
             let pending = pending.clone();
+            let onload_pending = onload_pending.clone();
             std::thread::spawn(move || {
                 let mut session = session;
                 let mut chunk = vec![0f32; 800];
@@ -1107,7 +1100,10 @@ pub fn build_ui() -> AppWindow {
 
                     let visual_level = (rms * 4.2 + peak * 0.35).clamp(0.0, 1.0);
                     if session.started.elapsed() >= std::time::Duration::from_millis(280) {
-                        platform::update_overlay_level(visual_level, true, false);
+                        // While the model is still onloading, keep the pill on
+                        // the loading spinner instead of switching to wave bars.
+                        let loading = onload_pending.load(Ordering::SeqCst);
+                        platform::update_overlay_level(visual_level, true, loading);
                     }
 
                     // Live real-time partial transcription & typing into focused text box
@@ -1202,9 +1198,13 @@ pub fn build_ui() -> AppWindow {
                 }
                 session.recorder.stop();
                 if DISCARD_RECORDING.swap(false, Ordering::SeqCst) {
+                    DISCARD_TURN.store(false, Ordering::SeqCst);
                     let _ = platform::cancel_typing_turn();
                     let discard_weak = weak.clone();
                     let discard_log = log_rec.clone();
+                    let _ = std::thread::spawn(|| {
+                        let _ = stt::offload_model();
+                    });
                     on_ui(move || {
                         if let Some(ui) = discard_weak.upgrade() {
                             ui.set_recording(false);
@@ -1626,6 +1626,27 @@ pub fn build_ui() -> AppWindow {
 
                 // Pick up finished transcription from worker thread
                 let done = pending.lock().ok().and_then(|mut p| p.take());
+                if done.is_some() && DISCARD_TURN.swap(false, Ordering::SeqCst) {
+                    ui.set_recording(false);
+                    ui.set_busy(false);
+                    ui.set_audio_level(0.0);
+                    ui.set_loading_label("".into());
+                    ui.set_has_text(false);
+                    ui.set_live_text("Discarded.".into());
+                    sync_model_ui(&ui);
+                    platform::update_overlay_level(0.0, false, false);
+                    ui.set_status_text("Discarded — no text was output".into());
+                    let off_weak = weak.clone();
+                    std::thread::spawn(move || {
+                        let _ = stt::offload_model();
+                        on_ui(move || {
+                            if let Some(ui) = off_weak.upgrade() {
+                                sync_model_ui(&ui);
+                            }
+                        });
+                    });
+                    return;
+                }
                 if let Some(turn) = done {
                     ui.set_recording(false);
                     ui.set_busy(false);
@@ -1758,9 +1779,9 @@ pub fn build_ui() -> AppWindow {
             ui.set_touch_probe(text.into());
         }
 
-        // The floating pill appears only when the user asks for it
-        // (Settings → Floating pill), never automatically at launch.
-        ui.set_overlay_enabled(false);
+        // The floating pill pops up (translucent, tap-to-dictate) only while
+        // a text box is focused — never at launch.
+        ui.set_overlay_enabled(platform::pill_on_focus());
         ui.set_battery_ok(platform::ignoring_battery_optimizations());
         platform::watch_overlay_permission();
 

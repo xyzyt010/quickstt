@@ -7,7 +7,8 @@ window.
 
 **Releases of this app are Android-only**: `v2.0.0-alpha.25+` ship the APK and
 `SHA256SUMS` and nothing else. Windows and Linux are not rebuilt or touched by
-an Android release.
+an Android release. The desktop app has its own release line: tags `desktop-v*`
+build and publish the Linux `.deb`/`.tar.gz` (see `.github/workflows/release-desktop.yml`).
 
 ## Status
 

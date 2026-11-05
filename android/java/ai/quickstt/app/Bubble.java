@@ -731,10 +731,8 @@ public final class Bubble {
             }
 
             if (discardBtnRect.contains(x, y)) {
-                // ✕ — stop without producing any text output.
-                if (recording && !busy) {
-                    dispatchAction(ACTION_DISCARD);
-                }
+                // ✕ — close the pill immediately and discard any pending output.
+                dispatchAction(ACTION_DISCARD);
                 return;
             }
             if (acceptBtnRect.contains(x, y)) {

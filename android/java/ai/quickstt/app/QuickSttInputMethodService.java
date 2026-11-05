@@ -71,18 +71,6 @@ public final class QuickSttInputMethodService extends InputMethodService {
     }
 
     @Override
-    public void onDestroy() {
-        if (voiceBar != null) {
-            voiceBar.stopAnimation();
-            voiceBar = null;
-        }
-        if (instance == this) {
-            instance = null;
-        }
-        super.onDestroy();
-    }
-
-    @Override
     public boolean onEvaluateFullscreenMode() {
         return false;
     }
@@ -100,12 +88,74 @@ public final class QuickSttInputMethodService extends InputMethodService {
         if (!restarting) {
             beginTurn();
         }
+        maybeShowPillForFocusedField(attribute);
     }
 
     @Override
     public void onFinishInput() {
+        maybeHidePill();
         beginTurn();
         super.onFinishInput();
+    }
+
+    @Override
+    public void onDestroy() {
+        maybeHidePill();
+        if (voiceBar != null) {
+            voiceBar.stopAnimation();
+            voiceBar = null;
+        }
+        if (instance == this) {
+            instance = null;
+        }
+        super.onDestroy();
+    }
+
+    /** True when the user allowed the floating pill to appear on text fields. */
+    private static boolean pillOnFocus(Context context) {
+        try {
+            java.io.File f = new java.io.File(context.getFilesDir(), "quickstt/pillfocus");
+            if (!f.exists()) {
+                return true;
+            }
+            byte[] bytes = new byte[8];
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            int n = in.read(bytes);
+            in.close();
+            if (n <= 0) {
+                return true;
+            }
+            return !new String(bytes, 0, n, "UTF-8").trim().equals("0");
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    private void maybeShowPillForFocusedField(EditorInfo attribute) {
+        try {
+            if (!pillOnFocus(this)) {
+                return;
+            }
+            if (attribute == null) {
+                return;
+            }
+            int cls = attribute.inputType & InputType.TYPE_MASK_CLASS;
+            if (cls == InputType.TYPE_NULL) {
+                return;
+            }
+            Context ctx = getApplicationContext() != null ? getApplicationContext() : this;
+            Bubble.show(ctx, "QuickSTT ready", "");
+        } catch (Throwable t) {
+            Log.w(TAG, "pill show on focus failed", t);
+        }
+    }
+
+    private void maybeHidePill() {
+        try {
+            Bubble.hide(this);
+        } catch (Throwable t) {
+            Log.w(TAG, "pill hide failed", t);
+        }
     }
 
     /** Synchronize recording/loading state from Bubble into the IME voice bar if visible. */
