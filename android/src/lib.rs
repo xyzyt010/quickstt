@@ -32,6 +32,17 @@ struct PendingTurn {
     ok: bool,
 }
 
+/// Global recording & transcription state so the floating squircle widget and
+/// Voice Input Method work even when `NativeActivity` is in the background.
+static BG_RECORDING: AtomicBool = AtomicBool::new(false);
+static BG_STOP: AtomicBool = AtomicBool::new(false);
+static BG_BUSY: AtomicBool = AtomicBool::new(false);
+static LIVE_MODE: AtomicBool = AtomicBool::new(true);
+static AUTO_OFFLOAD: AtomicBool = AtomicBool::new(true);
+static SERVICE_STARTED: AtomicBool = AtomicBool::new(false);
+static SHARED_PENDING: Mutex<Vec<PendingTurn>> = Mutex::new(Vec::new());
+static SHARED_LAST_TEXT: Mutex<String> = Mutex::new(String::new());
+
 /// Recording state owned by the capture thread.
 struct Session {
     recorder: audio::Recorder,
@@ -95,37 +106,438 @@ pub extern "C" fn Java_ai_quickstt_app_Bubble_nativeBubbleAction(
 }
 
 fn bubble_action(action: i32) {
-    let ui = BUBBLE_UI.lock().ok().and_then(|g| g.clone());
-    let Some(ui) = ui else { return };
-    let _ = slint::invoke_from_event_loop(move || {
-        let Some(ui) = ui.upgrade() else { return };
-        match action {
-            1 => {
-                ui.set_bubble_expanded(true);
-                ui.invoke_toggle_record();
-            }
-            2 => ui.invoke_type_into_app(),
-            3 => platform::hide_overlay(),
-            4 => {
-                // ✕ — close the pill immediately and drop any pending output.
-                let recording = ui.get_recording();
-                let busy = ui.get_busy();
-                if recording {
-                    DISCARD_RECORDING.store(true, Ordering::SeqCst);
-                    DISCARD_TURN.store(true, Ordering::SeqCst);
-                    ui.invoke_toggle_record();
-                } else if busy {
-                    DISCARD_TURN.store(true, Ordering::SeqCst);
+    match action {
+        1 => {
+            trigger_record_toggle();
+        }
+        2 => {
+            let text = SHARED_LAST_TEXT
+                .lock()
+                .ok()
+                .map(|t| t.clone())
+                .unwrap_or_default();
+            if !text.trim().is_empty() {
+                if platform::inject_text(&text).is_err() {
+                    platform::copy_to_clipboard(&text);
                 }
-                platform::hide_overlay();
-                ui.set_overlay_enabled(platform::pill_on_focus());
-                ui.set_status_text("Pill closed".into());
-                let _ = std::thread::spawn(|| {
-                    let _ = stt::offload_model();
+            }
+        }
+        3 => platform::hide_overlay(),
+        4 => {
+            // ✕ — close the pill immediately and drop any pending output.
+            if BG_RECORDING.load(Ordering::SeqCst) {
+                DISCARD_RECORDING.store(true, Ordering::SeqCst);
+                DISCARD_TURN.store(true, Ordering::SeqCst);
+                BG_STOP.store(true, Ordering::SeqCst);
+            } else if BG_BUSY.load(Ordering::SeqCst) {
+                DISCARD_TURN.store(true, Ordering::SeqCst);
+            }
+            let _ = platform::cancel_typing_turn();
+            platform::hide_overlay();
+            let _ = std::thread::spawn(|| {
+                let _ = stt::offload_model();
+            });
+            if let Some(ui) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+                on_ui(move || {
+                    if let Some(ui) = ui.upgrade() {
+                        ui.set_recording(false);
+                        ui.set_busy(false);
+                        ui.set_overlay_enabled(platform::pill_on_focus());
+                        ui.set_status_text("Pill closed".into());
+                    }
                 });
             }
-            _ => {}
         }
+        _ => {}
+    }
+}
+
+/// Start or stop dictation from either the floating squircle pill, the IME bar,
+/// or the in-app Dictate button. Works even when `NativeActivity` is in the background.
+fn trigger_record_toggle() {
+    if BG_RECORDING.load(Ordering::SeqCst) {
+        BG_STOP.store(true, Ordering::SeqCst);
+        platform::update_overlay_level(0.0, false, true);
+        if platform::pill_on_focus() {
+            let _ = platform::show_overlay("Transcribing…", "");
+        }
+        if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+            on_ui(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_recording(false);
+                    ui.set_busy(true);
+                    ui.set_loading_label("Transcribing…".into());
+                    ui.set_status_text("Transcribing…".into());
+                }
+            });
+        }
+        return;
+    }
+
+    if BG_BUSY.load(Ordering::SeqCst) {
+        return;
+    }
+
+    if !platform::has_mic_permission() {
+        platform::request_mic_permission();
+        if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+            on_ui(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_status_text("Allow microphone permission to start dictating".into());
+                    ui.set_tab(0);
+                }
+            });
+        }
+        return;
+    }
+
+    let mut model_index = stt::selected();
+    if !stt::model_installed(model_index) {
+        stt::ensure_bundled_models();
+        if !stt::model_installed(model_index) {
+            if stt::model_installed(0) {
+                model_index = 0;
+                stt::save_selected(0);
+            } else {
+                if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+                    on_ui(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_status_text("Download or select an installed model first".into());
+                            ui.set_tab(2);
+                        }
+                    });
+                }
+                return;
+            }
+        }
+    }
+
+    platform::begin_typing_turn();
+
+    let mut session = Session::new();
+    if let Err(e) = session.recorder.start() {
+        let err_msg = format!("Microphone error: {e}");
+        platform::log(&err_msg);
+        if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+            on_ui(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_status_text(err_msg.into());
+                }
+            });
+        }
+        return;
+    }
+
+    let live_mode = LIVE_MODE.load(Ordering::SeqCst);
+    let needs_onload = stt::loaded_model_index() != Some(model_index);
+    let onload_pending = Arc::new(AtomicBool::new(needs_onload));
+
+    DISCARD_RECORDING.store(false, Ordering::SeqCst);
+    DISCARD_TURN.store(false, Ordering::SeqCst);
+    BG_STOP.store(false, Ordering::SeqCst);
+    BG_RECORDING.store(true, Ordering::SeqCst);
+
+    platform::set_overlay_expanded(true);
+    platform::update_overlay_level(0.15, false, true);
+    if platform::pill_on_focus() {
+        let _ = platform::show_overlay("Onloading…", "");
+    }
+
+    if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+        on_ui(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_selected_model(model_index as i32);
+                ui.set_recording(true);
+                ui.set_bubble_expanded(true);
+                ui.set_busy(false);
+                ui.set_model_loading(true);
+                ui.set_loading_label("Onloading…".into());
+                ui.set_live_text("Listening… speak now.".into());
+                ui.set_status_text(
+                    format!("Onloading {} & listening…", stt::model(model_index).name).into(),
+                );
+            }
+        });
+    }
+
+    // Spawn automatic onload on background thread with visible round loading spinner
+    {
+        let onload_done = onload_pending.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            if needs_onload {
+                let _ = stt::onload_model(model_index);
+            }
+            let elapsed = started.elapsed();
+            if elapsed < std::time::Duration::from_millis(260) {
+                std::thread::sleep(std::time::Duration::from_millis(260) - elapsed);
+            }
+            onload_done.store(false, Ordering::SeqCst);
+            if BG_RECORDING.load(Ordering::SeqCst) && platform::pill_on_focus() {
+                let _ = platform::show_overlay("Listening…", "");
+            }
+            if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+                on_ui(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_model_loading(false);
+                        ui.set_loading_label("".into());
+                        sync_model_ui(&ui);
+                        if ui.get_recording() {
+                            ui.set_status_text(
+                                format!("Listening ({})…", stt::model(model_index).name).into(),
+                            );
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    let onload_pending = onload_pending.clone();
+    std::thread::spawn(move || {
+        let mut session = session;
+        let mut chunk = vec![0f32; 800];
+        let mut last_health: u8 = conditioner::HEALTH_OK;
+        let mut health_since = std::time::Instant::now();
+        let mut last_live_decode = std::time::Instant::now();
+        let live_in_flight = Arc::new(AtomicBool::new(false));
+        let live_partial_seen = Arc::new(AtomicBool::new(false));
+
+        loop {
+            let n = session.recorder.read(&mut chunk);
+            if n == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                if BG_STOP.load(Ordering::SeqCst) {
+                    break;
+                }
+                continue;
+            }
+            session.samples.extend_from_slice(&chunk[..n]);
+            let rms = session.recorder.rms;
+            let peak = session.recorder.peak;
+            if rms > 0.0055 {
+                session.spoke = true;
+                session.last_voice = std::time::Instant::now();
+            }
+
+            let visual_level = (rms * 4.2 + peak * 0.35).clamp(0.0, 1.0);
+            if session.started.elapsed() >= std::time::Duration::from_millis(260) {
+                let loading = onload_pending.load(Ordering::SeqCst);
+                platform::update_overlay_level(visual_level, true, loading);
+            }
+
+            // Live real-time partial transcription & typing into focused text box
+            if live_mode
+                && session.spoke
+                && session.samples.len() >= 14_400
+                && last_live_decode.elapsed() >= std::time::Duration::from_millis(1200)
+                && !live_in_flight.swap(true, Ordering::SeqCst)
+            {
+                last_live_decode = std::time::Instant::now();
+                let snap = session.samples.clone();
+                let flag = live_in_flight.clone();
+                let seen_flag = live_partial_seen.clone();
+                std::thread::spawn(move || {
+                    let wav = stt::wav_path("quickstt-live.wav");
+                    if audio::write_wav(&wav, &snap, audio::SAMPLE_RATE as u32).is_ok() {
+                        if let Ok(partial) = stt::transcribe(&wav, model_index) {
+                            let trimmed = partial.trim().to_string();
+                            if !trimmed.is_empty() && !BG_STOP.load(Ordering::SeqCst) {
+                                seen_flag.store(true, Ordering::SeqCst);
+                                if platform::has_focused_text_box() {
+                                    let _ = platform::type_live_partial(&trimmed);
+                                }
+                                if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+                                    on_ui(move || {
+                                        if let Some(ui) = weak.upgrade() {
+                                            if ui.get_recording() {
+                                                ui.set_live_text(trimmed.into());
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    flag.store(false, Ordering::SeqCst);
+                });
+            }
+
+            let health = session.recorder.health();
+            if health != last_health
+                && health_since.elapsed() > std::time::Duration::from_secs(2)
+            {
+                last_health = health;
+                health_since = std::time::Instant::now();
+                let (msg, card_msg) = match health {
+                    conditioner::HEALTH_SATURATED => (
+                        "Mic input clipped — lower gain",
+                        "Input clipped",
+                    ),
+                    conditioner::HEALTH_DEAD => (
+                        "No audio arriving from microphone",
+                        "No mic signal",
+                    ),
+                    _ => ("Listening…", ""),
+                };
+                if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+                    let card = card_msg.to_string();
+                    on_ui(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_status_text(msg.into());
+                            ui.set_mic_health(card.into());
+                        }
+                    });
+                }
+            }
+
+            let quiet = session.last_voice.elapsed() > std::time::Duration::from_millis(1600);
+            let too_long = session.started.elapsed() > std::time::Duration::from_secs(60);
+            let secs_elapsed = session.started.elapsed().as_secs_f32();
+            let has_partial = live_partial_seen.load(Ordering::SeqCst);
+            if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+                on_ui(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        if ui.get_recording() {
+                            ui.set_audio_level(visual_level);
+                            if !has_partial {
+                                ui.set_live_text(format!("Listening ({secs_elapsed:.1}s)…").into());
+                            }
+                        }
+                    }
+                });
+            }
+            if (quiet && session.spoke) || too_long {
+                break;
+            }
+            if BG_STOP.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+
+        session.recorder.stop();
+        BG_RECORDING.store(false, Ordering::SeqCst);
+
+        if DISCARD_RECORDING.swap(false, Ordering::SeqCst) {
+            DISCARD_TURN.store(false, Ordering::SeqCst);
+            let _ = platform::cancel_typing_turn();
+            platform::update_overlay_level(0.0, false, false);
+            let _ = std::thread::spawn(|| {
+                let _ = stt::offload_model();
+            });
+            if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+                on_ui(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_recording(false);
+                        ui.set_busy(false);
+                        ui.set_audio_level(0.0);
+                        ui.set_loading_label("".into());
+                        ui.set_live_text("Discarded.".into());
+                        ui.set_has_text(false);
+                        ui.set_mic_health("".into());
+                        ui.set_status_text("Discarded — no text was output".into());
+                    }
+                });
+            }
+            return;
+        }
+
+        BG_BUSY.store(true, Ordering::SeqCst);
+        platform::update_overlay_level(0.0, false, true);
+        if platform::pill_on_focus() {
+            let _ = platform::show_overlay("Transcribing…", "");
+        }
+        let samples = std::mem::take(&mut session.samples);
+        let health = session.recorder.health();
+        if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+            on_ui(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_recording(false);
+                    ui.set_audio_level(0.0);
+                    ui.set_busy(true);
+                    ui.set_loading_label("Transcribing…".into());
+                    ui.set_status_text("Transcribing…".into());
+                }
+            });
+        }
+
+        let mut turn = transcribe_samples(samples, health, model_index);
+        BG_BUSY.store(false, Ordering::SeqCst);
+
+        if DISCARD_TURN.swap(false, Ordering::SeqCst) {
+            let _ = platform::cancel_typing_turn();
+            platform::update_overlay_level(0.0, false, false);
+            let _ = std::thread::spawn(|| {
+                let _ = stt::offload_model();
+            });
+            if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+                on_ui(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_recording(false);
+                        ui.set_busy(false);
+                        ui.set_audio_level(0.0);
+                        ui.set_loading_label("".into());
+                        ui.set_has_text(false);
+                        ui.set_live_text("Discarded.".into());
+                        ui.set_status_text("Discarded — no text was output".into());
+                        sync_model_ui(&ui);
+                    }
+                });
+            }
+            return;
+        }
+
+        // Deliver output immediately on the worker thread so cross-app typing works
+        // even when `NativeActivity` is in the background!
+        if turn.ok {
+            if let Ok(mut slot) = SHARED_LAST_TEXT.lock() {
+                *slot = turn.text.clone();
+            }
+            let typed_in_box = if platform::has_focused_text_box() {
+                platform::commit_final_text(&turn.text)
+            } else if !platform::has_window_focus() {
+                platform::inject_text(&turn.text).is_ok()
+            } else {
+                false
+            };
+            platform::copy_to_clipboard(&turn.text);
+            turn.status = if typed_in_box {
+                "Typed into text box".to_string()
+            } else {
+                "Copied to clipboard".to_string()
+            };
+        }
+
+        platform::update_overlay_level(0.0, false, false);
+        platform::set_overlay_expanded(false);
+        if platform::pill_on_focus() {
+            let _ = platform::show_overlay("Ready", &turn.text);
+        }
+
+        if let Ok(mut list) = SHARED_PENDING.lock() {
+            list.push(turn);
+        }
+
+        // Background 30-second idle auto-offload watchdog so RAM is freed 30s
+        // after stopping even if the app window is in the background.
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(31));
+            if AUTO_OFFLOAD.load(Ordering::SeqCst)
+                && !BG_RECORDING.load(Ordering::SeqCst)
+                && !BG_BUSY.load(Ordering::SeqCst)
+            {
+                if let Some(offload_msg) = stt::check_idle_offload(30) {
+                    if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
+                        on_ui(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                sync_model_ui(&ui);
+                                ui.set_status_text(offload_msg.into());
+                            }
+                        });
+                    }
+                }
+            }
+        });
     });
 }
 
@@ -210,6 +622,7 @@ fn model_catalog() -> Vec<ModelItem> {
             };
 
             ModelItem {
+                catalog_index: index as i32,
                 name: spec.name.into(),
                 detail: spec.detail.into(),
                 size: spec.size.into(),
@@ -224,6 +637,17 @@ fn model_catalog() -> Vec<ModelItem> {
             }
         })
         .collect()
+}
+
+fn update_ui_model_lists(ui: &AppWindow) {
+    let catalog = model_catalog();
+    let installed_only: Vec<ModelItem> = catalog
+        .iter()
+        .filter(|m| m.installed)
+        .cloned()
+        .collect();
+    ui.set_installed_models(Rc::new(slint::VecModel::from(installed_only)).into());
+    ui.set_models(Rc::new(slint::VecModel::from(catalog)).into());
 }
 
 /// Sync the top-level UI properties with the current model selection and RAM state.
@@ -257,7 +681,7 @@ fn sync_model_ui(ui: &AppWindow) {
             );
         }
     }
-    ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
+    update_ui_model_lists(ui);
 }
 
 fn on_ui<F: FnOnce() + Send + 'static>(f: F) {
@@ -291,18 +715,19 @@ fn bubble(
 }
 
 fn refresh_overlay_state(ui: &AppWindow) {
+    ui.set_ime_enabled(platform::ime_enabled());
     ui.set_auto_type_ok(platform::accessibility_enabled());
     let granted = platform::can_draw_overlays();
     ui.set_overlay_ok(granted);
-    if !ui.get_overlay_enabled() {
-        // The pill only appears when the user enables it in Settings.
-        return;
-    }
-    if !granted {
-        platform::hide_overlay();
-        ui.set_overlay_enabled(false);
-        platform::save_pill_on_focus(false);
-        ui.set_status_text("The “display over other apps” permission was withdrawn".into());
+    let want_pill = platform::pill_on_focus();
+    ui.set_overlay_enabled(want_pill);
+
+    if granted && want_pill {
+        if !SERVICE_STARTED.swap(true, Ordering::SeqCst) {
+            let _ = platform::start_service();
+        }
+        platform::ensure_overlay_watcher();
+        ui.set_background_ok(true);
     }
 }
 
@@ -516,9 +941,6 @@ pub fn build_ui() -> AppWindow {
         *slot = Some(ui.as_weak());
     }
 
-    let stop_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    let pending: Arc<Mutex<Option<PendingTurn>>> = Arc::new(Mutex::new(None));
-    let last_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let perm_wait: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
 
     // ── Permissions & Model Download / Uninstall / Onload / Offload ────────
@@ -560,7 +982,7 @@ pub fn build_ui() -> AppWindow {
             ui.set_model_download_info(start_info.clone().into());
             ui.set_status_text(format!("Downloading {} ({})…", spec.name, spec.size).into());
             set_download_state(index, true, 0.0, start_info);
-            ui.set_models(Rc::new(slint::VecModel::from(model_catalog())).into());
+            update_ui_model_lists(&ui);
             note(&weak, &log, &format!("Downloading {} ({})…", spec.name, spec.size));
 
             let weak = weak.clone();
@@ -604,9 +1026,7 @@ pub fn build_ui() -> AppWindow {
                             ui.set_status_text(
                                 format!("Downloading {name}… {pct}% ({done_mb:.1} MB)").into(),
                             );
-                            ui.set_models(
-                                Rc::new(slint::VecModel::from(model_catalog())).into(),
-                            );
+                            update_ui_model_lists(&ui);
                         }
                     });
                 });
@@ -790,6 +1210,7 @@ pub fn build_ui() -> AppWindow {
             let Some(ui) = weak.upgrade() else { return };
             let next = !ui.get_auto_offload();
             ui.set_auto_offload(next);
+            AUTO_OFFLOAD.store(next, Ordering::SeqCst);
             let msg = if next {
                 "Auto onload/offload enabled"
             } else {
@@ -806,6 +1227,7 @@ pub fn build_ui() -> AppWindow {
             let Some(ui) = weak.upgrade() else { return };
             let next = !ui.get_live_mode();
             ui.set_live_mode(next);
+            LIVE_MODE.store(next, Ordering::SeqCst);
             let msg = if next {
                 "Live mode on — types into focused text box as you speak"
             } else {
@@ -820,16 +1242,29 @@ pub fn build_ui() -> AppWindow {
         let log = log.clone();
         ui.on_open_auto_type_settings(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let already_enabled = platform::accessibility_enabled();
+            let ime_en = platform::ime_enabled();
             match platform::open_accessibility_settings() {
                 Ok(()) => {
-                    ui.set_auto_type_ok(already_enabled);
-                    if already_enabled {
-                        ui.set_status_text("Select “QuickSTT Voice Auto-Type” in the keyboard picker".into());
-                        note(&weak, &log, "Opened keyboard picker for QuickSTT Voice Auto-Type.");
+                    ui.set_ime_enabled(ime_en);
+                    ui.set_auto_type_ok(platform::accessibility_enabled());
+                    if ime_en {
+                        ui.set_status_text(
+                            "Select “QuickSTT Voice Auto-Type” in the keyboard picker".into(),
+                        );
+                        note(
+                            &weak,
+                            &log,
+                            "Opened keyboard picker for QuickSTT Voice Auto-Type.",
+                        );
                     } else {
-                        ui.set_status_text("Enable “QuickSTT Voice Auto-Type” in On-screen keyboards".into());
-                        note(&weak, &log, "Opened keyboard settings for QuickSTT Voice Auto-Type.");
+                        ui.set_status_text(
+                            "Enable “QuickSTT Voice Auto-Type” in On-screen keyboards".into(),
+                        );
+                        note(
+                            &weak,
+                            &log,
+                            "Opened keyboard settings for QuickSTT Voice Auto-Type.",
+                        );
                     }
                 }
                 Err(e) => {
@@ -844,14 +1279,30 @@ pub fn build_ui() -> AppWindow {
         let log = log.clone();
         ui.on_test_keyboard(move || {
             let Some(ui) = weak.upgrade() else { return };
+            platform::focus_in_app_text_box();
             let line = "QuickSTT ✓ — typing works.";
             if platform::commit_final_text(line) {
                 ui.set_status_text("Typed into the focused text box".into());
                 note(&weak, &log, "Test line typed into the focused text box.");
             } else {
                 platform::copy_to_clipboard(line);
-                ui.set_status_text("No text box focused — test line copied to clipboard".into());
-                note(&weak, &log, "Test line copied to clipboard (no focused text box).");
+                ui.set_status_text("Test line copied to clipboard & widget shown".into());
+                note(&weak, &log, "Test line copied to clipboard & widget shown.");
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
+        ui.on_focus_transcript_box(move || {
+            platform::focus_in_app_text_box();
+            if platform::can_draw_overlays() && platform::pill_on_focus() {
+                let _ = platform::show_overlay("Ready", "");
+            } else if !platform::can_draw_overlays() {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_status_text("Allow “Display over other apps” for floating squircle".into());
+                }
+                note(&weak, &log, "Overlay permission required for floating squircle.");
             }
         });
     }
@@ -860,6 +1311,12 @@ pub fn build_ui() -> AppWindow {
         ui.on_onboarding_finish(move || {
             let Some(ui) = weak.upgrade() else { return };
             platform::save_onboarding_done();
+            platform::save_pill_on_focus(true);
+            ui.set_overlay_enabled(true);
+            if platform::can_draw_overlays() {
+                let _ = platform::start_service();
+                platform::ensure_overlay_watcher();
+            }
             ui.set_show_onboarding(false);
             ui.set_status_text("All set — dictate anywhere".into());
         });
@@ -880,10 +1337,12 @@ pub fn build_ui() -> AppWindow {
         ui.on_open_overlay_settings(move || {
             note(&weak, &log, "Opening system overlay permission settings…");
             let Some(ui) = weak.upgrade() else { return };
+            platform::save_pill_on_focus(true);
+            ui.set_overlay_enabled(true);
             match platform::open_overlay_settings() {
                 Ok(()) => {
                     ui.set_status_text(
-                        "Allow “Display over other apps”, then return — the waveform bubble appears automatically"
+                        "Allow “Display over other apps”, then return — the squircle widget activates automatically"
                             .into(),
                     );
                 }
@@ -939,309 +1398,28 @@ pub fn build_ui() -> AppWindow {
                     &format!("Background service: {e}"),
                 );
             }
+            platform::ensure_overlay_watcher();
+            let _ = platform::show_overlay("Ready", "");
             ui.set_background_ok(true);
-            ui.set_status_text("Pill pops up over text boxes — nothing else".into());
+            ui.set_status_text("Squircle widget active on text fields".into());
             note(
                 &weak,
                 &log,
-                "Pill will pop up only while a text box is focused.",
+                "Squircle widget will pop up whenever a text field is focused.",
             );
         });
     }
 
     // ── Record Toggle (16 kHz AAudio + Live Waveform + Auto-VAD) ───────────
     {
-        let weak = ui.as_weak();
-        let stop_flag = stop_flag.clone();
-        let pending = pending.clone();
-        let log = log.clone();
         let perm_wait = perm_wait.clone();
         ui.on_toggle_record(move || {
-            let Some(ui) = weak.upgrade() else { return };
-
-            if ui.get_recording() {
-                stop_flag.store(true, Ordering::SeqCst);
-                ui.set_recording(false);
-                ui.set_busy(true);
-                ui.set_loading_label("Transcribing…".into());
-                ui.set_status_text("Transcribing…".into());
-                platform::update_overlay_level(0.0, false, true);
-                if ui.get_overlay_enabled() {
-                    bubble("Transcribing…", "", &weak, &log);
-                }
-                note(&weak, &log, "Stopping & transcribing…");
-                return;
-            }
-
             if !platform::has_mic_permission() {
-                note(&weak, &log, "Microphone permission needed — requesting now.");
-                platform::request_mic_permission();
                 if let Ok(mut wait) = perm_wait.lock() {
                     *wait = Some(std::time::Instant::now());
                 }
-                ui.set_status_text("Allow microphone permission to start dictating".into());
-                ui.set_tab(0);
-                return;
             }
-
-            let mut model_index = ui.get_selected_model().max(0) as usize;
-            if !stt::model_installed(model_index) {
-                stt::ensure_bundled_models();
-                if stt::model_installed(model_index) {
-                    sync_model_ui(&ui);
-                } else if stt::model_installed(0) {
-                    model_index = 0;
-                    ui.set_selected_model(0);
-                    stt::save_selected(0);
-                    sync_model_ui(&ui);
-                    note(&weak, &log, "Using built-in Cactus Whistle 16M.");
-                } else {
-                    note(&weak, &log, "Selected model is not downloaded yet.");
-                    ui.set_status_text("Download or select an installed model first".into());
-                    ui.set_tab(2);
-                    return;
-                }
-            }
-
-            platform::begin_typing_turn();
-
-            let mut session = Session::new();
-            if let Err(e) = session.recorder.start() {
-                ui.set_status_text(format!("Microphone error: {e}").into());
-                note(&weak, &log, &format!("Microphone error: {e}"));
-                return;
-            }
-            let live_mode = ui.get_live_mode();
-            let needs_onload = stt::loaded_model_index() != Some(model_index);
-            // Shared with the capture thread: while this is true the pill and
-            // the IME bar show the round loading spinner, not the wave bars.
-            let onload_pending = Arc::new(AtomicBool::new(needs_onload));
-            stop_flag.store(false, Ordering::SeqCst);
-            ui.set_recording(true);
-            ui.set_bubble_expanded(true);
-            ui.set_busy(false);
-            ui.set_model_loading(true);
-            ui.set_loading_label("Onloading…".into());
-            ui.set_live_text("Listening… speak now.".into());
-            ui.set_status_text(
-                format!("Onloading {} & listening…", stt::model(model_index).name).into(),
-            );
-            note(&weak, &log, "Automatic model onload & recording started.");
-            platform::set_overlay_expanded(true);
-            platform::update_overlay_level(0.15, false, true);
-            if ui.get_overlay_enabled() {
-                bubble("Onloading…", "", &weak, &log);
-            }
-
-            // Spawn automatic onload on background thread with visible round loading spinner
-            {
-                let onload_weak = weak.clone();
-                let onload_log = log.clone();
-                let onload_done = onload_pending.clone();
-                std::thread::spawn(move || {
-                    let started = std::time::Instant::now();
-                    if needs_onload {
-                        let _ = stt::onload_model(model_index);
-                    }
-                    let elapsed = started.elapsed();
-                    if elapsed < std::time::Duration::from_millis(280) {
-                        std::thread::sleep(std::time::Duration::from_millis(280) - elapsed);
-                    }
-                    onload_done.store(false, Ordering::SeqCst);
-                    on_ui(move || {
-                        if let Some(ui) = onload_weak.upgrade() {
-                            ui.set_model_loading(false);
-                            ui.set_loading_label("".into());
-                            sync_model_ui(&ui);
-                            if ui.get_recording() {
-                                ui.set_status_text(
-                                    format!("Listening ({})…", stt::model(model_index).name)
-                                        .into(),
-                                );
-                                if ui.get_overlay_enabled() {
-                                    bubble("Listening…", "", &onload_weak, &onload_log);
-                                }
-                            }
-                        }
-                    });
-                });
-            }
-
-            let weak = weak.clone();
-            let log_rec = log.clone();
-            let stop_flag = stop_flag.clone();
-            let pending = pending.clone();
-            let onload_pending = onload_pending.clone();
-            std::thread::spawn(move || {
-                let mut session = session;
-                let mut chunk = vec![0f32; 800];
-                let mut last_health: u8 = conditioner::HEALTH_OK;
-                let mut health_since = std::time::Instant::now();
-                let mut last_live_decode = std::time::Instant::now();
-                let live_in_flight = Arc::new(AtomicBool::new(false));
-                let live_partial_seen = Arc::new(AtomicBool::new(false));
-
-                loop {
-                    let n = session.recorder.read(&mut chunk);
-                    if n == 0 {
-                        std::thread::sleep(std::time::Duration::from_millis(15));
-                        if stop_flag.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        continue;
-                    }
-                    session.samples.extend_from_slice(&chunk[..n]);
-                    let rms = session.recorder.rms;
-                    let peak = session.recorder.peak;
-                    if rms > 0.0055 {
-                        session.spoke = true;
-                        session.last_voice = std::time::Instant::now();
-                    }
-
-                    let visual_level = (rms * 4.2 + peak * 0.35).clamp(0.0, 1.0);
-                    if session.started.elapsed() >= std::time::Duration::from_millis(280) {
-                        // While the model is still onloading, keep the pill on
-                        // the loading spinner instead of switching to wave bars.
-                        let loading = onload_pending.load(Ordering::SeqCst);
-                        platform::update_overlay_level(visual_level, true, loading);
-                    }
-
-                    // Live real-time partial transcription & typing into focused text box
-                    if live_mode
-                        && session.spoke
-                        && session.samples.len() >= 14_400
-                        && last_live_decode.elapsed() >= std::time::Duration::from_millis(1200)
-                        && !live_in_flight.swap(true, Ordering::SeqCst)
-                    {
-                        last_live_decode = std::time::Instant::now();
-                        let snap = session.samples.clone();
-                        let live_weak = weak.clone();
-                        let live_stop = stop_flag.clone();
-                        let flag = live_in_flight.clone();
-                        let seen_flag = live_partial_seen.clone();
-                        std::thread::spawn(move || {
-                            let wav = stt::wav_path("quickstt-live.wav");
-                            if audio::write_wav(&wav, &snap, audio::SAMPLE_RATE as u32).is_ok() {
-                                if let Ok(partial) = stt::transcribe(&wav, model_index) {
-                                    let trimmed = partial.trim().to_string();
-                                    if !trimmed.is_empty() && !live_stop.load(Ordering::SeqCst) {
-                                        seen_flag.store(true, Ordering::SeqCst);
-                                        if platform::has_focused_text_box() {
-                                            let _ = platform::type_live_partial(&trimmed);
-                                        }
-                                        on_ui(move || {
-                                            if let Some(ui) = live_weak.upgrade() {
-                                                if ui.get_recording() {
-                                                    ui.set_live_text(trimmed.into());
-                                                }
-                                            }
-                                        });
-                                    }
-                                }
-                            }
-                            flag.store(false, Ordering::SeqCst);
-                        });
-                    }
-
-                    let health = session.recorder.health();
-                    if health != last_health
-                        && health_since.elapsed() > std::time::Duration::from_secs(2)
-                    {
-                        last_health = health;
-                        health_since = std::time::Instant::now();
-                        let (msg, card_msg) = match health {
-                            conditioner::HEALTH_SATURATED => (
-                                "Mic input clipped — lower gain",
-                                "Input clipped",
-                            ),
-                            conditioner::HEALTH_DEAD => (
-                                "No audio arriving from microphone",
-                                "No mic signal",
-                            ),
-                            _ => ("Listening…", ""),
-                        };
-                        let hweak = weak.clone();
-                        let card = card_msg.to_string();
-                        on_ui(move || {
-                            if let Some(ui) = hweak.upgrade() {
-                                ui.set_status_text(msg.into());
-                                ui.set_mic_health(card.into());
-                            }
-                        });
-                    }
-
-                    let quiet = session.last_voice.elapsed()
-                        > std::time::Duration::from_millis(1600);
-                    let too_long =
-                        session.started.elapsed() > std::time::Duration::from_secs(60);
-                    let secs_elapsed = session.started.elapsed().as_secs_f32();
-                    let has_partial = live_partial_seen.load(Ordering::SeqCst);
-                    let meter_weak = weak.clone();
-                    on_ui(move || {
-                        if let Some(ui) = meter_weak.upgrade() {
-                            if ui.get_recording() {
-                                ui.set_audio_level(visual_level);
-                                if !has_partial {
-                                    ui.set_live_text(
-                                        format!("Listening ({secs_elapsed:.1}s)…").into(),
-                                    );
-                                }
-                            }
-                        }
-                    });
-                    if (quiet && session.spoke) || too_long {
-                        break;
-                    }
-                    if stop_flag.load(Ordering::SeqCst) {
-                        break;
-                    }
-                }
-                session.recorder.stop();
-                if DISCARD_RECORDING.swap(false, Ordering::SeqCst) {
-                    DISCARD_TURN.store(false, Ordering::SeqCst);
-                    let _ = platform::cancel_typing_turn();
-                    let discard_weak = weak.clone();
-                    let discard_log = log_rec.clone();
-                    let _ = std::thread::spawn(|| {
-                        let _ = stt::offload_model();
-                    });
-                    on_ui(move || {
-                        if let Some(ui) = discard_weak.upgrade() {
-                            ui.set_recording(false);
-                            ui.set_busy(false);
-                            ui.set_audio_level(0.0);
-                            ui.set_loading_label("".into());
-                            ui.set_live_text("Discarded.".into());
-                            ui.set_has_text(false);
-                            ui.set_mic_health("".into());
-                            ui.set_status_text("Discarded — no text was output".into());
-                            platform::update_overlay_level(0.0, false, false);
-                            if ui.get_overlay_enabled() {
-                                bubble("Discarded", "", &discard_weak, &discard_log);
-                            }
-                        }
-                    });
-                    return;
-                }
-                platform::update_overlay_level(0.0, false, true);
-                let samples = std::mem::take(&mut session.samples);
-                let health = session.recorder.health();
-                let status_weak = weak.clone();
-                let status_log = log_rec.clone();
-                on_ui(move || {
-                    if let Some(ui) = status_weak.upgrade() {
-                        ui.set_recording(false);
-                        ui.set_audio_level(0.0);
-                        ui.set_busy(true);
-                        ui.set_loading_label("Transcribing…".into());
-                        ui.set_status_text("Transcribing…".into());
-                        if ui.get_overlay_enabled() {
-                            bubble("Transcribing…", "", &status_weak, &status_log);
-                        }
-                    }
-                });
-                transcribe(samples, health, model_index, &pending);
-            });
+            trigger_record_toggle();
         });
     }
 
@@ -1484,10 +1662,13 @@ pub fn build_ui() -> AppWindow {
     {
         let weak_a = ui.as_weak();
         let log_a = log.clone();
-        let text_a = last_text.clone();
         ui.on_type_into_app(move || {
             let Some(ui) = weak_a.upgrade() else { return };
-            let text = text_a.lock().ok().map(|t| t.clone()).unwrap_or_default();
+            let text = SHARED_LAST_TEXT
+                .lock()
+                .ok()
+                .map(|t| t.clone())
+                .unwrap_or_default();
             if text.trim().is_empty() {
                 note(&weak_a, &log_a, "Nothing to type yet — record a phrase first.");
                 ui.set_status_text("Record something first".into());
@@ -1514,10 +1695,13 @@ pub fn build_ui() -> AppWindow {
 
         let weak_b = ui.as_weak();
         let log_b = log.clone();
-        let text_b = last_text.clone();
         ui.on_share_text(move || {
             let Some(ui) = weak_b.upgrade() else { return };
-            let text = text_b.lock().ok().map(|t| t.clone()).unwrap_or_default();
+            let text = SHARED_LAST_TEXT
+                .lock()
+                .ok()
+                .map(|t| t.clone())
+                .unwrap_or_default();
             if text.trim().is_empty() {
                 ui.set_status_text("Record something first".into());
                 return;
@@ -1556,10 +1740,8 @@ pub fn build_ui() -> AppWindow {
     {
         let weak = ui.as_weak();
         let turns = turns.clone();
-        let pending = pending.clone();
         let log = log.clone();
         let perm_wait = perm_wait.clone();
-        let last_text = last_text.clone();
         let mut phase: f32 = 0.0;
         let mut ticks: u32 = 0;
         let timer = slint::Timer::default();
@@ -1568,8 +1750,8 @@ pub fn build_ui() -> AppWindow {
             std::time::Duration::from_millis(40),
             move || {
                 let Some(ui) = weak.upgrade() else { return };
-                if ui.get_busy() || ui.get_model_loading() {
-                    phase = (phase + 0.24) % std::f32::consts::TAU;
+                if ui.get_busy() || ui.get_model_loading() || ui.get_show_onboarding() {
+                    phase = (phase + 0.16) % std::f32::consts::TAU;
                     ui.set_wave_phase(phase / std::f32::consts::TAU);
                 }
 
@@ -1609,8 +1791,8 @@ pub fn build_ui() -> AppWindow {
                     refresh_overlay_state(&ui);
                     ui.set_battery_ok(platform::ignoring_battery_optimizations());
                     if ui.get_auto_offload()
-                        && !ui.get_recording()
-                        && !ui.get_busy()
+                        && !BG_RECORDING.load(Ordering::SeqCst)
+                        && !BG_BUSY.load(Ordering::SeqCst)
                         && !ui.get_model_loading()
                     {
                         if let Some(offload_msg) = stt::check_idle_offload(30) {
@@ -1624,41 +1806,22 @@ pub fn build_ui() -> AppWindow {
                     }
                 }
 
-                // Pick up finished transcription from worker thread
-                let done = pending.lock().ok().and_then(|mut p| p.take());
-                if done.is_some() && DISCARD_TURN.swap(false, Ordering::SeqCst) {
-                    ui.set_recording(false);
-                    ui.set_busy(false);
+                // Pick up finished transcriptions delivered by the worker thread
+                let drained: Vec<PendingTurn> = SHARED_PENDING
+                    .lock()
+                    .map(|mut list| std::mem::take(&mut *list))
+                    .unwrap_or_default();
+
+                for turn in drained {
+                    ui.set_recording(BG_RECORDING.load(Ordering::SeqCst));
+                    ui.set_busy(BG_BUSY.load(Ordering::SeqCst));
                     ui.set_audio_level(0.0);
                     ui.set_loading_label("".into());
-                    ui.set_has_text(false);
-                    ui.set_live_text("Discarded.".into());
-                    sync_model_ui(&ui);
-                    platform::update_overlay_level(0.0, false, false);
-                    ui.set_status_text("Discarded — no text was output".into());
-                    let off_weak = weak.clone();
-                    std::thread::spawn(move || {
-                        let _ = stt::offload_model();
-                        on_ui(move || {
-                            if let Some(ui) = off_weak.upgrade() {
-                                sync_model_ui(&ui);
-                            }
-                        });
-                    });
-                    return;
-                }
-                if let Some(turn) = done {
-                    ui.set_recording(false);
-                    ui.set_busy(false);
-                    ui.set_audio_level(0.0);
                     sync_model_ui(&ui);
 
-                    let final_status = if turn.ok {
+                    if turn.ok {
                         ui.set_live_text(turn.text.clone().into());
                         ui.set_has_text(true);
-                        if let Ok(mut slot) = last_text.lock() {
-                            *slot = turn.text.clone();
-                        }
                         turns.insert(
                             0,
                             Turn {
@@ -1667,44 +1830,11 @@ pub fn build_ui() -> AppWindow {
                                 seconds: turn.seconds,
                             },
                         );
-
-                        // Automatically type into focused text box; if no text box is focused,
-                        // copy the full transcript straight to the clipboard all at once.
-                        let typed_in_box = if platform::has_focused_text_box() {
-                            platform::commit_final_text(&turn.text)
-                        } else if !platform::has_window_focus() {
-                            platform::inject_text(&turn.text).is_ok()
-                        } else {
-                            false
-                        };
-
-                        platform::copy_to_clipboard(&turn.text);
-
-                        let status = if typed_in_box {
-                            note(&weak, &log, "Automatically typed into focused text box.");
-                            "Typed into text box".to_string()
-                        } else {
-                            note(
-                                &weak,
-                                &log,
-                                "No focused text box — copied full transcript to clipboard.",
-                            );
-                            "Copied to clipboard".to_string()
-                        };
-                        ui.set_status_text(status.clone().into());
-                        status
+                        ui.set_status_text(turn.status.clone().into());
+                        note(&weak, &log, &turn.status);
                     } else {
                         ui.set_status_text(turn.status.clone().into());
                         note(&weak, &log, &turn.status);
-                        turn.status.clone()
-                    };
-
-                    // Offload is NOT immediate: the model stays in RAM and is
-                    // released automatically after 30 s of silence (idle watchdog).
-                    ui.set_loading_label("".into());
-                    platform::update_overlay_level(0.0, false, false);
-                    if ui.get_overlay_enabled() {
-                        bubble(&final_status, &turn.text, &weak, &log);
                     }
                 }
             },
@@ -1719,6 +1849,7 @@ pub fn build_ui() -> AppWindow {
         let mic_ok = platform::has_mic_permission();
         let index = stt::selected();
         ui.set_selected_model(index as i32);
+        ui.set_ime_enabled(platform::ime_enabled());
         ui.set_auto_type_ok(platform::accessibility_enabled());
 
         let initial_onload = stt::model_installed(index);
@@ -1779,13 +1910,18 @@ pub fn build_ui() -> AppWindow {
             ui.set_touch_probe(text.into());
         }
 
-        // The floating pill pops up (translucent, tap-to-dictate) only while
-        // a text box is focused — never at launch.
-        ui.set_overlay_enabled(platform::pill_on_focus());
+        let want_pill = platform::pill_on_focus();
+        ui.set_overlay_enabled(want_pill);
         ui.set_battery_ok(platform::ignoring_battery_optimizations());
         platform::watch_overlay_permission();
+        if overlay_ok && want_pill {
+            let _ = platform::start_service();
+            SERVICE_STARTED.store(true, Ordering::SeqCst);
+            platform::ensure_overlay_watcher();
+            ui.set_background_ok(true);
+        }
 
-        // First-run onboarding pages (dark grey, interactive).
+        // First-run onboarding pages (dark grey #121212, interactive).
         let done = platform::onboarding_done();
         ui.set_show_onboarding(!done);
         ui.set_onboarding_page(0);
@@ -1809,64 +1945,49 @@ fn is_silent(samples: &[f32]) -> bool {
     secs < 0.25 || peak < 600.0 / 32768.0 || rms < 50.0 / 32768.0
 }
 
-fn transcribe(
-    samples: Vec<f32>,
-    health: u8,
-    model: usize,
-    pending: &Arc<Mutex<Option<PendingTurn>>>,
-) {
+fn transcribe_samples(samples: Vec<f32>, health: u8, model: usize) -> PendingTurn {
     let seconds = (samples.len() as f32 / audio::SAMPLE_RATE as f32).ceil() as i32;
-    let fail = |status: String| {
-        if let Ok(mut slot) = pending.lock() {
-            *slot = Some(PendingTurn {
-                text: String::new(),
-                seconds: 0,
-                status,
-                ok: false,
-            });
-        }
+    let fail = |status: String| PendingTurn {
+        text: String::new(),
+        seconds: 0,
+        status,
+        ok: false,
     };
     if samples.is_empty() {
-        fail("Nothing was recorded".into());
-        return;
+        return fail("Nothing was recorded".into());
     }
     if health == conditioner::HEALTH_SATURATED {
-        fail("Microphone input is clipped — lower the input gain".into());
-        return;
+        return fail("Microphone input is clipped — lower the input gain".into());
     }
     if health == conditioner::HEALTH_DEAD {
-        fail("No audio is arriving from the microphone".into());
-        return;
+        return fail("No audio is arriving from the microphone".into());
     }
     if is_silent(&samples) {
-        fail("No speech detected".into());
-        return;
+        return fail("No speech detected".into());
     }
     let wav = stt::wav_path("quickstt-turn.wav");
     let result = audio::write_wav(&wav, &samples, audio::SAMPLE_RATE as u32)
         .map_err(|e| format!("WAV write error ({}): {e}", wav.display()))
         .and_then(|_| stt::transcribe(&wav, model));
-    if let Ok(mut slot) = pending.lock() {
-        *slot = Some(match result {
-            Ok(text) if !text.trim().is_empty() => PendingTurn {
-                text,
-                seconds,
-                status: "Transcribed & copied to clipboard".into(),
-                ok: true,
-            },
-            Ok(_) => PendingTurn {
-                text: String::new(),
-                seconds,
-                status: "No speech detected".into(),
-                ok: false,
-            },
-            Err(e) => PendingTurn {
-                text: String::new(),
-                seconds,
-                status: format!("Transcription failed: {e}"),
-                ok: false,
-            },
-        });
+    match result {
+        Ok(text) if !text.trim().is_empty() => PendingTurn {
+            text: text.trim().to_string(),
+            seconds,
+            status: "Transcribed & copied to clipboard".into(),
+            ok: true,
+        },
+        Ok(_) => PendingTurn {
+            text: String::new(),
+            seconds,
+            status: "No speech detected".into(),
+            ok: false,
+        },
+        Err(e) => PendingTurn {
+            text: String::new(),
+            seconds,
+            status: format!("Transcription failed: {e}"),
+            ok: false,
+        },
     }
 }
 

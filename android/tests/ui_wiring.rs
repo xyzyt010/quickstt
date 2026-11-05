@@ -105,6 +105,23 @@ fn the_ui_is_wired_end_to_end() {
     let ui = quickstt_android::build_ui();
     ui.window().set_size(LogicalSize::new(412.0, 760.0));
 
+    // Listen page model strip only lists installed models from the user's library,
+    // while the Models tab catalog lists all available models.
+    use slint::Model;
+    let all_models = ui.get_models();
+    let installed_models = ui.get_installed_models();
+    assert!(
+        all_models.row_count() >= installed_models.row_count(),
+        "installed_models must be a subset of the full model catalog"
+    );
+    for i in 0..installed_models.row_count() {
+        let item = installed_models.row_data(i).unwrap();
+        assert!(
+            item.installed,
+            "every model shown on the Listen page must be installed"
+        );
+    }
+
     // The probe starts with the size of the window: nothing has been tapped
     // yet.
     let before = ui.get_touch_probe();

@@ -36,22 +36,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>Uses {@code android.permission.BIND_INPUT_METHOD} — Android's official API for
  * voice typing into focused text fields — so Google Play Protect's Enhanced Fraud
  * Protection never blocks APK installation.
- *
- * <ul>
- *   <li>Detects whether an editable text box is currently focused ({@link #hasFocusedTextBox()}).
- *   <li>Updates the focused text box in real time while speaking via
- *       {@link InputConnection#setComposingText(CharSequence, int)} ({@link #typeLivePartial(String)}).
- *   <li>Commits the final transcript automatically when recording stops via
- *       {@link InputConnection#commitText(CharSequence, int)} ({@link #commitFinalText(String)}).
- *   <li>Renders a compact 54dp Blue Squircle Voice Bar with 1-tap keyboard switching,
- *       round onload/offload spinner, and explicit <b>● START</b> / <b>■ STOP</b> control.
- * </ul>
  */
 public final class QuickSttInputMethodService extends InputMethodService {
 
     private static final String TAG = "QuickSTT";
 
     private static volatile QuickSttInputMethodService instance;
+    private static volatile boolean awaitingPickerOnResume = false;
 
     private static boolean turnStartedComposing = false;
     private static boolean turnNeedsLeadingSpace = false;
@@ -67,12 +58,20 @@ public final class QuickSttInputMethodService extends InputMethodService {
     public void onCreate() {
         super.onCreate();
         instance = this;
+        Overlay.initNative(this);
+        Bubble.ensureWatcher(this);
         Log.i(TAG, "QuickSttInputMethodService created");
     }
 
     @Override
     public boolean onEvaluateFullscreenMode() {
         return false;
+    }
+
+    @Override
+    public boolean onEvaluateInputViewShown() {
+        super.onEvaluateInputViewShown();
+        return true;
     }
 
     @Override
@@ -85,22 +84,53 @@ public final class QuickSttInputMethodService extends InputMethodService {
     public void onStartInput(EditorInfo attribute, boolean restarting) {
         super.onStartInput(attribute, restarting);
         instance = this;
+        Overlay.initNative(this);
+        Bubble.ensureWatcher(this);
         if (!restarting) {
             beginTurn();
         }
-        maybeShowPillForFocusedField(attribute);
+        if (isEditableEditor(attribute) || isInputViewShown()) {
+            Bubble.onImeActive(this, true);
+        }
+    }
+
+    @Override
+    public void onStartInputView(EditorInfo info, boolean restarting) {
+        super.onStartInputView(info, restarting);
+        instance = this;
+        Bubble.onImeActive(this, true);
+    }
+
+    @Override
+    public void onWindowShown() {
+        super.onWindowShown();
+        instance = this;
+        Bubble.onImeActive(this, true);
+    }
+
+    @Override
+    public void onFinishInputView(boolean finishingInput) {
+        if (finishingInput) {
+            Bubble.onImeActive(this, false);
+        }
+        super.onFinishInputView(finishingInput);
+    }
+
+    @Override
+    public void onWindowHidden() {
+        Bubble.onImeActive(this, false);
+        super.onWindowHidden();
     }
 
     @Override
     public void onFinishInput() {
-        maybeHidePill();
         beginTurn();
         super.onFinishInput();
     }
 
     @Override
     public void onDestroy() {
-        maybeHidePill();
+        Bubble.onImeActive(this, false);
         if (voiceBar != null) {
             voiceBar.stopAnimation();
             voiceBar = null;
@@ -111,51 +141,17 @@ public final class QuickSttInputMethodService extends InputMethodService {
         super.onDestroy();
     }
 
-    /** True when the user allowed the floating pill to appear on text fields. */
-    private static boolean pillOnFocus(Context context) {
-        try {
-            java.io.File f = new java.io.File(context.getFilesDir(), "quickstt/pillfocus");
-            if (!f.exists()) {
-                return true;
-            }
-            byte[] bytes = new byte[8];
-            java.io.FileInputStream in = new java.io.FileInputStream(f);
-            int n = in.read(bytes);
-            in.close();
-            if (n <= 0) {
-                return true;
-            }
-            return !new String(bytes, 0, n, "UTF-8").trim().equals("0");
-        } catch (Throwable t) {
+    private static boolean isEditableEditor(EditorInfo attribute) {
+        if (attribute == null) {
+            return false;
+        }
+        int cls = attribute.inputType & InputType.TYPE_MASK_CLASS;
+        if (cls != InputType.TYPE_NULL) {
             return true;
         }
-    }
-
-    private void maybeShowPillForFocusedField(EditorInfo attribute) {
-        try {
-            if (!pillOnFocus(this)) {
-                return;
-            }
-            if (attribute == null) {
-                return;
-            }
-            int cls = attribute.inputType & InputType.TYPE_MASK_CLASS;
-            if (cls == InputType.TYPE_NULL) {
-                return;
-            }
-            Context ctx = getApplicationContext() != null ? getApplicationContext() : this;
-            Bubble.show(ctx, "QuickSTT ready", "");
-        } catch (Throwable t) {
-            Log.w(TAG, "pill show on focus failed", t);
-        }
-    }
-
-    private void maybeHidePill() {
-        try {
-            Bubble.hide(this);
-        } catch (Throwable t) {
-            Log.w(TAG, "pill hide failed", t);
-        }
+        return !TextUtils.isEmpty(attribute.fieldName)
+                || attribute.fieldId > 0
+                || !TextUtils.isEmpty(attribute.hintText);
     }
 
     /** Synchronize recording/loading state from Bubble into the IME voice bar if visible. */
@@ -174,11 +170,8 @@ public final class QuickSttInputMethodService extends InputMethodService {
 
     /** True when QuickSTT Voice Auto-Type is enabled in Android's keyboard settings. */
     public static boolean isEnabled(Context context) {
-        if (instance != null) {
-            return true;
-        }
         if (context == null) {
-            return false;
+            return instance != null;
         }
         try {
             InputMethodManager imm = (InputMethodManager) context.getSystemService(Context.INPUT_METHOD_SERVICE);
@@ -207,6 +200,57 @@ public final class QuickSttInputMethodService extends InputMethodService {
         return false;
     }
 
+    /** True when QuickSTT Voice Auto-Type is currently selected as the active input method. */
+    public static boolean isSelected(Context context) {
+        if (context == null) {
+            return instance != null;
+        }
+        try {
+            String def = Settings.Secure.getString(
+                    context.getContentResolver(),
+                    Settings.Secure.DEFAULT_INPUT_METHOD);
+            if (!TextUtils.isEmpty(def) && def.startsWith(context.getPackageName() + "/")) {
+                return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return instance != null;
+    }
+
+    /** True when QuickSTT Voice Auto-Type is both enabled in Settings and selected as active IME. */
+    public static boolean isReady(Context context) {
+        return isEnabled(context) && isSelected(context);
+    }
+
+    /**
+     * When the user returns from Android's On-Screen Keyboard settings after enabling
+     * QuickSTT Voice Auto-Type, automatically pop open the system input-method picker
+     * so they can select it in one tap.
+     */
+    public static void maybeShowPendingPickerOnResume(final Context context) {
+        if (!awaitingPickerOnResume || context == null) {
+            return;
+        }
+        if (isEnabled(context) && !isSelected(context)) {
+            awaitingPickerOnResume = false;
+            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        InputMethodManager imm =
+                                (InputMethodManager) context.getSystemService(Context.INPUT_METHOD_SERVICE);
+                        if (imm != null) {
+                            imm.showInputMethodPicker();
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }, 280L);
+        } else if (isSelected(context)) {
+            awaitingPickerOnResume = false;
+        }
+    }
+
     /**
      * If QuickSTT Voice Auto-Type is not enabled yet, open Android's On-Screen Keyboard
      * settings; if it is already enabled, open the system input-method picker dialog so
@@ -215,6 +259,7 @@ public final class QuickSttInputMethodService extends InputMethodService {
     public static String openSettingsOrPicker(final Context context) {
         try {
             if (isEnabled(context)) {
+                awaitingPickerOnResume = false;
                 final InputMethodManager imm =
                         (InputMethodManager) context.getSystemService(Context.INPUT_METHOD_SERVICE);
                 if (imm != null) {
@@ -230,6 +275,7 @@ public final class QuickSttInputMethodService extends InputMethodService {
                     return "";
                 }
             }
+            awaitingPickerOnResume = true;
             Intent intent = new Intent(Settings.ACTION_INPUT_METHOD_SETTINGS);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             context.startActivity(intent);
@@ -242,8 +288,6 @@ public final class QuickSttInputMethodService extends InputMethodService {
     /**
      * Discard any live composing text that was streamed into the focused field
      * (used when the user cancels a turn with the ✕ button).
-     *
-     * @return {@code true} if a composing region was cleared.
      */
     public static boolean cancelLiveTyping() {
         final QuickSttInputMethodService svc = instance;
@@ -330,8 +374,6 @@ public final class QuickSttInputMethodService extends InputMethodService {
 
     /**
      * Update the focused text box in real time with the current partial transcript.
-     *
-     * @return {@code true} if a focused text box was updated.
      */
     public static boolean typeLivePartial(final String partialText) {
         if (partialText == null || partialText.trim().isEmpty()) {
@@ -342,9 +384,6 @@ public final class QuickSttInputMethodService extends InputMethodService {
 
     /**
      * Commit the final transcript into the focused text box when recording stops.
-     *
-     * @return {@code true} if typed into a focused text box; {@code false} if no text box
-     *         is focused (caller copies the full transcript to the clipboard all at once).
      */
     public static boolean commitFinalText(final String finalText) {
         try {
@@ -391,20 +430,17 @@ public final class QuickSttInputMethodService extends InputMethodService {
     private boolean hasActiveEditableField() {
         try {
             InputConnection ic = getCurrentInputConnection();
-            EditorInfo info = getCurrentInputEditorInfo();
-            if (ic == null || info == null) {
+            if (ic == null) {
                 return false;
             }
-            return (info.inputType & InputType.TYPE_MASK_CLASS) != InputType.TYPE_NULL;
+            EditorInfo info = getCurrentInputEditorInfo();
+            return isEditableEditor(info) || isInputViewShown();
         } catch (Throwable t) {
             return false;
         }
     }
 
     private synchronized boolean applyOnMainThread(String transcript, boolean commit) {
-        if (!hasActiveEditableField()) {
-            return false;
-        }
         InputConnection ic = getCurrentInputConnection();
         if (ic == null) {
             return false;
@@ -470,8 +506,8 @@ public final class QuickSttInputMethodService extends InputMethodService {
     }
 
     /**
-     * Compact 54dp Blue Squircle Voice Input Bar shown at the bottom of the screen
-     * when QuickSTT Voice Auto-Type is the active keyboard.
+     * Compact 54dp Dark-Grey (#121212 / #1C1C1C) Squircle Voice Input Bar shown at
+     * the bottom of the screen when QuickSTT Voice Auto-Type is the active keyboard.
      */
     private final class VoiceBarView extends View implements Choreographer.FrameCallback {
 
@@ -502,26 +538,26 @@ public final class QuickSttInputMethodService extends InputMethodService {
             barHeightPx = Bubble.dp(context, 56f);
 
             bgPaint.setStyle(Paint.Style.FILL);
-            bgPaint.setColor(0xFF0F0F12);
+            bgPaint.setColor(0xFF121212);
 
             cardPaint.setStyle(Paint.Style.FILL);
-            cardPaint.setColor(0xFF1E1E24);
+            cardPaint.setColor(0xFF1C1C1C);
 
             borderPaint.setStyle(Paint.Style.STROKE);
             borderPaint.setStrokeWidth(Bubble.dp(context, 1.0f));
-            borderPaint.setColor(0xFF2C2C33);
+            borderPaint.setColor(0xFF2A2A2A);
 
             btnPaint.setStyle(Paint.Style.FILL);
             btnBorderPaint.setStyle(Paint.Style.STROKE);
             btnBorderPaint.setStrokeWidth(Bubble.dp(context, 1.0f));
 
-            textPaint.setColor(0xFFF8FAFC);
+            textPaint.setColor(0xFFF5F5F5);
             textPaint.setTextSize(TypedValue.applyDimension(
                     TypedValue.COMPLEX_UNIT_SP, 11.5f, context.getResources().getDisplayMetrics()));
             textPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
             textPaint.setTextAlign(Paint.Align.CENTER);
 
-            statusPaint.setColor(0xFFEDEDF0);
+            statusPaint.setColor(0xFFEDEDED);
             statusPaint.setTextSize(TypedValue.applyDimension(
                     TypedValue.COMPLEX_UNIT_SP, 12f, context.getResources().getDisplayMetrics()));
             statusPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
@@ -534,7 +570,7 @@ public final class QuickSttInputMethodService extends InputMethodService {
             spinnerArcPaint.setStyle(Paint.Style.STROKE);
             spinnerArcPaint.setStrokeWidth(Bubble.dp(context, 2.2f));
             spinnerArcPaint.setStrokeCap(Paint.Cap.ROUND);
-            spinnerArcPaint.setColor(0xFFF5F5F8);
+            spinnerArcPaint.setColor(0xFFF5F5F5);
 
             startAnimation();
         }
@@ -597,7 +633,7 @@ public final class QuickSttInputMethodService extends InputMethodService {
             cardRect.set(padH, padV, w - padH, h - padV);
             float r = Bubble.dp(getContext(), 13f);
             canvas.drawRoundRect(cardRect, r, r, cardPaint);
-            borderPaint.setColor(liveRecording ? 0xFFEF4444 : 0xFF2C2C33);
+            borderPaint.setColor(liveRecording ? 0xFFEF4444 : 0xFF2A2A2A);
             canvas.drawRoundRect(cardRect, r, r, borderPaint);
 
             float cy = h * 0.5f;
@@ -608,8 +644,8 @@ public final class QuickSttInputMethodService extends InputMethodService {
             float kbdLeft = cardRect.left + Bubble.dp(getContext(), 6f);
             float kbdW = Bubble.dp(getContext(), 76f);
             kbdBtnRect.set(kbdLeft, cy - btnH * 0.5f, kbdLeft + kbdW, cy + btnH * 0.5f);
-            btnPaint.setColor(0xFF2A2A31);
-            btnBorderPaint.setColor(0xFF3F3F46);
+            btnPaint.setColor(0xFF262626);
+            btnBorderPaint.setColor(0xFF383838);
             canvas.drawRoundRect(kbdBtnRect, btnR, btnR, btnPaint);
             canvas.drawRoundRect(kbdBtnRect, btnR, btnR, btnBorderPaint);
 
@@ -636,8 +672,8 @@ public final class QuickSttInputMethodService extends InputMethodService {
                 btnBorderPaint.setColor(0xFFF87171);
             } else if (liveBusy) {
                 recLabel = "WAIT";
-                btnPaint.setColor(0xFF1E293B);
-                btnBorderPaint.setColor(0xFF475569);
+                btnPaint.setColor(0xFF242424);
+                btnBorderPaint.setColor(0xFF3D3D3D);
             } else {
                 recLabel = "● START";
                 btnPaint.setColor(0xFF2563EB);
@@ -676,6 +712,7 @@ public final class QuickSttInputMethodService extends InputMethodService {
                     return true;
                 }
                 if (recBtnRect.contains(x, y) || (!liveBusy || liveRecording)) {
+                    Bubble.onImeActive(getContext(), true);
                     Bubble.dispatchAction(Bubble.ACTION_RECORD);
                     return true;
                 }

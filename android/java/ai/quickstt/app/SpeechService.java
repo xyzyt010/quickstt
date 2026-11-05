@@ -72,6 +72,8 @@ public final class SpeechService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        Overlay.initNative(this);
+        Bubble.ensureWatcher(this);
         createChannel();
     }
 
@@ -81,6 +83,8 @@ public final class SpeechService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
+        Overlay.initNative(this);
+        Bubble.ensureWatcher(this);
         Notification notification = buildNotification();
         // Android 14 and newer demand a type for every foreground service.
         // The service exists for the microphone, so that is the type it asks

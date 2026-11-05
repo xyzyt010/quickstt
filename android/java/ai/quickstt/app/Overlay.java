@@ -5,30 +5,19 @@ import android.app.AppOpsManager;
 import android.app.Application;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.os.Process;
 import android.provider.Settings;
+import android.view.View;
+import android.view.inputmethod.InputMethodManager;
 
 /**
- * The "display over other apps" permission and the floating bubble.
- *
- * <p>Three things live here:
- *
- * <ul>
- *   <li>{@link #granted(Context)} — is the permission there?
- *   <li>{@link #openSettings(Context)} — open the system page where the user
- *       grants it. It goes straight to QuickSTT's own page and falls back to
- *       the list of all apps and then to the app-info page, because several
- *       phone makers do not implement the action the same way.
- *   <li>{@link #watch(Context)} — tell Rust when the app comes back to the
- *       front. That is the moment the user returns from the settings, and
- *       the moment the bubble has to appear.
- * </ul>
- *
- * <p>Everything returns an error message instead of throwing, so the app can
- * tell the user what went wrong rather than failing silently.
+ * The "display over other apps" permission, IME bridge, and floating squircle widget.
  */
 public final class Overlay {
 
@@ -42,26 +31,39 @@ public final class Overlay {
     /** Called from Rust when the activity comes back to the front. */
     private static native void nativeActivityResumed();
 
+    /** Registers a fallback Context with the native side so background services work without Activity. */
+    private static native void nativeInitContext(Context context);
+
     /** Set once the lifecycle callback is registered. */
     private static boolean watching;
 
     private Overlay() {
     }
 
+    /** Give the native Rust side a long-lived Context reference even when NativeActivity is closed. */
+    public static void initNative(Context context) {
+        if (context == null) {
+            return;
+        }
+        try {
+            Context app = context.getApplicationContext();
+            nativeInitContext(app != null ? app : context);
+        } catch (Throwable ignored) {
+        }
+    }
+
     /**
      * May the app draw over other apps?
-     *
-     * <p>{@code Settings.canDrawOverlays} is the check Android itself uses.
-     * Some phone makers keep the permission in the app-op instead, so that
-     * is consulted as well.
      */
     public static boolean granted(Context context) {
+        if (context == null) {
+            return false;
+        }
         try {
             if (Settings.canDrawOverlays(context)) {
                 return true;
             }
         } catch (Throwable ignored) {
-            // Fall through to the app-op.
         }
         try {
             AppOpsManager ops = (AppOpsManager)
@@ -74,7 +76,6 @@ public final class Overlay {
                 }
             }
         } catch (Throwable ignored) {
-            // Nothing else to try.
         }
         return false;
     }
@@ -124,13 +125,18 @@ public final class Overlay {
     }
 
     /**
-     * Tell Rust when the app comes back to the front.
-     *
-     * <p>The user leaves the app to grant the permission and comes back —
-     * this is where the app notices and puts the bubble on the screen.
+     * Tell Rust when the app comes back to the front and keep the IME watcher active.
      */
     public static void watch(Context context) {
         try {
+            initNative(context);
+            Bubble.ensureWatcher(context);
+            if (context instanceof Activity) {
+                try {
+                    ((Activity) context).setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                } catch (Throwable ignored) {
+                }
+            }
             if (watching) {
                 return;
             }
@@ -144,14 +150,27 @@ public final class Overlay {
                         @Override
                         public void onActivityResumed(Activity activity) {
                             try {
+                                activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                            } catch (Throwable ignored) {
+                            }
+                            try {
+                                initNative(activity);
+                                Bubble.ensureWatcher(activity);
+                                QuickSttInputMethodService.maybeShowPendingPickerOnResume(activity);
+                            } catch (Throwable ignored) {
+                            }
+                            try {
                                 nativeActivityResumed();
                             } catch (UnsatisfiedLinkError ignored) {
-                                // The library is not loaded (yet).
                             }
                         }
 
                         @Override
                         public void onActivityCreated(Activity a, Bundle b) {
+                            try {
+                                a.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                            } catch (Throwable ignored) {
+                            }
                         }
 
                         @Override
@@ -175,15 +194,49 @@ public final class Overlay {
                         }
                     });
         } catch (Throwable ignored) {
-            // Without the callback the app still polls the permission.
         }
     }
 
-    /** Show the floating bubble (see {@link Bubble}) — only while a text box is focused. */
-    public static String show(Context context, String state, String transcript) {
-        if (!QuickSttInputMethodService.hasFocusedTextBox()) {
-            return "";
+    /** Ensure the 1px full-height IME watcher window is running (or stopped if disabled). */
+    public static void ensureWatcher(Context context) {
+        if (Bubble.pillOnFocus(context) && granted(context)) {
+            Bubble.ensureWatcher(context);
+        } else {
+            Bubble.stopWatcher();
         }
+    }
+
+    /**
+     * Called when the user taps the transcript box inside the QuickSTT app:
+     * shows the floating squircle widget immediately and requests the soft keyboard.
+     */
+    public static void focusInAppTextBox(final Context context) {
+        Bubble.onInAppFieldFocused(context, true);
+        if (context == null) {
+            return;
+        }
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (context instanceof Activity) {
+                        Activity act = (Activity) context;
+                        View decor = act.getWindow() != null ? act.getWindow().getDecorView() : null;
+                        InputMethodManager imm = (InputMethodManager)
+                                act.getSystemService(Context.INPUT_METHOD_SERVICE);
+                        if (imm != null && decor != null) {
+                            decor.requestFocus();
+                            imm.showSoftInput(decor, InputMethodManager.SHOW_IMPLICIT);
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+    }
+
+    /** Show the floating squircle widget (see {@link Bubble}). */
+    public static String show(Context context, String state, String transcript) {
         return Bubble.show(context, state, transcript);
     }
 
@@ -202,8 +255,13 @@ public final class Overlay {
         Bubble.setExpanded(expanded);
     }
 
-    /** True when the QuickSTT Voice Auto-Type input method is enabled. */
+    /** True when the QuickSTT Voice Auto-Type input method is both enabled and selected. */
     public static boolean accessibilityEnabled(Context context) {
+        return QuickSttInputMethodService.isReady(context);
+    }
+
+    /** True when the QuickSTT Voice Auto-Type input method is enabled in system settings. */
+    public static boolean imeEnabled(Context context) {
         return QuickSttInputMethodService.isEnabled(context);
     }
 
@@ -239,9 +297,6 @@ public final class Overlay {
 
     /**
      * Is QuickSTT exempt from the battery restrictions?
-     *
-     * <p>Without the exemption Android puts the app to sleep as soon as it
-     * is in the background — and the bubble would stop working.
      */
     public static boolean ignoringBatteryOptimizations(Context context) {
         try {
@@ -255,11 +310,6 @@ public final class Overlay {
 
     /**
      * Ask the system to let QuickSTT run in the background.
-     *
-     * <p>QuickSTT's own page first, the list of all apps as the fallback —
-     * the same flow the reference app uses for the battery exemption.
-     *
-     * @return an empty string when a page was opened, otherwise the reason.
      */
     public static String requestBatteryExemption(Context context) {
         try {
@@ -269,7 +319,6 @@ public final class Overlay {
             context.startActivity(intent);
             return "";
         } catch (Throwable t) {
-            // The action is not implemented on every phone: show the list.
             try {
                 Intent intent = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);

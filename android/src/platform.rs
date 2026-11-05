@@ -244,6 +244,73 @@ const INJECT_MODE_WAIT_FOR_FINISH: i32 = 2;
 #[cfg(target_os = "android")]
 static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
 
+/// Fallback JavaVM pointer & Context GlobalRef initialized by Overlay/IME/Service
+/// so JNI calls succeed even when NativeActivity is in the background or closed.
+#[cfg(target_os = "android")]
+static SAVED_VM: Mutex<Option<usize>> = Mutex::new(None);
+
+#[cfg(target_os = "android")]
+static SAVED_CONTEXT: Mutex<Option<jni::objects::GlobalRef>> = Mutex::new(None);
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_ai_quickstt_app_Overlay_nativeInitContext(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    context: jni::objects::JObject,
+) {
+    if context.is_null() {
+        return;
+    }
+    if let Ok(vm) = env.get_java_vm() {
+        if let Ok(mut slot) = SAVED_VM.lock() {
+            *slot = Some(vm.get_java_vm_pointer() as usize);
+        }
+    }
+    if let Ok(gref) = env.new_global_ref(&context) {
+        if let Ok(mut slot) = SAVED_CONTEXT.lock() {
+            *slot = Some(gref);
+        }
+    }
+    register_all_natives(&mut env, &context);
+}
+
+#[cfg(target_os = "android")]
+fn register_all_natives(env: &mut jni::JNIEnv, context: &JObject) {
+    if let Some(cls) = app_class(env, context, "ai/quickstt/app/Bubble") {
+        let methods = [jni::NativeMethod {
+            name: "nativeBubbleAction".into(),
+            sig: "(I)V".into(),
+            fn_ptr: crate::Java_ai_quickstt_app_Bubble_nativeBubbleAction as *mut std::ffi::c_void,
+        }];
+        let _ = env.register_native_methods(cls, &methods);
+    }
+    if let Some(cls) = app_class(env, context, "ai/quickstt/app/Overlay") {
+        let methods = [
+            jni::NativeMethod {
+                name: "nativeActivityResumed".into(),
+                sig: "()V".into(),
+                fn_ptr: crate::Java_ai_quickstt_app_Overlay_nativeActivityResumed
+                    as *mut std::ffi::c_void,
+            },
+            jni::NativeMethod {
+                name: "nativeInitContext".into(),
+                sig: "(Landroid/content/Context;)V".into(),
+                fn_ptr: Java_ai_quickstt_app_Overlay_nativeInitContext as *mut std::ffi::c_void,
+            },
+        ];
+        let _ = env.register_native_methods(cls, &methods);
+    }
+    if let Some(cls) = app_class(env, context, "ai/quickstt/app/ModelDownloader") {
+        let methods = [jni::NativeMethod {
+            name: "nativeProgress".into(),
+            sig: "(JJ)V".into(),
+            fn_ptr: Java_ai_quickstt_app_ModelDownloader_nativeProgress as *mut std::ffi::c_void,
+        }];
+        let _ = env.register_native_methods(cls, &methods);
+    }
+}
+
 /// The overlay bubble, kept alive between updates.
 #[cfg(target_os = "android")]
 static OVERLAY: Mutex<Option<OverlayHandle>> = Mutex::new(None);
@@ -291,6 +358,9 @@ pub fn log(message: &str) {
 /// Remember the app handle so the Activity can be reached later.
 #[cfg(target_os = "android")]
 pub fn init(app: AndroidApp) {
+    if let Ok(mut slot) = SAVED_VM.lock() {
+        *slot = Some(app.vm_as_ptr() as usize);
+    }
     {
         let mut slot = APP.lock().unwrap();
         *slot = Some(app);
@@ -302,35 +372,35 @@ pub fn init(app: AndroidApp) {
         let _ = std::fs::create_dir_all(&tmp);
         std::env::set_var("TMPDIR", &tmp);
         std::env::set_var("HOME", &tmp);
+        let pref = tmp.join("pill_on_focus_v2");
+        if !pref.exists() {
+            let _ = std::fs::write(&pref, "1");
+        }
     }
     // Bind JNI native callbacks directly onto the app classes loaded via the
     // application's PathClassLoader so they never fail with UnsatisfiedLinkError
     // even when NativeActivity loaded libquickstt_android.so via C dlopen.
     let _ = with_activity(|env, activity| {
-        if let Some(cls) = app_class(env, activity, "ai/quickstt/app/Bubble") {
-            let methods = [jni::NativeMethod {
-                name: "nativeBubbleAction".into(),
-                sig: "(I)V".into(),
-                fn_ptr: crate::Java_ai_quickstt_app_Bubble_nativeBubbleAction as *mut std::ffi::c_void,
-            }];
-            let _ = env.register_native_methods(cls, &methods);
+        if let Ok(app_ctx) = env
+            .call_method(
+                activity,
+                "getApplicationContext",
+                "()Landroid/content/Context;",
+                &[],
+            )
+            .and_then(|v| v.l())
+        {
+            let target = if app_ctx.is_null() { activity } else { &app_ctx };
+            if let Ok(gref) = env.new_global_ref(target) {
+                if let Ok(mut slot) = SAVED_CONTEXT.lock() {
+                    *slot = Some(gref);
+                }
+            }
         }
-        if let Some(cls) = app_class(env, activity, "ai/quickstt/app/Overlay") {
-            let methods = [jni::NativeMethod {
-                name: "nativeActivityResumed".into(),
-                sig: "()V".into(),
-                fn_ptr: crate::Java_ai_quickstt_app_Overlay_nativeActivityResumed as *mut std::ffi::c_void,
-            }];
-            let _ = env.register_native_methods(cls, &methods);
-        }
-        if let Some(cls) = app_class(env, activity, "ai/quickstt/app/ModelDownloader") {
-            let methods = [jni::NativeMethod {
-                name: "nativeProgress".into(),
-                sig: "(JJ)V".into(),
-                fn_ptr: Java_ai_quickstt_app_ModelDownloader_nativeProgress as *mut std::ffi::c_void,
-            }];
-            let _ = env.register_native_methods(cls, &methods);
-        }
+        // Lock the Activity to upright portrait mode (SCREEN_ORIENTATION_PORTRAIT = 1)
+        // so there is never a horizontal view.
+        let _ = env.call_method(activity, "setRequestedOrientation", "(I)V", &[JValue::from(1i32)]);
+        register_all_natives(env, activity);
         Some(())
     });
 }
@@ -350,29 +420,43 @@ where
 {
     match app() {
         Some(app) => app.run_on_java_main_thread(Box::new(f)),
-        None => eprintln!("QuickSTT: no Android app handle — call platform::init() first"),
+        None => {
+            f();
+        }
     }
 }
 
-/// Attach the current thread to the JVM and run `f` with the Activity
-/// context. Returns None when anything is unavailable (desktop build, or a
-/// JNI error).
+/// Attach the current thread to the JVM and run `f` with the Activity (or
+/// fallback Service/Application) context.
 #[cfg(target_os = "android")]
 fn with_activity<T, F>(f: F) -> Option<T>
 where
     F: FnOnce(&mut jni::JNIEnv, &JObject) -> Option<T>,
 {
-    let app = app()?;
-    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
+    if let Some(app) = app() {
+        let raw_act = app.activity_as_ptr();
+        if !raw_act.is_null() {
+            let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
+            let mut env = vm.attach_current_thread().ok()?;
+            let activity = unsafe { JObject::from_raw(raw_act as jobject) };
+            let out = f(&mut env, &activity);
+            clear_and_log_exception(&mut env);
+            std::mem::forget(activity);
+            return out;
+        }
+    }
+
+    let vm_ptr = SAVED_VM.lock().ok().and_then(|g| *g)?;
+    let ctx_ref = SAVED_CONTEXT.lock().ok().and_then(|g| g.clone())?;
+    let vm = unsafe { JavaVM::from_raw(vm_ptr as *mut _) }.ok()?;
     let mut env = vm.attach_current_thread().ok()?;
-    // The Activity instance (a JNI global reference we do not own).
-    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
-    let out = f(&mut env, &activity);
-    // A failed Java call leaves a pending exception on this thread. Clear it,
-    // otherwise every later JNI call on that thread fails with
-    // "JNI DETECTED ERROR IN APPLICATION: pending exception". The message is
-    // read first and logged: a swallowed `ClassNotFoundException` is exactly
-    // what a button that "does nothing" looks like.
+    let out = f(&mut env, ctx_ref.as_obj());
+    clear_and_log_exception(&mut env);
+    out
+}
+
+#[cfg(target_os = "android")]
+fn clear_and_log_exception(env: &mut jni::JNIEnv) {
     if env.exception_check().unwrap_or(false) {
         let thrown = env.exception_occurred().ok();
         let _ = env.exception_clear();
@@ -388,9 +472,6 @@ where
             .unwrap_or_else(|| "unknown Java exception".to_string());
         log(&format!("a Java call failed: {described}"));
     }
-    // Never delete a reference we do not own.
-    std::mem::forget(activity);
-    out
 }
 
 /// Find one of the app's own Java classes.
@@ -1225,23 +1306,73 @@ pub fn save_onboarding_done() {
     }
 }
 
+/// True when the QuickSTT Voice Auto-Type IME is enabled in system settings.
+pub fn ime_enabled() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "imeEnabled",
+                "(Landroid/content/Context;)Z",
+                &[JValue::from(activity)],
+            )?;
+            value.z().ok()
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    false
+}
+
+/// Ensure the 1px full-height IME watcher window is running when overlay permission is granted.
+pub fn ensure_overlay_watcher() {
+    #[cfg(target_os = "android")]
+    {
+        let _ = with_activity(|env, activity| {
+            call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "ensureWatcher",
+                "(Landroid/content/Context;)V",
+                &[JValue::from(activity)],
+            )?;
+            Some(())
+        });
+    }
+}
+
+/// Focus the in-app transcript box: immediately pops up the floating squircle widget
+/// and opens the soft keyboard so the user can dictate inside QuickSTT as well.
+pub fn focus_in_app_text_box() {
+    #[cfg(target_os = "android")]
+    {
+        let _ = with_activity(|env, activity| {
+            call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "focusInAppTextBox",
+                "(Landroid/content/Context;)V",
+                &[JValue::from(activity)],
+            )?;
+            Some(())
+        });
+    }
+}
+
 /// True when the floating pill may pop up above focused text boxes.
 pub fn pill_on_focus() -> bool {
     #[cfg(target_os = "android")]
     {
         let dir = files_dir().map(|dir| dir.join("quickstt"));
-        let fresh = dir
-            .as_ref()
-            .map(|d| d.join("pillfocus"))
+        dir.as_ref()
+            .map(|d| d.join("pill_on_focus_v2"))
             .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| s.trim() != "0");
-        if let Some(v) = fresh {
-            return v;
-        }
-        // Legacy migration: users who turned the old bubble off keep it off.
-        dir.map(|d| d.join("bubble"))
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| s.trim() == "1")
+            .map(|s| s.trim() != "0")
             .unwrap_or(true)
     }
     #[cfg(not(target_os = "android"))]
@@ -1257,8 +1388,9 @@ pub fn save_pill_on_focus(enabled: bool) {
         if let Some(dir) = files_dir() {
             let dir = dir.join("quickstt");
             let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(dir.join("pillfocus"), if enabled { "1" } else { "0" });
+            let _ = std::fs::write(dir.join("pill_on_focus_v2"), if enabled { "1" } else { "0" });
         }
+        ensure_overlay_watcher();
         if !enabled {
             hide_overlay();
         }
@@ -1386,14 +1518,8 @@ fn remove_overlay_view(env: &mut jni::JNIEnv<'_>, activity: &JObject) {
 
 /// Show (or update) the floating bubble above other apps.
 ///
-/// The bubble is built by the Java helper (`ai.quickstt.app.Bubble`) so it
-/// can have buttons and be dragged around. When the helper is not available
-/// the app falls back to a plain read-out bubble, so the overlay always
-/// works.
-///
-/// The work happens on the Java UI thread (Android requires that for
-/// window-manager calls), so a failure is reported through
-/// `take_overlay_error()` instead of the return value.
+/// `Bubble.show` dispatches onto Android's main UI Looper internally so this works
+/// even when `NativeActivity` is in the background or stopped.
 pub fn show_overlay(state: &str, transcript: &str) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
@@ -1405,11 +1531,9 @@ pub fn show_overlay(state: &str, transcript: &str) -> Result<(), String> {
         }
         let state = state.to_string();
         let transcript = transcript.trim().to_string();
-        on_java_thread(move || {
-            let _ = with_activity(|env, activity| {
-                show_bubble(env, activity, &state, &transcript);
-                Some(())
-            });
+        let _ = with_activity(|env, activity| {
+            show_bubble(env, activity, &state, &transcript);
+            Some(())
         });
         Ok(())
     }
@@ -1424,16 +1548,12 @@ pub fn show_overlay(state: &str, transcript: &str) -> Result<(), String> {
 pub fn hide_overlay() {
     #[cfg(target_os = "android")]
     {
-        on_java_thread(|| {
-            let _ = with_activity(|env, activity| {
-                // The Java helper removes its own bubble.
-                if let Some(Err(message)) = call_bubble_helper(env, activity, "hide", "", "") {
-                    set_overlay_error(&message);
-                }
-                // …and this removes the fallback bubble.
-                remove_overlay_view(env, activity);
-                Some(())
-            });
+        let _ = with_activity(|env, activity| {
+            if let Some(Err(message)) = call_bubble_helper(env, activity, "hide", "", "") {
+                set_overlay_error(&message);
+            }
+            remove_overlay_view(env, activity);
+            Some(())
         });
     }
 }

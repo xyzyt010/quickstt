@@ -261,13 +261,11 @@ jobs:
           nothing leaves the phone.
 
           ### Fixed & improved in this release (Android __VER__)
-          - **Whole app redesigned**: dark grey, near-minimal UI — one blue accent, squircle shapes, one-glance Listen screen (big transcript hero, single big Dictate/Stop action, downloaded-model strip, RAM state at a glance).
-          - **Pill pops up only over focused text boxes**: the floating pill appears while a text box is focused (via QuickSTT Voice Auto-Type) and disappears when you leave it — never at launch, never always-on. One-toggle setting: **Settings → Pill on text fields**.
-          - **✕ closes the pill immediately**: tap ✕ mid-anything (recording, loading, transcribing) — the pill hides, nothing is typed or copied, and the model offloads in the background. ✓ stops and types.
-          - **Loading spinner inside the pill during onload**: round circular spinner while the model loads into RAM; mic-RMS-driven white waveforms otherwise; 30 s idle auto-offload.
-          - **Voice typing, done properly**: partial transcripts stream live via `setComposingText` while you speak and commit on stop; with no text box focused, the transcript is copied once to the clipboard. Enable “QuickSTT Voice Auto-Type” in Settings → Keyboard (or the onboarding) to use it.
-          - **Google Play Protect no longer blocks the install**: `BIND_ACCESSIBILITY_SERVICE` was removed in favour of Android's standard Voice Input Method (`QuickSttInputMethodService`, `BIND_INPUT_METHOD`). No SMS, notification-listener or accessibility permissions are declared.
-          - **5-page interactive onboarding**: dark grey, animated pages for microphone, floating pill, Voice Auto-Type keyboard and the built-in model — all permissions handled there, not inside the app.
+          - **Floating squircle widget pops up reliably on any text field**: combines a 1px full-height transparent `WindowInsets.Type.ime()` watcher (`ImeWatcherView`) with `QuickSttInputMethodService` callbacks and Android 11+ Display-backed `WindowContext` creation so the squircle widget appears whenever you tap any text field outside the app (whether using QuickSTT Voice Auto-Type or Gboard/Samsung Keyboard) or tap the transcript box inside the app.
+          - **Background dictation works even when the app window is in the background**: recording, live partial typing, final text commit, clipboard fallback, and 30 s idle RAM offload now run directly on the native worker thread without waiting for the foreground UI loop.
+          - **Listen page lists only your downloaded library models**: the Listen screen model strip shows only installed/downloaded models from your library; the full downloadable model catalog lives in the Models tab.
+          - **Refined `#121212` dark-grey theme & upright orientation lock**: `#121212` primary background with `#1C1C1C` cards and `#2A2A2A` subtle borders; locked to upright view (`screenOrientation="portrait"`) so the app never rotates into horizontal view.
+          - **✕ closes the pill immediately & ✓ stops and types**: round circular loading spinner during model onload/transcribe, real mic-RMS white waveforms while speaking, and Play Protect-compliant `BIND_INPUT_METHOD` voice auto-typing.
 
           ### Android (arm64-v8a)
           ```bash
