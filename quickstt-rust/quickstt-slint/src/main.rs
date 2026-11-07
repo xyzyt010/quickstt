@@ -2587,6 +2587,13 @@ fn main() -> QuickSttResult<()> {
     let history_selected: Arc<Mutex<std::collections::HashSet<String>>> =
         Arc::new(Mutex::new(std::collections::HashSet::new()));
     let history_selecting: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    // When the last turn finished (drives the mic button's third state:
+    // "dismiss the finished turn" instead of starting a new session).
+    let turn_done_at: Arc<Mutex<Option<std::time::Instant>>> =
+        Arc::new(Mutex::new(None));
+    // TextBoard dismissed by the user (or by a mic tap on a finished turn):
+    // "×" and the mic button both raise this, and a session start clears it.
+    let tb_closed = Arc::new(Mutex::new(false));
     // Row whose copy button is flashing its green ✓ (row index) and when the
     // copy happened; the tick clears it ~1.2s later so the row falls back.
     let history_copied: Arc<Mutex<(i32, std::time::Instant)>> =
@@ -3094,6 +3101,9 @@ fn dock_hop(
         let state = state.clone();
         let mic_live = mic_live.clone();
         let fg_mic_click = last_external_fg.clone();
+        let cleanup_busy_mic = cleanup_busy.clone();
+        let turn_done_at_mic = turn_done_at.clone();
+        let tb_closed_mic = tb_closed.clone();
         move || {
             capture_current_fg_window(&fg_mic_click);
             log_line("ui: mic clicked");
@@ -3109,25 +3119,52 @@ fn dock_hop(
             }
             // Live if the mic is already ON locally, PTT is held, or the core
             // is mid-turn — otherwise a second tap while arming would restart
-            // instead of stopping.
-            let live = *mlock(&mic_live)
-                || state
-                    .lock()
-                    .map(|s| {
-                        s.mode == AppMode::Recording
-                            || s.mode == AppMode::Transcribing
-                            || s.mode == AppMode::WakewordListening
-                    })
-                    .unwrap_or(false);
-            let cmd = if live {
+            // instead of stopping. `pending_transcribes` and the cleanup worker
+            // count too: queued audio (or a cleaner still running) is a live
+            // turn, so the tap must finish it rather than open a new one.
+            let mode_live = state
+                .lock()
+                .map(|s| {
+                    s.mode == AppMode::Recording
+                        || s.mode == AppMode::Transcribing
+                        || s.mode == AppMode::WakewordListening
+                        || s.pending_transcribes > 0
+                })
+                .unwrap_or(false);
+            let cleanup_running = cleanup_busy_mic.load(Ordering::Relaxed);
+            let live = *mlock(&mic_live) || mode_live || cleanup_running;
+            if live {
                 *mlock(&mic_live) = false;
-                OrchestratorCommand::StopListening
-            } else {
-                *mlock(&mic_live) = true;
-                log_line("ui: mic ON (capture opening, bars up)");
-                OrchestratorCommand::StartListening
-            };
-            if tx_cmd.try_send(cmd).is_err() {
+                *mlock(&turn_done_at_mic) = None;
+                if tx_cmd.try_send(OrchestratorCommand::StopListening).is_err() {
+                    log_line("mic send FAILED (command loop dead?)");
+                }
+                return;
+            }
+            // Not live. A turn just finished and its transcript is still on
+            // screen (TextBoard alive for ~8s): the user is pressing the mic
+            // to DISMISS that, not to start dictating again. Starting a new
+            // session here is what made "turn it off" feel like it needed two
+            // presses — the first press reopened the mic.
+            let recent_turn = mlock(&turn_done_at_mic)
+                .map(|t| std::time::Instant::now().duration_since(t)
+                    < std::time::Duration::from_secs(8))
+                .unwrap_or(false);
+            if recent_turn {
+                *mlock(&turn_done_at_mic) = None;
+                *mlock(&mic_live) = false;
+                *mlock(&tb_closed_mic) = true;
+                log_line("ui: mic tap dismissed the finished turn (board closed)");
+                return;
+            }
+            *mlock(&mic_live) = true;
+            // A dismissed board must come back for the next session.
+            *mlock(&tb_closed_mic) = false;
+            log_line("ui: mic ON (capture opening, bars up)");
+            if tx_cmd
+                .try_send(OrchestratorCommand::StartListening)
+                .is_err()
+            {
                 log_line("mic send FAILED (command loop dead?)");
                 *mlock(&mic_live) = false;
             }
@@ -3486,7 +3523,6 @@ fn dock_hop(
     widget_platform::force_layered(textboard.window());
     textboard.set_title_text("QuickSTT TextBoard".into());
     textboard.set_body_text("Transcript will appear here...".into());
-    let tb_closed = Arc::new(Mutex::new(false));
     // Auto-follow: the visible board tracks the pill (hover-expand, dock
     // hops). A user drag of the board disables follow until it re-shows.
     let tb_follow = Arc::new(Mutex::new(true));
@@ -4211,6 +4247,8 @@ fn dock_hop(
     let pillmenu_w = pillmenu.as_weak();
     let flyout_w = flyout.as_weak();
     let tb_closed_timer = tb_closed.clone();
+    // Mirrors the finished-turn moment for the mic button's dismiss state.
+    let turn_done_at_timer = turn_done_at.clone();
     let tb_follow_timer = tb_follow.clone();
     let tb_full_timer = tb_full.clone();
     let last_turn_timer = last_turn.clone();
@@ -5603,6 +5641,10 @@ fn dock_hop(
                     turn_just_done = true;
                     done_until = now + std::time::Duration::from_millis(600);
                     tb_until = now + std::time::Duration::from_secs(8);
+                    // Stamp: for the next ~8s a mic tap DISMISSES this turn
+                    // instead of starting a new session (the "have to press
+                    // twice to turn it off" report).
+                    *mlock(&turn_done_at_timer) = Some(now);
                     // Mic capsule auto-clears at turn end so a tap-ON never
                     // wedges the pill expanded when the turn completes.
                     *mlock(&mic_live_timer) = false;
@@ -6159,11 +6201,19 @@ fn dock_hop(
                         }
                     }
                     let installed = s.model_entries.iter().filter(|e| e.installed).count();
-                    let info = format!(
+                    let mut info = format!(
                         "{} widget models, {} installed — transcription language follows the selected model.",
                         s.model_entries.len(),
                         installed
                     );
+                    // Platform gaps are stated, not silently dropped: the list
+                    // is short by design on Linux (no sherpa-onnx runtime).
+                    if !s.platform_hidden_models.is_empty() {
+                        info.push_str(&format!(
+                            " Hidden on this OS: {}.",
+                            s.platform_hidden_models.join(", ")
+                        ));
+                    }
                     if d.get_models_info().as_str() != info {
                         d.set_models_info(info.into());
                     }
@@ -6992,9 +7042,10 @@ fn dock_hop(
             let finish = finish_onboarding.clone();
             ob.on_next(move || {
                 let step = ob_weak.upgrade().map(|w| w.get_step()).unwrap_or(0);
-                if step == 2 {
-                    // Language slide → apply through the normal command so the
-                    // validation + persistence live in one place.
+                // Leaving the language slide (step 3) applies the pick through
+                // the normal command, so validation + persistence live in one
+                // place. The same happens when leaving the model slide.
+                if step == 3 || step == 4 {
                     let idx = ob_weak
                         .upgrade()
                         .map(|w| w.get_selected_language())
@@ -7009,7 +7060,8 @@ fn dock_hop(
                         }
                     }
                 }
-                if step >= 4 {
+                // Last step: "Start dictating" completes the tour.
+                if step >= 5 {
                     (finish)();
                     return;
                 }

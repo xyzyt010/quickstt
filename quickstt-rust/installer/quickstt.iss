@@ -4,7 +4,7 @@
 ;  Build it with the sibling Build-Installer.ps1 (it reads the version from
 ;  Cargo.toml and passes it in), or directly:
 ;
-;      ISCC.exe /DMyAppVersion=2.0.0-alpha.18 quickstt.iss
+;      ISCC.exe /DMyAppVersion=2.0.0-alpha.19 quickstt.iss
 ;
 ;  Layout mirrors what the app expects NEXT TO THE EXE at runtime:
 ;      <install>\quickstt-slint.exe
@@ -17,19 +17,18 @@
 
 #define MyAppName "QuickSTT"
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.0-alpha.18"
+  #define MyAppVersion "2.0.0-alpha.19"
 #endif
 ; The Windows file-version resource needs four numeric fields; the app's own
-; version carries a pre-release label ("2.0.0-alpha.18"). Build-Installer.ps1
-; derives the numeric form and passes it in (/DMyAppVersionNumeric=2.0.0.18).
+; version carries a pre-release label ("2.0.0-alpha.19"). Build-Installer.ps1
+; derives the numeric form and passes it in (/DMyAppVersionNumeric=2.0.0.19).
 #ifndef MyAppVersionNumeric
-  #define MyAppVersionNumeric "2.0.0.18"
+  #define MyAppVersionNumeric "2.0.0.19"
 #endif
 #define MyAppNameVersion MyAppName + " " + MyAppVersion
 #define MyAppPublisher "QuickSTT"
-#define MyAppURL "https://github.com/quickstt/quickstt"
+#define MyAppURL "https://github.com/xyzyt010/quickstt"
 #define MyAppExeName "quickstt-slint.exe"
-
 ; Runtime data the app creates in the user profile (models, history, logs).
 ; The uninstaller offers to take these with it.
 #define UserDataDir "QuickSTT"
@@ -41,6 +40,7 @@ AppId={{8A1F0C4E-2B7D-4E3A-9F61-5C7D2E8B4A10}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 VersionInfoVersion={#MyAppVersionNumeric}
+VersionInfoProductVersion={#MyAppVersionNumeric}
 AppVerName={#MyAppNameVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
@@ -70,30 +70,62 @@ ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
 AppMutex=QuickSTT_SingleInstance_Mutex
 RestartApplications=no
+; Real wizard pages (Inno's `modern` style hides some by default).
+DisableWelcomePage=no
+DisableDirPage=no
 DisableProgramGroupPage=yes
+DisableReadyPage=no
+DisableFinishedPage=no
+LicenseFile=..\..\LICENSE
+InfoBeforeFile=preinstall.txt
+; What this release actually is, on the welcome page.
+InfoAfterFile=readme.txt
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Types]
+Name: "full"; Description: "Full installation"
+Name: "compact"; Description: "Compact installation (CPU engines only)"
+Name: "custom"; Description: "Custom installation"; Flags: iscustom
+
+[Components]
+Name: "core"; Description: "QuickSTT (required)"; Types: full compact custom; Flags: fixed
+Name: "engines"; Description: "Speech engine runtimes (Parakeet, Nemotron, whisper, Cactus)"; Types: full compact custom
+Name: "gpuacc"; Description: "GPU acceleration libraries (adds ~90 MB; CPU-only works without them)"; Types: full; Flags: dontinheritcheck
+Name: "wakeword"; Description: "Wake-word heads (hey jarvis, alexa)"; Types: full custom
+
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "autostart"; Description: "Start QuickSTT automatically when I sign in"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Files]
-; The app itself (release, stripped, LTO'd).
-Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-; Bundled wake-word heads: the background listener loads these from beside the
-; exe. NOTE: `discover_oww_heads` looks for the FLAT `<phrase>_v0.1.onnx`
-; files, so the REPO ROOT copy is the one that ships (the quickstt-rust copy
-; only has per-phrase subfolders, which the loader never reads). Without them
-; wake words silently stay off.
-Source: "..\..\wakeword_models\*"; DestDir: "{app}\wakeword_models"; Flags: ignoreversion recursesubdirs createallsubdirs
-; Engine helper binaries the app resolves from <exe>\tools at runtime
-; (Nemotron/Parakeet/photon/canary workers).
-Source: "..\..\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+; ── core: the app itself (release, stripped, LTO'd) ──
+Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 ; The blue mic icon, also used for every shortcut the installer creates.
-Source: "..\..\icon_app.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\..\icon_app.ico"; DestDir: "{app}"; Flags: ignoreversion; Components: core
+Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion skipifsourcedoesntexist; Components: core
+
+; ── engine runtimes the app resolves from <exe>\tools at runtime ──
+Source: "..\..\tools\photon\*"; DestDir: "{app}\tools\photon"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: engines
+Source: "..\..\tools\nemotron\*"; Excludes: "ggml-vulkan.dll,*.a,*.bak,*.def,*.py"; DestDir: "{app}\tools\nemotron"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: engines
+Source: "..\..\tools\parakeet\*"; Excludes: "DirectML.dll"; DestDir: "{app}\tools\parakeet"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: engines
+Source: "..\..\tools\whistle\*"; DestDir: "{app}\tools\whistle"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: engines
+Source: "..\..\tools\canary\*"; DestDir: "{app}\tools\canary"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: engines
+
+; ── GPU backends (optional): Vulkan (llama.cpp) + DirectML (ONNX Runtime) ──
+; Same destination paths as the core tools, so selecting the component puts
+; them back exactly where the engine probes for them. Skipping it leaves a
+; fully working CPU-only install that is ~10 MB smaller.
+Source: "..\..\tools\nemotron\ggml-vulkan.dll"; DestDir: "{app}\tools\nemotron"; Flags: ignoreversion skipifsourcedoesntexist; Components: gpuacc
+Source: "..\..\tools\parakeet\DirectML.dll"; DestDir: "{app}\tools\parakeet"; Flags: ignoreversion skipifsourcedoesntexist; Components: gpuacc
+
+; ── wake-word heads: the listener loads these from beside the exe ──
+; NOTE: `discover_oww_heads` looks for the FLAT `<phrase>_v0.1.onnx` files,
+; so the REPO ROOT copy is the one that ships (the quickstt-rust copy only has
+; per-phrase subfolders, which the loader never reads). Without them wake
+; words silently stay off.
+Source: "..\..\wakeword_models\*"; DestDir: "{app}\wakeword_models"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: wakeword
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon_app.ico"

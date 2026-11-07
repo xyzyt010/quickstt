@@ -42,6 +42,10 @@ pub struct AppState {
     pub status_message: String,
     pub audio_level: u8,
     pub model_entries: Vec<ModelEntry>,
+    /// Models hidden because their engine has no runtime on this OS
+    /// (e.g. sherpa-onnx / Moonshine on Linux), with the reason — the
+    /// dashboard shows this so the list never looks broken.
+    pub platform_hidden_models: Vec<String>,
     pub selected_model: usize,
     pub selected_language: String,
     pub model_offloaded: bool,
@@ -123,6 +127,7 @@ impl AppState {
             recommended_model: None,
             recommend_reason: String::new(),
             hardware_summary: String::new(),
+            platform_hidden_models: Vec::new(),
             catalog_search: String::new(),
             catalog_lang_filter: "All Languages".to_string(),
             session_saw_speech: false,
@@ -1017,6 +1022,35 @@ impl AppOrchestrator {
         if selected_descriptors.is_empty() {
             selected_descriptors = hw_models.iter().filter(|m| m.widget_selectable).collect();
         }
+
+        // ── Platform filter ──
+        // Models whose engine has no runtime on THIS OS never make the list.
+        // Windows ships every engine binary; Linux builds parakeet / whisper /
+        // transcribe.cpp and fetches libvosk + the Cactus needle CLI on demand,
+        // but sherpa-onnx (Moonshine) has no Linux runtime at all — offering it
+        // would install and then silently never transcribe.
+        let platform_hidden: Vec<String> = selected_descriptors
+            .iter()
+            .filter(|m| !catalog::supported_on_this_os(m))
+            .map(|m| {
+                format!(
+                    "{} ({})",
+                    m.name,
+                    catalog::platform_block_reason(m).unwrap_or("unsupported on this OS")
+                )
+            })
+            .collect();
+        let before_platform = selected_descriptors.len();
+        selected_descriptors.retain(|m| catalog::supported_on_this_os(m));
+        if !platform_hidden.is_empty() {
+            info!(
+                "Platform filter: hid {} of {} models — {}",
+                platform_hidden.len(),
+                before_platform,
+                platform_hidden.join("; ")
+            );
+        }
+        app_state.platform_hidden_models = platform_hidden;
 
         app_state.model_entries = selected_descriptors
             .iter()

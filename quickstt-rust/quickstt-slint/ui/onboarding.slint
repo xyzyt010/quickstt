@@ -98,15 +98,17 @@ export component OnboardingWidget inherits Window {
     callback set-history(bool);
 
     // ── internal ──
-    property <int> steps: 5;
+    property <int> steps: 6;
     // "Clip" transport: the demo scene runs its own loop so the slide reads as
     // a short recording of the app in use (pill → waveform → typed text).
     property <int> demo_tick: 0;
     property <bool> demo_playing: true;
+    // Teaching-scene phase (0..89): cursor click, Ctrl+Space, then pill hover.
+    property <int> demo_phase: mod(root.demo_tick, 90);
 
     Timer {
         interval: 90ms;
-        running: root.step == 1 && root.demo_playing;
+        running: (root.step == 1 || root.step == 2) && root.demo_playing;
         triggered => { root.demo_tick = root.demo_tick + 1; }
     }
 
@@ -151,8 +153,9 @@ export component OnboardingWidget inherits Window {
             Text {
                 text: root.step == 0 ? "Dictate anywhere, offline." :
                       root.step == 1 ? "How a turn works" :
-                      root.step == 2 ? "Choose your language" :
-                      root.step == 3 ? "Pick a speech model" :
+                      root.step == 2 ? "How to start a turn" :
+                      root.step == 3 ? "Choose your language" :
+                      root.step == 4 ? "Pick a speech model" :
                       "Set your preferences";
                 font-size: 26px;
                 font-weight: 700;
@@ -161,8 +164,9 @@ export component OnboardingWidget inherits Window {
             Text {
                 text: root.step == 0 ? "Hold Ctrl+Space, speak, and your words appear where you were typing. Everything runs on this PC — nothing is uploaded." :
                       root.step == 1 ? "Here is a real turn, start to finish. The pill wakes, listens, and types the finished text into the app you were using." :
-                      root.step == 2 ? "Auto detects the spoken language when the model supports it. Models with a single language hide this choice entirely — and every model remembers its own setting." :
-                      root.step == 3 ? "A model that fits your machine and your language is pre-selected below. You can change it any time from Settings → Speech Models." :
+                      root.step == 2 ? "Three ways to start, shown below: click into any text box and hold Ctrl+Space, click the pill's mic, or say a wake word. Every turn is saved to History with its audio." :
+                      root.step == 3 ? "Auto detects the spoken language when the model supports it. Models with a single language hide this choice entirely — and every model remembers its own setting." :
+                      root.step == 4 ? "A model that fits your machine and your language is pre-selected below. You can change it any time from Settings → Speech Models." :
                       "Three choices, all changeable later. Defaults are shown; you are never locked in.";
                 font-size: 13px;
                 color: #9A9A9A;
@@ -339,8 +343,191 @@ export component OnboardingWidget inherits Window {
                     }
                 }
 
-                // ══ Step 2: language ══
+                // ══ Step 2: "try it" — the interactive teaching scene ══
+                // Everything is drawn and animated on the demo clock: a cursor
+                // clicking into a text box, the Ctrl and Space keys lighting up
+                // in order, and the mini pill growing on hover so the three ways
+                // to start dictation are SHOWN, not just described.
                 if root.step == 2 : VerticalLayout {
+                    spacing: 12px;
+
+                    Text {
+                        text: root.demo_phase < 20
+                            ? "1 ·  Click into any text box — anywhere you can type."
+                            : (root.demo_phase < 45
+                                ? "2 ·  Hold Ctrl, tap Space, then speak."
+                                : "3 ·  Or hover the pill and click the mic.");
+                        font-size: 13.5px;
+                        font-weight: 600;
+                        color: #FFFFFF;
+                        horizontal-alignment: center;
+                    }
+
+                    // The scene: a mock text field on the left, the mini pill
+                    // bottom-right, and a keyboard strip along the bottom.
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 210px;
+                        border-radius: 10px;
+                        background: #101010;
+                        border-width: 1px;
+                        border-color: #242424;
+
+                        // ── mock text box (the dictation target) ──
+                        Rectangle {
+                            x: 16px;
+                            y: 16px;
+                            width: parent.width - 32px;
+                            height: 74px;
+                            border-radius: 8px;
+                            background: #0A0A0A;
+                            border-width: 1px;
+                            border-color: root.demo_phase < 20 ? #FFFFFF : #262626;
+                            animate border-color { duration: 200ms; }
+                            HorizontalLayout {
+                                padding: 10px;
+                                spacing: 3px;
+                                Text {
+                                    text: "The quick brown fox";
+                                    font-size: 13px;
+                                    color: #EDEDED;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle {
+                                    width: 2px;
+                                    height: 16px;
+                                    background: #FFFFFF;
+                                    opacity: mod(root.demo_tick, 2) == 0 ? 1.0 : 0.2;
+                                }
+                            }
+                            // Click ripple: expands + fades while phase 1 runs.
+                            Rectangle {
+                                x: 26px;
+                                y: 30px;
+                                width: 14px;
+                                height: 14px;
+                                border-radius: 7px;
+                                border-width: 2px;
+                                border-color: #FFFFFF;
+                                opacity: root.demo_phase < 20 ? (1.0 - root.demo_phase / 20) : 0.0;
+                                animate opacity { duration: 120ms; }
+                            }
+                        }
+
+                        // ── cursor arrow flying into the text box ──
+                        Rectangle {
+                            x: root.demo_phase < 20 ? (16px + (14px * root.demo_phase)) : 26px;
+                            y: root.demo_phase < 20 ? (190px - (20px * root.demo_phase)) : 30px;
+                            width: 14px;
+                            height: 20px;
+                            animate x { duration: 90ms; }
+                            animate y { duration: 90ms; }
+                            Path {
+                                commands: "M 0 0 L 0 14 L 4 10 L 6 14 L 9 13 L 7 9 L 11 9 Z";
+                                fill: #FFFFFF;
+                                viewbox-width: 12;
+                                viewbox-height: 16;
+                            }
+                        }
+
+                        // ── the mini pill (hover → grow → click the mic) ──
+                        Rectangle {
+                            x: parent.width - 150px;
+                            y: parent.height - 52px;
+                            width: root.demo_phase < 45 ? 118px : 96px;
+                            height: 34px;
+                            border-radius: root.demo_phase < 45 ? 17px : 17px;
+                            background: #000000;
+                            border-width: root.demo_phase >= 45 ? 1px : 0px;
+                            border-color: #FFFFFF55;
+                            animate width { duration: 200ms; easing: ease-out; }
+                            // Hover wake-up: a soft ring fades in.
+                            Rectangle {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                width: 52px;
+                                height: 52px;
+                                border-radius: 26px;
+                                border-width: 1px;
+                                border-color: #FFFFFF33;
+                                opacity: root.demo_phase >= 45 ? 1.0 : 0.0;
+                                animate opacity { duration: 220ms; }
+                            }
+                            // The mic icon inside the capsule, lit while active.
+                            Image {
+                                width: 16px;
+                                height: 20px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                source: @image-url("../../assets/mic_active.svg");
+                                opacity: root.demo_phase >= 45 ? 1.0 : 0.55;
+                                animate opacity { duration: 200ms; }
+                            }
+                        }
+
+                        // ── keyboard: big Ctrl + Space keys, pressed in order ──
+                        HorizontalLayout {
+                            x: 16px;
+                            y: parent.height - 46px;
+                            spacing: 8px;
+                            // Ctrl
+                            Rectangle {
+                                width: 92px;
+                                height: 30px;
+                                border-radius: 6px;
+                                background: (root.demo_phase >= 20 && root.demo_phase < 45) ? #FFFFFF : #1E1E1E;
+                                border-width: 1px;
+                                border-color: (root.demo_phase >= 20 && root.demo_phase < 45) ? #FFFFFF : #2E2E2E;
+                                animate background { duration: 120ms; }
+                                Text {
+                                    text: "Ctrl";
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: (root.demo_phase >= 20 && root.demo_phase < 45) ? #000000 : #B9B9B9;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            // Space
+                            Rectangle {
+                                width: 150px;
+                                height: 30px;
+                                border-radius: 6px;
+                                background: (root.demo_phase >= 28 && root.demo_phase < 45) ? #FFFFFF : #1E1E1E;
+                                border-width: 1px;
+                                border-color: (root.demo_phase >= 28 && root.demo_phase < 45) ? #FFFFFF : #2E2E2E;
+                                animate background { duration: 120ms; }
+                                Text {
+                                    text: "Space";
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: (root.demo_phase >= 28 && root.demo_phase < 45) ? #000000 : #B9B9B9;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            Text {
+                                text: "hold both";
+                                font-size: 10.5px;
+                                color: #6A6A6A;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "Every finished turn also lands in Settings → History with its audio, so you can play it back, copy it, export the audio, or delete everything.";
+                        font-size: 11.5px;
+                        color: #8E8E8E;
+                        wrap: word-wrap;
+                        horizontal-alignment: center;
+                    }
+                }
+
+
+                // ══ Step 3: language ══
+                if root.step == 3 : VerticalLayout {
                     spacing: 12px;
                     Text { text: "Transcription language:"; font-size: 13px; color: #E6E6E6; }
                     ComboBox {
@@ -366,8 +553,8 @@ export component OnboardingWidget inherits Window {
                     }
                 }
 
-                // ══ Step 3: model ══
-                if root.step == 3 : VerticalLayout {
+                // ══ Step 4: model ══
+                if root.step == 4 : VerticalLayout {
                     spacing: 12px;
                     Rectangle {
                         background: #121212;
@@ -405,8 +592,8 @@ export component OnboardingWidget inherits Window {
                     }
                 }
 
-                // ══ Step 4: preferences ══
-                if root.step == 4 : VerticalLayout {
+                // ══ Step 5: preferences ══
+                if root.step == 5 : VerticalLayout {
                     spacing: 10px;
                     Text { text: "Where finished text goes:"; font-size: 13px; color: #E6E6E6; }
                     HorizontalLayout {

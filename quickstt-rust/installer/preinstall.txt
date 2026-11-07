@@ -1,0 +1,22 @@
+QuickSTT — offline voice typing for Windows
+
+Hold Ctrl+Space, speak, and your words appear where you were typing.
+Runs entirely on this PC: no cloud, no account, nothing uploaded.
+
+This installer will place QuickSTT in the folder below. Everything it
+needs at runtime (speech engines and wake-word heads) is installed beside
+the app.
+
+Choose the installation type on the next page:
+  • Full — app + all engine runtimes + wake-word heads + GPU library
+    support (fastest when a GPU is present).
+  • Compact — app + the CPU engine runtimes. Smaller download; a GPU only
+    helps a few models, and everything still works.
+  • Custom — pick exactly what you want.
+
+Speech MODELS are not bundled: the app downloads them from Settings ->
+Speech Models the first time you pick one, so you never pull gigabytes you
+will not use.
+
+The first launch opens a short onboarding tour (language, model, and how a
+turn works). You can skip it at any time.

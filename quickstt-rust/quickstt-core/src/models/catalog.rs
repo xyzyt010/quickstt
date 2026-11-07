@@ -972,6 +972,36 @@ pub fn recommend_model(
 }
 
 
+/// Engines whose runtime does not exist on Linux.
+///
+/// Windows ships every engine binary. On Linux the release pipeline builds
+/// parakeet_engine, whisper-cli and transcribe.cpp (Nemotron/Canary/Qwen3),
+/// libvosk.so is fetched on demand, and the Cactus `needle` CLI has per-OS
+/// releases — but **sherpa-onnx has no Linux runtime at all** (nothing builds
+/// or downloads `sherpa-onnx-offline` for Linux), so Moonshine cannot run
+/// there. Offering it would be a guaranteed "installs, then never transcribes".
+pub fn unsupported_on_linux(desc: &ModelDescriptor) -> bool {
+    matches!(desc.engine_family, EngineFamily::SherpaOnnx)
+}
+
+/// Why the model is unavailable on Linux (dashboard / reason text).
+pub fn platform_block_reason(desc: &ModelDescriptor) -> Option<&'static str> {
+    if unsupported_on_linux(desc) {
+        Some("the sherpa-onnx runtime has no Linux build — Windows only")
+    } else {
+        None
+    }
+}
+
+/// True when this model's engine exists for the OS we are running on.
+pub fn supported_on_this_os(desc: &ModelDescriptor) -> bool {
+    if cfg!(target_os = "windows") {
+        true
+    } else {
+        !unsupported_on_linux(desc)
+    }
+}
+
 /// Map a UI language name to a whisper.cpp `-l` code. "Auto" and unknown
 /// names return None (caller omits `-l` for auto-detect).
 pub fn whisper_code(display: &str) -> Option<&'static str> {
