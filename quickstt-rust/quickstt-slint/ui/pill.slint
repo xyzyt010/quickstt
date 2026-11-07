@@ -180,6 +180,9 @@ component UpperPill inherits Rectangle {
 
 export component PillWidget inherits Window {
     title: "";
+    // The pill itself is frameless, but Windows still shows this icon in the
+    // taskbar thumbnail / hover preview and in Alt+Tab for the app window.
+    icon: @image-url("../../assets/app_icon.svg");
     in-out property <length> win_w: 47px;
     in-out property <length> win_h: 8px;
     width: win_w;

@@ -161,6 +161,9 @@ pub enum OrchestratorCommand {
     TransientStart(String),
     SelectModel(usize),
     SelectLanguage(String),
+    /// Re-run the hardware-aware recommendation (the priority pick, a
+    /// language change, or an install changed the inputs).
+    RefreshRecommendation,
     /// Select the capture microphone by OS device name ("" = system default).
     /// Applies on next mic open; restarts the live stream when capturing.
     SelectMicrophone(String),
@@ -191,33 +194,21 @@ pub struct AppOrchestrator {
     audio_tx: mpsc::Sender<Vec<i16>>,
 }
 
-/// Release every persistent STT worker EXCEPT `active_family` (catalog
-/// runtime string: "photon" | "parakeet-rust" | "nemotron" | "canary" | …).
-/// Empty string releases all (model switch: nothing is active yet). Each
-/// unload is a fast JSON round-trip that no-ops when its worker was never
-/// started, so calling all four unconditionally is cheap and cannot strand
-/// a worker after a family change.
-fn unload_all_workers_except(active_family: &str) {
-    // Phonon-2 shares the parakeet_engine worker. Previously we kept that
-    // worker loaded whenever parakeet/phonon was the active family so the next
-    // turn wouldn't pay a reload — but that left ~700 MB resident even after
-    // auto-offload, which is exactly the "doesn't turn off after use" the
-    // user reports. Unload it unconditionally so idle offload actually frees
-    // the RAM (the next turn reloads on demand via loaded_model_dir).
-    let _ = active_family;
+/// Release every persistent STT worker's model.
+/// if it frees the model you were just using (the Nemotron report: the
+/// selected engine's worker was deliberately kept resident, so the setting
+/// appeared to do nothing at all). Each unload is a fast JSON round-trip that
+/// no-ops when its worker was never started or is already unloaded, and every
+/// engine re-arms itself on the next turn through its `loaded_model_dir` /
+/// `loaded_repo` guard, so the reload cost is paid lazily instead of leaking
+/// RAM forever. The worker PROCESSES survive (only their models are dropped),
+/// which keeps the next turn's load fast — no respawn penalty.
+fn unload_all_workers() {
     crate::models::engine::parakeet_unload();
-    if active_family != "nemotron" {
-        crate::models::engine::nemotron_unload();
-    }
-    if active_family != "canary" {
-        crate::models::engine::canary_unload();
-    }
-    if active_family != "canary-qwen" {
-        crate::models::engine::canary_qwen_unload();
-    }
-    if active_family != "photon" {
-        crate::models::engine::photon_unload();
-    }
+    crate::models::engine::nemotron_unload();
+    crate::models::engine::canary_unload();
+    crate::models::engine::canary_qwen_unload();
+    crate::models::engine::photon_unload();
 }
 
 fn model_name_matches(configured: &str, catalog_name: &str) -> bool {    let configured = configured.trim();
@@ -272,7 +263,7 @@ fn refresh_recommendation(s: &mut AppState) {
             catalog::all_descriptors().into_iter().find(|d| d.name == e.name)
         })
         .collect();
-    let (rec_name, reason) = catalog::recommend_model(
+    let rec = catalog::recommend_model(
         &descs,
         hw.has_discrete_gpu,
         &hw.vendor,
@@ -280,10 +271,18 @@ fn refresh_recommendation(s: &mut AppState) {
         hw.vram_mb,
         hw.system_ram_gb,
         &s.selected_language,
+        catalog::RecommendPriority::from_u32(s.settings.model_priority),
     );
     s.hardware_summary = hw.summary();
-    s.recommend_reason = reason;
-    s.recommended_model = rec_name
+    // The runner-up is folded into the banner text, so the dashboard can show a
+    // real alternative without another property.
+    s.recommend_reason = if rec.alt_reason.is_empty() {
+        rec.reason
+    } else {
+        format!("{} Also consider: {}", rec.reason, rec.alt_reason)
+    };
+    s.recommended_model = rec
+        .name
         .and_then(|n| s.model_entries.iter().position(|e| e.name == n));
 }
 
@@ -1061,10 +1060,17 @@ impl AppOrchestrator {
                 app_state.selected_model = idx;
             }
         }
-        // Restore the saved language when the current model supports it,
-        // otherwise fall back to that model's default (first entry).
+        // Restore the saved language for THIS model when the model supports it
+        // (per-model memory first, then the global default), otherwise fall
+        // back to that model's default (first entry). Auto is the default for
+        // every engine unless the user picked a language explicitly.
         {
-            let saved = app_state.settings.selected_language.trim().to_string();
+            let active = app_state.model_entries[app_state.selected_model].name.clone();
+            let saved = app_state
+                .settings
+                .language_for_model(&active)
+                .trim()
+                .to_string();
             let langs = app_state.model_entries[app_state.selected_model]
                 .languages
                 .clone();
@@ -1083,7 +1089,7 @@ impl AppOrchestrator {
                     catalog::all_descriptors().into_iter().find(|d| d.name == e.name)
                 })
                 .collect();
-            let (rec_name, reason) = catalog::recommend_model(
+            let rec = catalog::recommend_model(
                 &descs,
                 hw.has_discrete_gpu,
                 &hw.vendor,
@@ -1091,12 +1097,17 @@ impl AppOrchestrator {
                 hw.vram_mb,
                 hw.system_ram_gb,
                 &app_state.selected_language,
+                catalog::RecommendPriority::from_u32(app_state.settings.model_priority),
             );
             app_state.hardware_summary = hw.summary();
-            app_state.recommend_reason = reason;
-            app_state.recommended_model = rec_name.and_then(|n| {
-                app_state.model_entries.iter().position(|e| e.name == n)
-            });
+            app_state.recommend_reason = if rec.alt_reason.is_empty() {
+                rec.reason
+            } else {
+                format!("{} Also consider: {}", rec.reason, rec.alt_reason)
+            };
+            app_state.recommended_model = rec
+                .name
+                .and_then(|n| app_state.model_entries.iter().position(|e| e.name == n));
             if let Some(idx) = app_state.recommended_model {
                 info!(
                     "Recommended model: {} ({})",
@@ -1358,15 +1369,24 @@ impl AppOrchestrator {
                     if idx < s.model_entries.len() {
                         s.selected_model = idx;
                         let name = s.model_entries[idx].name.clone();
-                        // Resync language: keep it only if the new model
-                        // supports it, else fall back to its default.
+                        // Language: this model's own saved choice if the user
+                        // ever made one, else the global default — but only if
+                        // the model actually supports it (an English-only
+                        // checkpoint ignores "German"), else its first entry.
                         let langs = s.model_entries[idx].languages.clone();
-                        if !langs.iter().any(|l| l == &s.selected_language) {
-                            s.selected_language =
-                                langs.into_iter().next().unwrap_or_else(|| "Auto".to_string());
-                        }
+                        let wanted = s.settings.language_for_model(&name);
+                        let resolved = if langs.iter().any(|l| l == &wanted) {
+                            wanted
+                        } else {
+                            langs.into_iter().next().unwrap_or_else(|| "Auto".to_string())
+                        };
+                        s.selected_language = resolved;
+                        // Remember the resolved choice FOR THIS MODEL (the
+                        // same Settings value the save path persists).
+                        let resolved_now = s.selected_language.clone();
+                        s.settings.set_language_for_model(&name, &resolved_now);
                         s.settings.selected_model = name.clone();
-                        s.settings.selected_language = s.selected_language.clone();
+                        s.settings.selected_language = resolved_now;
                         if let Err(e) = s.settings.save_all() {
                             warn!("Failed to persist model selection: {}", e);
                         }
@@ -1382,7 +1402,7 @@ impl AppOrchestrator {
                         std::thread::Builder::new()
                             .name("stt-model-switch-offload".to_string())
                             .spawn(|| {
-                                unload_all_workers_except("");
+                                unload_all_workers();
                                 crate::models::engine::compact_working_set();
                             })
                             .ok();
@@ -1392,8 +1412,13 @@ impl AppOrchestrator {
                     let mut s = state.lock().unwrap();
                     let langs = s.model_entries[s.selected_model].languages.clone();
                     if langs.iter().any(|l| l == &lang) {
+                        let model = s.model_entries[s.selected_model].name.clone();
                         s.selected_language = lang.clone();
                         s.settings.selected_language = lang.clone();
+                        // Remember it FOR THIS MODEL — switching away and back
+                        // restores the choice instead of silently reverting to
+                        // Auto.
+                        s.settings.set_language_for_model(&model, &lang);
                         if let Err(e) = s.settings.save_all() {
                             warn!("Failed to persist language selection: {}", e);
                         }
@@ -1404,6 +1429,15 @@ impl AppOrchestrator {
                     } else {
                         warn!("Language '{}' not supported by current model", lang);
                     }
+                }
+                OrchestratorCommand::RefreshRecommendation => {
+                    let mut s = state.lock().unwrap();
+                    // Priority pick (or an install) changed the scoring inputs.
+                    s.status_message = format!(
+                        "Recommendation updated ({} mode)",
+                        catalog::RecommendPriority::from_u32(s.settings.model_priority).label()
+                    );
+                    refresh_recommendation(&mut s);
                 }
                 OrchestratorCommand::SelectMicrophone(name) => {
                     {
@@ -1481,37 +1515,24 @@ impl AppOrchestrator {
                     // Canary/Photon) free their models on a background thread
                     // so the command loop never blocks on the JSON round-trip.
                     // One-shot CLIs (whisper/sherpa/vosk) hold no persistent
-                    // state — compact only. Same semantics as before (model
-                    // dropped, next turn reloads), just async so offload feels
-                    // as instant as the one-shot engines.
-                    // Skip the ACTIVE model's worker: freeing it would only
-                    // force a slow reload on the very next turn (Ultra's load
-                    // is minutes). Idle workers for the other models are what
-                    // actually leak GBs after a model switch.
-                    let active_family = {
-                        state
-                            .lock()
-                            .ok()
-                            .and_then(|s| {
-                                s.model_entries.get(s.selected_model).map(|e| {
-                                    e.engine_family.clone()
-                                })
-                            })
-                            .unwrap_or_default()
-                    };
+                    // state — compact only. THE ACTIVE ENGINE IS RELEASED TOO:
+                    // this is what the setting promises ("auto-offload STT
+                    // model"), and keeping the selected worker resident is what
+                    // made Nemotron look like it never offloaded. Every engine
+                    // re-arms itself on the next turn, so the reload lands
+                    // lazily — no RAM parked forever just to shave one load.
                     {
                         let mut s = state.lock().unwrap();
                         s.model_offloaded = true;
                         s.status_message = "Model offloaded (RAM released)".into();
                         info!(
-                            "Model offloaded (async worker release, incl. Photon; active family kept: '{}')",
-                            active_family
+                            "Model offloaded (async worker release: active engine included)"
                         );
                     }
                     std::thread::Builder::new()
                         .name("stt-offload".to_string())
                         .spawn(move || {
-                            unload_all_workers_except(&active_family);
+                            unload_all_workers();
                             crate::models::engine::compact_working_set();
                         })
                         .ok();

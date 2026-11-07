@@ -47,6 +47,12 @@ pub enum WakewordServiceCommand {
     /// with it, so the dashboard's pick takes effect immediately.
     SetMicrophone(String),
     Suppress(f32),
+    /// Release EVERYTHING and end the service thread: the ONNX engine, the
+    /// VAD, and the open microphone stream all drop with it. Used when the
+    /// user switches wakewords off — keeping the models resident just to
+    /// listen for something that was disabled is the RAM leak that sent
+    /// idle memory to 18 MB. A later enable respawns the service from disk.
+    Shutdown,
 }
 
 /// Opaque handle returned by [`spawn_background_service`].
@@ -84,6 +90,12 @@ impl WakewordHandle {
     }
     pub fn suppress(&self, duration_secs: f32) {
         let _ = self.cmd_tx.send(WakewordServiceCommand::Suppress(duration_secs));
+    }
+    /// Ask the service thread to release its engine + microphone and exit.
+    /// The thread drops everything as it unwinds, so the RAM comes back even
+    /// though the handle itself has no join.
+    pub fn shutdown(&self) {
+        let _ = self.cmd_tx.send(WakewordServiceCommand::Shutdown);
     }
     pub fn is_active(&self) -> bool {
         self.running.load(Ordering::Acquire)
@@ -236,6 +248,15 @@ fn run_service_thread(
                 WakewordServiceCommand::Suppress(secs) => {
                     engine.suppress(secs);
                 }
+                WakewordServiceCommand::Shutdown => {
+                    // Release the mic, drop the engine, end the thread: this
+                    // is what actually gives the RAM back when the user turns
+                    // wakewords off. `Stop` alone only parks detection.
+                    let _ = live.take();
+                    running.store(false, Ordering::Release);
+                    info!("Wakeword background released (disabled)");
+                    return;
+                }
             }
         }
 
@@ -322,6 +343,15 @@ fn run_service_thread(
                 Ok(WakewordServiceCommand::Suppress(secs)) => {
                     engine.suppress(secs);
                 }
+                // Idle Shutdown: release the engine + mic and end the thread
+                // (same as the streaming-loop branch above).
+                Ok(WakewordServiceCommand::Shutdown) => {
+                    let _ = live.take();
+                    running.store(false, Ordering::Release);
+                    info!("Wakeword background released (disabled)");
+                    return;
+                }
+                // Handle dropped: the service was released from the app side.
                 Err(_) => {
                     running.store(false, Ordering::Release);
                     return;

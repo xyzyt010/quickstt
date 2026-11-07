@@ -13,6 +13,35 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 const IPC_PORT: u16 = 47631;
+
+/// History cards rendered in the dashboard — the 60 most recent turns.
+///
+/// The software renderer lays the whole scroll content out with `i16`
+/// physical-pixel coordinates, so a long enough list overflows (~136 DIP
+/// per card is already ~34k physical px at 125% for 202 turns; release
+/// wraps and panics in `Shifted::new`, debug adds with overflow). Sixty
+/// rows stay under the ceiling up to ~350% display scaling. Retention is
+/// unchanged (`history::HISTORY_CAP` = 500); only the dashboard list view
+/// is windowed. `history` is newest-first, so indices 0..60 stay valid for
+/// play/copy/delete/menu.
+const DASHBOARD_HISTORY_ROWS: usize = 60;
+
+/// Floor for how long a finished turn waits for transcript cleanup before the
+/// raw text is typed. The grace is DYNAMIC: it is this floor, or however long
+/// the current cleanup engine actually took last turn (plus a small margin),
+/// capped by `CLEANUP_PASTE_GRACE_MAX_MS`. So the ~15 ms FDT tagger still gets
+/// its cleaned text pasted, while the per-turn GGUF loaders (6–30 s here) type
+/// the raw turn on the very next tick instead of making the user wait through a
+/// pointless grace window.
+const CLEANUP_PASTE_GRACE_MS: u64 = 200;
+/// Hard cap on the grace so a single slow turn can never wedge delivery.
+const CLEANUP_PASTE_GRACE_MAX_MS: u64 = 1500;
+
+/// Don't bother compacting the transcript buffer below this size — the
+/// `clear()` itself costs a page write, and small buffers are never the
+/// problem. Only a genuinely accumulated transcript (hours of dictation) is
+/// worth dropping, which also caps the memory the "idle" case holds.
+const TRANSCRIPT_BUFFER_KEEP_MIN: usize = 2048;
 // MiniPill sizes, LOGICAL px (physical-px math scales them; Slint layout
 // mirrors them). Bottom dock: thin 33x8 bar, expands to a roomy
 // 240x86 pair (34px status pill above with 10px air, 54x28 mic oval below —
@@ -1105,6 +1134,11 @@ fn mlock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Version string shown in the UI (onboarding footer + Settings → System).
+fn crate_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 /// Set the moment Quit starts: background workers (pre-warm, SHOW/HIDE
 /// forwarders) must not spawn new C++ processes afterwards, or a pre-warm
 /// waking up after quit_both leaves an orphaned widget behind forever.
@@ -1527,50 +1561,82 @@ unsafe fn release_modifiers() {
     SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
 }
 
+/// Give keyboard focus back to the window the user was typing in. Returns
+/// false when focus could not be restored — the caller must then skip the
+/// Ctrl+V (the transcript is already on the clipboard), because injecting it
+/// into an unrelated foreground window is worse than not pasting at all.
 #[cfg(target_os = "windows")]
-unsafe fn restore_typing_focus(target_hwnd: Option<isize>) {
+unsafe fn restore_typing_focus(target_hwnd: Option<isize>) -> bool {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows::Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
     };
 
-    let cur_thread = GetCurrentThreadId();
-    let _current_pid = std::process::id();
-    let current_fg = GetForegroundWindow();
-    let mut fg_pid = 0u32;
-    GetWindowThreadProcessId(current_fg, Some(&mut fg_pid));
-
-    if let Some(target) = target_hwnd {
-        let thwnd = HWND(target as _);
-        if IsWindow(thwnd).as_bool() {
-            let mut target_pid = 0u32;
-            let target_thread = GetWindowThreadProcessId(thwnd, Some(&mut target_pid));
-            if target_thread != 0 && target_thread != cur_thread {
-                let _ = AttachThreadInput(cur_thread, target_thread, true);
-                let _ = SetForegroundWindow(thwnd);
-                let _ = SetFocus(thwnd);
-                let _ = AttachThreadInput(cur_thread, target_thread, false);
-            } else {
-                let _ = SetForegroundWindow(thwnd);
-                let _ = SetFocus(thwnd);
-            }
-            // Let the target app settle on the restored focus before keys
-            // arrive: 20ms loses pastes into slow (Electron/browser) text
-            // boxes. 50ms is still imperceptible next to a 160ms tick.
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            // Verify: Windows foreground-lock can silently reject
-            // SetForegroundWindow from a background thread (the old code
-            // never checked, so Ctrl+V went to the wrong window and the
-            // dictation "vanished").
-            if GetForegroundWindow() != thwnd {
-                log_line("paste focus restore rejected by foreground-lock (Ctrl+V may miss)");
-            }
-        } else {
-            log_line("paste target window gone, pasting into current focus");
-        }
+    let Some(target) = target_hwnd else {
+        // No captured target (the user was in our own window when the turn
+        // started): paste into whatever has focus now.
+        return true;
+    };
+    let thwnd = HWND(target as _);
+    if !IsWindow(thwnd).as_bool() {
+        log_line("paste target window gone, pasting into current focus");
+        return true;
     }
+    if GetForegroundWindow() == thwnd {
+        // Already the active window. Touching focus here was the paste bug:
+        // SetFocus(top-level) steals keyboard focus from the child edit
+        // control and the injected Ctrl+V lands on the frame, where nothing
+        // handles it. Leave the user's caret exactly where it is.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        return true;
+    }
+
+    let cur_thread = GetCurrentThreadId();
+    let target_thread = GetWindowThreadProcessId(thwnd, None);
+    if target_thread != 0 && target_thread != cur_thread {
+        let _ = AttachThreadInput(cur_thread, target_thread, true);
+        let _ = SetForegroundWindow(thwnd);
+        restore_child_focus(thwnd);
+        let _ = AttachThreadInput(cur_thread, target_thread, false);
+    } else {
+        let _ = SetForegroundWindow(thwnd);
+        restore_child_focus(thwnd);
+    }
+    // Let the target app settle on the restored focus before keys arrive:
+    // 20ms loses pastes into slow (Electron/browser) text boxes. 50ms is
+    // still imperceptible next to a 160ms tick.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Verify: Windows foreground-lock can silently reject SetForegroundWindow
+    // from a background thread (the old code never checked, so Ctrl+V went to
+    // the wrong window and the dictation "vanished").
+    if GetForegroundWindow() != thwnd {
+        log_line("paste focus restore rejected by foreground-lock (Ctrl+V skipped, text on clipboard)");
+        return false;
+    }
+    true
+}
+
+/// Restore the exact control that had focus inside `top` when the dictation
+/// started. Must be called while the caller is attached to the target
+/// thread's input queue (see `restore_typing_focus`); SetFocus on a window
+/// from another input queue is silently ignored.
+#[cfg(target_os = "windows")]
+unsafe fn restore_child_focus(top: windows::Win32::Foundation::HWND) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, IsWindow, GA_ROOT};
+
+    let Some(child) = LAST_FG_CHILD.lock().ok().and_then(|v| *v) else {
+        return;
+    };
+    let child = HWND(child as _);
+    // Stale capture (the app navigated / the control was destroyed): better
+    // to leave the window's own focus alone than to focus a wrong widget.
+    if !IsWindow(child).as_bool() || GetAncestor(child, GA_ROOT) != top {
+        return;
+    }
+    let _ = SetFocus(child);
 }
 
 #[cfg(target_os = "windows")]
@@ -1630,7 +1696,13 @@ unsafe fn paste_via_ctrl_v(target_hwnd: Option<isize>) {
     };
 
     release_modifiers();
-    restore_typing_focus(target_hwnd);
+    if !restore_typing_focus(target_hwnd) {
+        // Focus could not be put back where the user was typing. Do not
+        // inject Ctrl+V blindly: the text is on the clipboard, so the user
+        // can paste it, but a stray keystroke must not hit another window.
+        log_line("paste skipped: target focus unavailable (transcript on clipboard)");
+        return;
+    }
     // Clipboard write needs a beat before Ctrl+V: back-to-back injects lose
     // the paste into slow targets (text stays in the clipboard only).
     std::thread::sleep(std::time::Duration::from_millis(40));
@@ -1739,17 +1811,43 @@ unsafe fn send_unicode_text(text: &str) {
     }
 }
 
+/// The control (`hwndFocus`) that actually has keyboard focus inside the
+/// captured external top-level window. Restoring the top-level HWND with
+/// `SetFocus` clears child focus, so Ctrl+V lands on the frame and the
+/// dictation never appears — this is the control that must get it back.
+#[cfg(target_os = "windows")]
+static LAST_FG_CHILD: Mutex<Option<isize>> = Mutex::new(None);
+
 #[cfg(target_os = "windows")]
 fn capture_current_fg_window(target: &Arc<Mutex<Option<isize>>>) {
     unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO,
+        };
         let fg = GetForegroundWindow();
         if fg.0 != 0 {
             let mut pid = 0u32;
-            GetWindowThreadProcessId(fg, Some(&mut pid));
+            let tid = GetWindowThreadProcessId(fg, Some(&mut pid));
             if pid != std::process::id() {
                 if let Ok(mut lock) = target.lock() {
                     *lock = Some(fg.0 as isize);
+                }
+                // Remember the focused child (edit box / document body) so
+                // the paste can give it back on a different foreground.
+                let mut info = GUITHREADINFO {
+                    cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+                    ..Default::default()
+                };
+                let focus = if tid != 0
+                    && GetGUIThreadInfo(tid, &mut info).is_ok()
+                    && info.hwndFocus.0 != 0
+                {
+                    Some(info.hwndFocus.0 as isize)
+                } else {
+                    None
+                };
+                if let Ok(mut child) = LAST_FG_CHILD.lock() {
+                    *child = focus;
                 }
             }
         }
@@ -1921,16 +2019,69 @@ fn deliver_linux(text: &str, target: Option<isize>) {
     log_line(&format!("linux paste delivered {} chars", text.len()));
 }
 
+/// Join the lines of one turn for delivery into a text box.
+///
+/// A turn can contain several engine utterances (a streaming model commits
+/// every few seconds; a wakeword session runs until told to stop). Those sit
+/// in the buffer on separate lines because the preview board reads nicely that
+/// way — but dictating into a text field must read as prose, and a hard
+/// newline mid-sentence is wrong. Lines are therefore joined with a space,
+/// EXCEPT where the previous line already ends a sentence (. ! ? … : ;) and
+/// the next starts a capital — a genuine break is kept there. No trailing
+/// space is ever added: the separator is part of the join, so consecutive
+/// deliveries can never produce "word  word".
+fn flatten_delivery_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if !trimmed.contains('\n') {
+        return trimmed.to_string();
+    }
+    let lines: Vec<&str> = trimmed
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let mut out = String::with_capacity(trimmed.len());
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            let prev_ends_sentence = lines[i - 1]
+                .chars()
+                .next_back()
+                .map(|c| matches!(c, '.' | '!' | '?' | '\u{2026}' | ':' | ';'))
+                .unwrap_or(false);
+            let next_starts_capital = line
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase() || c.is_numeric())
+                .unwrap_or(false);
+            if prev_ends_sentence && next_starts_capital {
+                out.push('\n');
+            } else {
+                out.push(' ');
+            }
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 /// Deliver fresh transcript text per output mode:
 /// - 0 = Type (fast paste via clipboard + Ctrl+V, with Unicode typing)
 /// - 1 = Clipboard (fast paste via clipboard + Ctrl+V)
 /// - 2 = Show only (TextBoard preview only)
+///
+/// The text is written EXACTLY as dictated. This used to append a space to
+/// every delivery, which was invisible when it fired once per turn but turned
+/// into endless stray spaces when the streaming path called it per delta —
+/// the "keeps pressing space" report. Multi-utterance turns are joined by
+/// `flatten_delivery_text`, which supplies the separators explicitly.
 fn deliver_transcription_output(delta: &str, output_mode: u32, target_hwnd: Option<isize>) {
-    let text = delta.trim();
+    let text = flatten_delivery_text(delta);
     if text.is_empty() {
         return;
     }
-    let text = format!("{text} ");
     match output_mode {
         2 => {
             log_line("output_mode: show only (TextBoard)");
@@ -2174,28 +2325,88 @@ fn main() -> QuickSttResult<()> {
     let state = orchestrator.get_state();
     let tx_cmd = orchestrator.get_command_sender();
 
-    let wakeword_handle: Option<quickstt_core::wakeword_service::WakewordHandle> = {
-        let models_dir = quickstt_core::wakeword_loader::default_models_dir();
-        // The background listener must use the same microphone the user
-        // picked — it used to open the OS default unconditionally.
-        let preferred_mic = state
-            .lock()
-            .map(|s| s.settings.selected_microphone.clone())
-            .unwrap_or_default();
-        match quickstt_core::wakeword_service::spawn_background_service(
-            &models_dir,
-            tx_cmd.clone(),
-            &preferred_mic,
-        ) {
-            Some(h) => {
-                log_line(&format!("wakeword service spawned from {:?}", models_dir));
-                Some(h)
+    // ── Lazy wakeword listener ──
+    // The openWakeWord engine (ONNX heads + an open microphone stream) used to
+    // be loaded unconditionally at startup and kept resident for the whole app
+    // lifetime — even while the setting was OFF, so the app paid several MB of
+    // idle RAM (and held a mic) to listen for commands the user had disabled.
+    // Now the listener is spawned on enable and released on disable, while
+    // every preference (phrases, sensitivity, VAD, clap action, microphone)
+    // still persists and is re-applied when it comes back.
+    let ww_models_dir = quickstt_core::wakeword_loader::default_models_dir();
+    // The background listener must use the same microphone the user picked —
+    // it used to open the OS default unconditionally.
+    let ww_preferred_mic = state
+        .lock()
+        .map(|s| s.settings.selected_microphone.clone())
+        .unwrap_or_default();
+    // Wakewords on? The live flag, or a persisted non-off mode. (Claps stay
+    // armed regardless: `transient_action != 2`.)
+    let ww_wanted_at_start = {
+        match state.lock() {
+            Ok(s) => {
+                s.wakeword_active
+                    || (!s.settings.wake_word_mode.eq_ignore_ascii_case("Off")
+                        && !s.settings.wake_word_mode.trim().is_empty())
             }
-            None => {
-                log_line(&format!("wakeword service unavailable in {:?}", models_dir));
-                None
-            }
+            Err(_) => false,
         }
+    };
+    let wakeword_handle: Arc<Mutex<Option<quickstt_core::wakeword_service::WakewordHandle>>> = {
+        let slot: Arc<Mutex<Option<quickstt_core::wakeword_service::WakewordHandle>>> =
+            Arc::new(Mutex::new(None));
+        if ww_wanted_at_start {
+            let spawned = quickstt_core::wakeword_service::spawn_background_service(
+                &ww_models_dir,
+                tx_cmd.clone(),
+                &ww_preferred_mic,
+            );
+            if spawned.is_some() {
+                log_line(&format!(
+                    "wakeword service spawned from {:?}",
+                    ww_models_dir
+                ));
+            } else {
+                log_line(&format!(
+                    "wakeword service unavailable in {:?}",
+                    ww_models_dir
+                ));
+            }
+            *mlock(&slot) = spawned;
+        } else {
+            log_line("wakeword disabled at startup — listener not loaded (RAM saved)");
+        }
+        slot
+    };
+    // Single reconcile path shared by the state tick and the dashboard
+    // toggles: spawn on enable, RELEASE on disable, no-op in between.
+    let wakeword_reconcile: Arc<dyn Fn(bool) + Send + Sync> = {
+        let slot = wakeword_handle.clone();
+        let models_dir = ww_models_dir.clone();
+        let mic = ww_preferred_mic.clone();
+        let tx = tx_cmd.clone();
+        Arc::new(move |want: bool| {
+            let mut cur = mlock(&slot);
+            if !want {
+                if let Some(h) = cur.take() {
+                    h.shutdown();
+                    log_line("wakeword listener released (disabled — RAM freed)");
+                }
+                return;
+            }
+            if cur.is_none() {
+                *cur = quickstt_core::wakeword_service::spawn_background_service(
+                    &models_dir,
+                    tx.clone(),
+                    &mic,
+                );
+                if cur.is_some() {
+                    log_line(&format!("wakeword listener loaded from {:?}", models_dir));
+                } else {
+                    log_line("wakeword listener unavailable (no models on disk)");
+                }
+            }
+        })
     };
     let last_external_fg: Arc<Mutex<Option<isize>>> = Arc::new(Mutex::new(None));
 
@@ -2213,6 +2424,22 @@ fn main() -> QuickSttResult<()> {
 
     let pill = PillWidget::new().unwrap();
     let dashboard = DashboardWidget::new().unwrap();
+    // ── First-run onboarding ──
+    // Shown while `onboarding_completed` is false: how the app works, the
+    // live demo, the language / model / preference picks. Skip and "Start
+    // dictating" both complete it; every pick is applied through the normal
+    // commands so the dashboard sees exactly the same state afterwards.
+    let onboarding: Option<OnboardingWidget> = {
+        let want = match state.lock() {
+            Ok(s) => !s.settings.onboarding_completed,
+            Err(_) => false,
+        };
+        if want {
+            Some(OnboardingWidget::new().unwrap())
+        } else {
+            None
+        }
+    };
     // DPI + initial geometry. The dashboard is the resizable app window, so it
     // opens at its designed size in DIPs (not at the winit minimum, which made
     // it look cramped), clamped to the monitor work area so it never opens
@@ -2336,6 +2563,10 @@ fn main() -> QuickSttResult<()> {
     let cleanup_busy: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     // (raw, cleaned) published by the worker; poll takes it and delivers.
     let cleanup_result: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+    // How long this cleanup engine took last turn. The paste grace below is
+    // derived from it, so a fast engine keeps its cleaned-text window and a
+    // per-turn GGUF loader never makes the user wait out a fixed 1.5 s.
+    let cleanup_last_ms: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     // Transcript-history mode: the TextBoard shows the FULL buffer instead
     // of just the current turn until the user closes it / a new session.
     let tb_full: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
@@ -2349,6 +2580,13 @@ fn main() -> QuickSttResult<()> {
         if std::env::var_os("QUICKSTT_DEMO_HISTORY_MENU").is_some() { 0 } else { -1 },
     ));
     let history_dirty: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    // Bulk history selection: the ids of the turns the user ticked, plus
+    // whether selection mode is on at all. Ids (not row indices) are held so
+    // the selection stays correct when rows shift after a delete, and so
+    // "select all" covers every stored turn — not just the rendered window.
+    let history_selected: Arc<Mutex<std::collections::HashSet<String>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let history_selecting: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     // Row whose copy button is flashing its green ✓ (row index) and when the
     // copy happened; the tick clears it ~1.2s later so the row falls back.
     let history_copied: Arc<Mutex<(i32, std::time::Instant)>> =
@@ -2790,7 +3028,11 @@ fn dock_hop(
                                 // ALSA PCM: tearing the background stream
                                 // down under the foreground stream
                                 // silences the whole session).
-                                if let Some(ref wh) = wh_for_ptt {
+                                // PAUSE the background listener (not release):
+                                // it comes straight back when PTT ends, and a
+                                // release/respawn would reload the ONNX heads
+                                // on every single dictation.
+                                if let Some(ref wh) = *mlock(&wh_for_ptt) {
                                     wh.stop();
                                     for _ in 0..80 {
                                         if !wh.is_active() {
@@ -3879,6 +4121,9 @@ fn dock_hop(
     let mut was_live = false;
     // Microphone the background wakeword listener is currently bound to.
     let mut last_wakeword_mic = String::new();
+    // False until the (possibly lazily spawned) wakeword listener has been
+    // handed the user's saved preferences once.
+    let mut ww_prefs_applied = false;
     let mut done_until = std::time::Instant::now();
     let mut last_hover = std::time::Instant::now();
     // Overlay paint insurance throttle (see watchdog block below).
@@ -3935,6 +4180,14 @@ fn dock_hop(
     // later (capturing at paste time could target a window the user merely
     // clicked meanwhile).
     let mut cleanup_target_fg: Option<isize> = None;
+    // The LLM cleanup engines load their weights per turn and can take tens
+    // of seconds. Typing must never wait that long: after this grace the raw
+    // turn is pasted now and the cleaned result only updates history/board.
+    // (Waiting also made later turns pile up behind `cleanup_busy` and never
+    // get typed at all — the "it only types part of what I said" report.)
+    let mut cleanup_deadline: Option<std::time::Instant> = None;
+    let mut cleanup_delivered = false;
+    let mut cleanup_raw = String::new();
     let mut tb_until = std::time::Instant::now();
     let mut transcribing_since: Option<std::time::Instant> = None;
     let mut alert_until = std::time::Instant::now();
@@ -3950,6 +4203,8 @@ fn dock_hop(
     let timer = Timer::default();
     let pill_w = pill.as_weak();
     let dash_w = dashboard.as_weak();
+    // The onboarding tour (shown on first run only, None afterwards).
+    let onboarding_w = onboarding.as_ref().map(|o| o.as_weak());
     let overlay_w = overlay.as_weak();
     let traymenu_w = traymenu.as_weak();
     let textboard_w = textboard.as_weak();
@@ -3963,6 +4218,7 @@ fn dock_hop(
     let snooze_ptt_show_timer = snooze_ptt_show.clone();
     let cleanup_busy_timer = cleanup_busy.clone();
     let cleanup_result_timer = cleanup_result.clone();
+    let cleanup_last_ms_timer = cleanup_last_ms.clone();
     // Dashboard history row sync: rebuilt on demand (new turn / user action)
     // and at 10Hz while audio is playing so the seek bar and clock advance.
     // The rows live in ONE persistent VecModel: changed rows are patched with
@@ -4004,6 +4260,7 @@ fn dock_hop(
     let diag_rx_timer = diag_rx;
     let last_external_fg_timer = last_external_fg.clone();
     let wakeword_handle_timer = wakeword_handle.clone();
+    let wakeword_reconcile_timer = wakeword_reconcile.clone();
     // 60fps morph ticker: drives the mic-capsule grow only (the window
     // never resizes mid-morph — native resizes flash white frames). The 50ms
     // poll only STARTS glides; this consumes them. 460ms expand / 300ms
@@ -5165,7 +5422,35 @@ fn dock_hop(
                 // background must stay off, or it re-opens the device and
                 // steals the session's audio (Linux shares one ALSA PCM).
                 let bg_wanted = (ww_on || transient_armed) && !live_session && !ptt;
-                if let Some(ref wh) = wakeword_handle_timer {
+                // Lazy load / release. The listener lives ONLY while the user
+                // has wakewords (or the clap transient) armed: disabling them
+                // releases the ONNX engine and the microphone, which is the
+                // difference between ~18 MB and mid-teens idle RAM. A short
+                // pause (PTT held, session live) still just stops detection —
+                // it must not pay a model reload per dictation.
+                let ww_armed = ww_on || transient_armed;
+                let had_listener = mlock(&wakeword_handle_timer).is_some();
+                (wakeword_reconcile_timer)(ww_armed);
+                let have_listener = mlock(&wakeword_handle_timer).is_some();
+                // A freshly (re)spawned listener knows nothing about the
+                // user's choices — push every saved preference once, so a lazy
+                // start behaves exactly like the always-loaded one. This lives
+                // in the tick that runs even while the dashboard is closed.
+                if have_listener && (!had_listener || !ww_prefs_applied) {
+                    if let Some(ref wh) = *mlock(&wakeword_handle_timer) {
+                        wh.set_sensitivity(s.settings.wakeword_sensitivity);
+                        wh.set_vad_sensitivity(s.settings.vad_sensitivity);
+                        wh.set_phrase_enabled(
+                            "hey jarvis".to_string(),
+                            s.settings.ww_hey_jarvis,
+                        );
+                        wh.set_phrase_enabled("alexa".to_string(), s.settings.ww_alexa);
+                        wh.set_transient_action(s.settings.transient_action);
+                        ww_prefs_applied = true;
+                        log_line("wakeword listener: saved preferences re-applied");
+                    }
+                }
+                if let Some(ref wh) = *mlock(&wakeword_handle_timer) {
                     if bg_wanted {
                         if !wh.is_active() {
                             wh.start();
@@ -5180,6 +5465,46 @@ fn dock_hop(
                     if mic != last_wakeword_mic {
                         last_wakeword_mic = mic.clone();
                         wh.set_microphone(&mic);
+                    }
+                }
+                // ── Onboarding live sync ──
+                // The tour picks a model and a language; a model swap changes
+                // the language list (single-language models lose the dropdown
+                // entirely), so mirror state into the visible slide rather
+                // than leaving a stale pick behind. Only while the window is
+                // actually up, so the idle cost is zero.
+                if let Some(ob) = onboarding_w.as_ref().and_then(|w| w.upgrade()) {
+                    if ob.window().is_visible() {
+                        if ob.get_selected_model() != s.selected_model as i32 {
+                            ob.set_selected_model(s.selected_model as i32);
+                        }
+                        if let Some(e) = s.model_entries.get(s.selected_model) {
+                            let langs: Vec<slint::SharedString> =
+                                e.languages.iter().map(|l| l.clone().into()).collect();
+                            let same = (0..ob.get_languages().row_count())
+                                .filter_map(|r| ob.get_languages().row_data(r))
+                                .map(|v| v.to_string())
+                                .collect::<Vec<_>>()
+                                == e.languages;
+                            if !same {
+                                ob.set_languages(ModelRc::new(VecModel::from_slice(&langs)));
+                            }
+                            let li = e
+                                .languages
+                                .iter()
+                                .position(|l| l == &s.selected_language)
+                                .unwrap_or(0)
+                                as i32;
+                            if ob.get_selected_language() != li {
+                                ob.set_selected_language(li);
+                            }
+                        }
+                        if ob.get_history_enabled() != s.settings.history_enabled {
+                            ob.set_history_enabled(s.settings.history_enabled);
+                        }
+                        if ob.get_ctrl_space_output() != s.settings.ctrl_space_output as i32 {
+                            ob.set_ctrl_space_output(s.settings.ctrl_space_output as i32);
+                        }
                     }
                 }
                 if transcribing {
@@ -5335,10 +5660,15 @@ fn dock_hop(
                 // end, streaming commits and SAY tests). A shrink (buffer
                 // cleared elsewhere) just re-baselines. Hallucination guard:
                 // VAD-gated — silence loops ("you you you") never type.
-                let is_streaming = s.model_entries
-                    .get(s.selected_model)
-                    .map(|e| quickstt_core::models::catalog::is_streaming_model(&e.name))
-                    .unwrap_or(false);
+                // Streaming and per-utterance engines share ONE delivery path.
+                // While a session is live nothing is typed into the target app:
+                // the transcript accumulates and previews on the TextBoard,
+                // then the WHOLE turn lands in a single burst at turn end —
+                // exactly like every other model. The old streaming branch
+                // pasted every chunk separately: one clipboard write + Ctrl+V
+                // per delta (each also appending a stray space, which is why it
+                // read as the app "pressing space" on and on), and it stomped
+                // the user's clipboard mid-dictation.
                 let out_mode = s.settings.ctrl_space_output;
                 let blen = s.transcript_buffer.len();
                 if blen < turn_base_len {
@@ -5348,31 +5678,7 @@ fn dock_hop(
                     last_buf_len = blen;
                 }
                 let settled = !live_session && !transcribing;
-                if is_streaming {
-                    // Streaming: no TextBoard preview — deltas go straight to
-                    // the target app word-by-word (direct paste, no preview).
-                    if blen > last_buf_len {
-                        let delta = s.transcript_buffer[last_buf_len..blen].to_owned();
-                        let trimmed = delta.trim();
-                        if !trimmed.is_empty() {
-                            let low = trimmed.to_lowercase();
-                            if should_drop_hallucination(low.as_str(), speech_peak) {
-                                log_line(&format!(
-                                    "streaming hallucination dropped {delta:?} peak={sess_peak}"
-                                ));
-                            } else {
-                                log_line(&format!("streaming turn output delta +{} chars", delta.len()));
-                                let target_fg = *mlock(&last_external_fg_timer);
-                                deliver_transcription_output(&delta, out_mode, target_fg);
-                            }
-                        }
-                        last_buf_len = blen;
-                    }
-                    if turn_just_done || settled {
-                        turn_base_len = blen;
-                        last_buf_len = blen;
-                    }
-                } else {
+                {
                     // Background cleanup result FIRST: swap the handed-off
                     // buffer region for the cleaned text (new speech recorded
                     // meanwhile sits after the region and is untouched), land
@@ -5383,6 +5689,7 @@ fn dock_hop(
                     let finished = mlock(&cleanup_result_timer).take();
                     if let Some((raw, cleaned)) = finished {
                         cleanup_busy_timer.store(false, Ordering::Relaxed);
+                        cleanup_deadline = None;
                         let full = if cleaned.trim().is_empty() {
                             raw.clone()
                         } else {
@@ -5396,19 +5703,26 @@ fn dock_hop(
                                     cleanup_spawn_start..cleanup_spawn_blen,
                                     &full,
                                 );
-                                turn_base_len = cleanup_spawn_start + full.len();
-                                // Keep the cursor aligned when it pointed
-                                // past the replaced region (new speech came
-                                // in while cleanup ran).
-                                if last_buf_len <= cleanup_spawn_blen {
-                                    last_buf_len = turn_base_len;
-                                } else {
-                                    let shifted = last_buf_len as i64
-                                        + full.len() as i64
-                                        - region_len as i64;
-                                    last_buf_len =
-                                        shifted.max(turn_base_len as i64) as usize;
-                                }
+                                // The turn base was already advanced to the
+                                // region end when cleanup was spawned, so the
+                                // cursors point AFTER the replaced text (the
+                                // next turn). Shift them by the size delta —
+                                // rewinding them to the region end would
+                                // re-deliver speech that was typed meanwhile.
+                                let delta = full.len() as i64 - region_len as i64;
+                                let shift = |cursor: usize| -> usize {
+                                    if cursor <= cleanup_spawn_start {
+                                        cursor
+                                    } else if cursor >= cleanup_spawn_blen {
+                                        (cursor as i64 + delta)
+                                            .max(cleanup_spawn_start as i64)
+                                            as usize
+                                    } else {
+                                        cleanup_spawn_start + full.len()
+                                    }
+                                };
+                                turn_base_len = shift(turn_base_len);
+                                last_buf_len = shift(last_buf_len);
                             } else {
                                 s.transcript_buffer.truncate(cleanup_spawn_start);
                                 s.transcript_buffer.push_str(&full);
@@ -5429,22 +5743,54 @@ fn dock_hop(
                                     s.history_seq += 1;
                                 }
                             }
-                        } else if cleanup_spawn_blen >= cleanup_spawn_start {
-                            turn_base_len = cleanup_spawn_blen;
-                            if last_buf_len < turn_base_len {
-                                last_buf_len = turn_base_len;
-                            }
+                        } else {
+                            // Unchanged text: leave the cursors alone. They
+                            // were advanced to the region end at spawn and
+                            // already point at the next turn.
                         }
                         log_line(&format!(
                             "batch turn output bulk +{} chars (post-processed)",
                             full.len()
                         ));
-                        let target_fg = cleanup_target_fg;
-                        deliver_transcription_output(&full, out_mode, target_fg);
-                    } else if (turn_just_done || settled)
-                        && blen > turn_base_len
-                        && !cleanup_busy_timer.load(Ordering::Relaxed)
+                        if cleanup_delivered {
+                            // The raw turn was typed when the grace period
+                            // expired. The cleaned text only refines history
+                            // and the TextBoard now — pasting it again would
+                            // duplicate the dictation.
+                            log_line(
+                                "cleanup finished after raw delivery: history updated, no second paste",
+                            );
+                        } else {
+                            let target_fg = cleanup_target_fg;
+                            deliver_transcription_output(&full, out_mode, target_fg);
+                        }
+                        cleanup_delivered = false;
+                    }
+
+                    // Grace deadline: cleanup engines load their weights per
+                    // turn, which can take tens of seconds. Never hold the
+                    // dictation hostage that long — type the raw turn at the
+                    // deadline and let the cleaned text land later in
+                    // history/board only.
+                    if !cleanup_delivered
+                        && cleanup_busy_timer.load(Ordering::Relaxed)
+                        && cleanup_deadline
+                            .map(|d| std::time::Instant::now() >= d)
+                            .unwrap_or(false)
                     {
+                        cleanup_deadline = None;
+                        cleanup_delivered = true;
+                        if !cleanup_raw.is_empty() {
+                            log_line(&format!(
+                                "cleanup grace expired — delivering raw turn now ({} chars)",
+                                cleanup_raw.len()
+                            ));
+                            let target_fg = cleanup_target_fg;
+                            deliver_transcription_output(&cleanup_raw, out_mode, target_fg);
+                        }
+                    }
+
+                    if (turn_just_done || settled) && blen > turn_base_len {
                         let raw_full = s.transcript_buffer[turn_base_len..].trim().to_owned();
                         if raw_full.is_empty() {
                             let new_blen = s.transcript_buffer.len();
@@ -5456,6 +5802,33 @@ fn dock_hop(
                                 log_line(&format!(
                                     "hallucination dropped {raw_full:?} peak={sess_peak}"
                                 ));
+                                let new_blen = s.transcript_buffer.len();
+                                turn_base_len = new_blen;
+                                last_buf_len = new_blen;
+                            } else if cleanup_busy_timer.load(Ordering::Relaxed) {
+                                // The previous turn is still cleaning. Type it
+                                // raw first (order preserved), then this turn
+                                // raw: stacking turns behind one slow model
+                                // load is what made later dictation vanish.
+                                if !cleanup_delivered {
+                                    if !cleanup_raw.is_empty() {
+                                        log_line(&format!(
+                                            "batch turn output bulk +{} chars (raw, pending cleanup flushed)",
+                                            cleanup_raw.len()
+                                        ));
+                                        let target_fg = cleanup_target_fg;
+                                        deliver_transcription_output(
+                                            &cleanup_raw, out_mode, target_fg,
+                                        );
+                                    }
+                                    cleanup_delivered = true;
+                                }
+                                log_line(&format!(
+                                    "batch turn output bulk +{} chars (raw, cleanup busy)",
+                                    raw_full.len()
+                                ));
+                                let target_fg = *mlock(&last_external_fg_timer);
+                                deliver_transcription_output(&raw_full, out_mode, target_fg);
                                 let new_blen = s.transcript_buffer.len();
                                 turn_base_len = new_blen;
                                 last_buf_len = new_blen;
@@ -5474,8 +5847,28 @@ fn dock_hop(
                                 cleanup_spawn_blen = blen;
                                 cleanup_spawn_hist_ms = s.history_push_ms;
                                 cleanup_target_fg = *mlock(&last_external_fg_timer);
+                                cleanup_raw = raw_full.clone();
+                                cleanup_delivered = false;
+                                // Grace: the floor, or however long this engine
+                                // took last turn (+150 ms headroom), capped.
+                                // A sub-100 ms FDT tagger keeps its cleaned
+                                // pastes; a 6–30 s GGUF loader types raw on the
+                                // next tick instead of burning a fixed wait.
+                                let grace_ms = CLEANUP_PASTE_GRACE_MS
+                                    .max((*mlock(&cleanup_last_ms_timer)).saturating_add(150))
+                                    .min(CLEANUP_PASTE_GRACE_MAX_MS);
+                                cleanup_deadline = Some(
+                                    std::time::Instant::now()
+                                        + std::time::Duration::from_millis(grace_ms),
+                                );
+                                // Speech that arrives while the model loads
+                                // is the NEXT turn: advance the base now so
+                                // it is not appended to this one.
+                                turn_base_len = blen;
+                                last_buf_len = blen;
                                 let raw_thread = raw_full.clone();
                                 let res_slot = Arc::clone(&cleanup_result_timer);
+                                let last_ms_slot = Arc::clone(&cleanup_last_ms_timer);
                                 let spawn_res = std::thread::Builder::new()
                                     .name("cleanup-final".into())
                                     .spawn(move || {
@@ -5503,11 +5896,26 @@ fn dock_hop(
                                             raw_thread,
                                             cleaned
                                         ));
+                                        // Feed the adaptive grace: next turn's
+                                        // wait is derived from this duration, so
+                                        // the paste never blocks on a per-turn
+                                        // model load.
+                                        *mlock(&last_ms_slot) =
+                                            t0.elapsed().as_millis() as u64;
                                         *mlock(&res_slot) = Some((raw_thread, cleaned));
                                     });
                                 match spawn_res {
                                     Ok(_) => {
                                         cleanup_busy_timer.store(true, Ordering::Relaxed);
+                                        // Put the raw turn on the clipboard
+                                        // immediately, not 30s later: if the
+                                        // paste cannot land (no focused text
+                                        // box, foreground lock), the words
+                                        // are still there to paste by hand.
+                                        #[cfg(target_os = "windows")]
+                                        if out_mode != 2 {
+                                            let _ = copy_to_windows_clipboard(&cleanup_raw);
+                                        }
                                     }
                                     Err(e) => {
                                         // Worker never started: keep the old
@@ -5515,6 +5923,8 @@ fn dock_hop(
                                         log_line(&format!(
                                             "cleanup worker spawn failed: {e}"
                                         ));
+                                        cleanup_deadline = None;
+                                        cleanup_raw.clear();
                                         log_line(&format!(
                                             "batch turn output bulk +{} chars",
                                             raw_full.len()
@@ -5547,6 +5957,34 @@ fn dock_hop(
                             }
                         }
                     }
+                }
+                // ── Transcript buffer compaction ──
+                // The buffer used to accumulate every utterance for the whole
+                // app lifetime: hours of dictation stayed resident, each turn
+                // allocation scanned an ever-growing String, and the TextBoard
+                // preview was O(history) work. Once everything is delivered
+                // (cursors at the end, no cleanup in flight) and the board has
+                // faded out, drop the consumed prefix. `sess_start_len` re-arms
+                // to 0 at the next session start (line 5285), so the per-session
+                // "grown" and "last turn" accounting is unaffected.
+                if !live_session
+                    && !transcribing
+                    && !cleanup_busy_timer.load(Ordering::Relaxed)
+                    && cleanup_raw.is_empty()
+                    && turn_base_len == last_buf_len
+                    && turn_base_len == s.transcript_buffer.len()
+                    && s.transcript_buffer.len() > TRANSCRIPT_BUFFER_KEEP_MIN
+                    && now >= tb_until
+                {
+                    let dropped = s.transcript_buffer.len();
+                    s.transcript_buffer.clear();
+                    turn_base_len = 0;
+                    last_buf_len = 0;
+                    sess_start_len = 0;
+                    sess_growth_seen = 0;
+                    log_line(&format!(
+                        "transcript buffer compacted: dropped {dropped} chars"
+                    ));
                 }
                 let msg = if s.status_message.is_empty() {
                     "Ready".to_string()
@@ -5709,6 +6147,16 @@ fn dock_hop(
                         if d.get_selected_language() != lang_idx {
                             d.set_selected_language(lang_idx);
                         }
+                        // Single-language models hide the dropdown; Rust says
+                        // why, so the row never looks broken.
+                        let note = if e.languages.len() == 1 {
+                            format!("{} only — this model has no other language", e.languages[0])
+                        } else {
+                            String::new()
+                        };
+                        if d.get_language_note().as_str() != note {
+                            d.set_language_note(note.into());
+                        }
                     }
                     let installed = s.model_entries.iter().filter(|e| e.installed).count();
                     let info = format!(
@@ -5850,6 +6298,10 @@ fn dock_hop(
                         if d.get_recommend_reason().as_str() != s.recommend_reason.as_str() {
                             d.set_recommend_reason(s.recommend_reason.clone().into());
                         }
+                        let prio = s.settings.model_priority.min(2) as i32;
+                        if d.get_model_priority() != prio {
+                            d.set_model_priority(prio);
+                        }
                         let hw_line = if s.hardware_summary.is_empty() {
                             String::new()
                         } else {
@@ -5984,16 +6436,15 @@ fn dock_hop(
                         tb.set_title_text(msg.clone().into());
                     }
                     let closed = *mlock(&tb_closed_timer);
-                    // Streaming suppresses the preview board (direct paste only).
-                    let streaming_now = s.model_entries
-                        .get(s.selected_model)
-                        .map(|e| quickstt_core::models::catalog::is_streaming_model(&e.name))
-                        .unwrap_or(false);
+                    // Every model — streaming included — previews live on the
+                    // TextBoard. Streaming used to be excluded because it typed
+                    // straight into the target app; now that pastes happen once
+                    // at turn end for all engines, the board is the live
+                    // transcript for streaming models too.
                     let want_tb = !closed
                         && !(turn_t.is_empty() && part_t.is_empty())
                         && (show_full
-                            || (!streaming_now
-                                && (live_session || transcribing || now < tb_until)));
+                            || (live_session || transcribing || now < tb_until));
                     if want_tb && !tb.window().is_visible() {
                         *mlock(&tb_follow_timer) = true;
                         widget_platform::show_widget(tb.window());
@@ -6455,6 +6906,210 @@ fn dock_hop(
         });
     }
 
+    // ── onboarding: first-run welcome / demo / preferences ──
+    // Everything below goes through the SAME commands the dashboard uses, so a
+    // choice made here is indistinguishable from one made later — and each pick
+    // persists immediately, so a skipped tour keeps the defaults and a
+    // completed tour keeps the user's answers across restarts.
+    if let Some(ref ob) = onboarding {
+        let ob_weak = ob.as_weak();
+
+        // Initial state: the model list + the current model's languages, the
+        // hardware-aware recommendation, and the live preference values.
+        {
+            match state.lock() {
+                Ok(s) => {
+                    let names: Vec<slint::SharedString> = s
+                        .model_entries
+                        .iter()
+                        .map(|e| e.name.clone().into())
+                        .collect();
+                    ob.set_models(ModelRc::new(VecModel::from_slice(&names)));
+                    ob.set_selected_model(s.selected_model as i32);
+                    if let Some(e) = s.model_entries.get(s.selected_model) {
+                        let langs: Vec<slint::SharedString> =
+                            e.languages.iter().map(|l| l.clone().into()).collect();
+                        ob.set_languages(ModelRc::new(VecModel::from_slice(&langs)));
+                        let li = e
+                            .languages
+                            .iter()
+                            .position(|l| l == &s.selected_language)
+                            .unwrap_or(0);
+                        ob.set_selected_language(li as i32);
+                    }
+                    let reason = if s.recommend_reason.trim().is_empty() {
+                        "Install a model and QuickSTT picks the best fit for this machine."
+                            .to_string()
+                    } else {
+                        s.recommend_reason.clone()
+                    };
+                    ob.set_recommend_reason(reason.into());
+                    let hw = if s.hardware_summary.trim().is_empty() {
+                        "Detecting hardware…".to_string()
+                    } else {
+                        s.hardware_summary.clone()
+                    };
+                    ob.set_hardware_info(hw.into());
+                    ob.set_wakeword_enabled(
+                        s.wakeword_active
+                            || (!s.settings.wake_word_mode.eq_ignore_ascii_case("Off")
+                                && !s.settings.wake_word_mode.trim().is_empty()),
+                    );
+                    ob.set_ctrl_space_output(s.settings.ctrl_space_output as i32);
+                    ob.set_history_enabled(s.settings.history_enabled);
+                    ob.set_version(crate_version().into());
+                }
+                Err(_) => {
+                    log_line("onboarding: state unavailable, skipping initial fill")
+                }
+            }
+        }
+
+        // Helper: mark the tour done, persist, and close the window. Used by
+        // Skip and by "Start dictating" on the last step.
+        let finish_onboarding = {
+            let ob_weak = ob_weak.clone();
+            let state = state.clone();
+            move || {
+                if let Ok(mut s) = state.lock() {
+                    s.settings.onboarding_completed = true;
+                    let _ = s.settings.save_all();
+                }
+                if let Some(w) = ob_weak.upgrade() {
+                    let _ = w.hide();
+                }
+                log_line("onboarding completed (preferences saved)");
+            }
+        };
+
+        // Next: advance, resolving the language pick when leaving that slide
+        // (the model's own supported list is the only valid answer), andFinish
+        // ing the tour on the last step.
+        {
+            let ob_weak = ob_weak.clone();
+            let tx = tx_cmd.clone();
+            let state = state.clone();
+            let finish = finish_onboarding.clone();
+            ob.on_next(move || {
+                let step = ob_weak.upgrade().map(|w| w.get_step()).unwrap_or(0);
+                if step == 2 {
+                    // Language slide → apply through the normal command so the
+                    // validation + persistence live in one place.
+                    let idx = ob_weak
+                        .upgrade()
+                        .map(|w| w.get_selected_language())
+                        .unwrap_or(0)
+                        .max(0) as usize;
+                    if let Ok(s) = state.lock() {
+                        if let Some(e) = s.model_entries.get(s.selected_model) {
+                            if let Some(lang) = e.languages.get(idx) {
+                                let _ = tx
+                                    .try_send(OrchestratorCommand::SelectLanguage(lang.clone()));
+                            }
+                        }
+                    }
+                }
+                if step >= 4 {
+                    (finish)();
+                    return;
+                }
+                if let Some(w) = ob_weak.upgrade() {
+                    w.set_step(step + 1);
+                }
+            });
+        }
+        {
+            let ob_weak = ob_weak.clone();
+            ob.on_back(move || {
+                let step = ob_weak.upgrade().map(|w| w.get_step()).unwrap_or(0);
+                if let Some(w) = ob_weak.upgrade() {
+                    w.set_step(step.saturating_sub(1));
+                }
+            });
+        }
+        {
+            let finish = finish_onboarding.clone();
+            ob.on_skip(move || {
+                // Skip keeps whatever is on screen — usually the defaults — and
+                // never asks again.
+                (finish)();
+            });
+        }
+        {
+            let tx = tx_cmd.clone();
+            let state = state.clone();
+            ob.on_set_language(move |name: slint::SharedString| {
+                let Ok(s) = state.lock() else { return };
+                let Some(e) = s.model_entries.get(s.selected_model) else { return };
+                // The model's own supported list is the only valid answer —
+                // mirror the dashboard's validation instead of trusting the UI.
+                if !e.languages.iter().any(|l| l == name.as_str()) {
+                    return;
+                }
+                let _ = tx.try_send(OrchestratorCommand::SelectLanguage(name.to_string()));
+            });
+        }
+        {
+            let tx = tx_cmd.clone();
+            let state = state.clone();
+            ob.on_set_model(move |name: slint::SharedString| {
+                let idx = match state.lock() {
+                    Ok(s) => s
+                        .model_entries
+                        .iter()
+                        .position(|e| e.name == name.as_str()),
+                    Err(_) => None,
+                };
+                if let Some(i) = idx {
+                    let _ = tx.try_send(OrchestratorCommand::SelectModel(i));
+                }
+            });
+        }
+        {
+            let tx = tx_cmd.clone();
+            let wh = wakeword_handle.clone();
+            let ww_reconcile = wakeword_reconcile.clone();
+            ob.on_set_wakeword(move |on: bool| {
+                // Same lazy path as the dashboard toggle: OFF releases the
+                // engine + mic, ON respawns it with the saved preferences.
+                (ww_reconcile)(on);
+                if let Some(ref w) = *mlock(&wh) {
+                    if on {
+                        w.start();
+                    } else {
+                        w.stop();
+                    }
+                }
+                let _ = tx.try_send(OrchestratorCommand::ToggleWakeword(on));
+            });
+        }
+        {
+            let state = state.clone();
+            ob.on_set_output(move |mode: i32| {
+                if let Ok(mut s) = state.lock() {
+                    s.settings.ctrl_space_output = mode.clamp(0, 2) as u32;
+                    let _ = s.settings.save_all();
+                }
+            });
+        }
+        {
+            let state = state.clone();
+            ob.on_set_history(move |on: bool| {
+                if let Ok(mut s) = state.lock() {
+                    s.settings.history_enabled = on;
+                    let _ = s.settings.save_all();
+                }
+            });
+        }
+
+        // Show it. The dashboard stays closed until the user opens it, so the
+        // first thing a new user sees is the tour, not a settings window.
+        widget_platform::show_widget(ob.window());
+        ob.set_step(0);
+        log_line("onboarding shown (first run)");
+    }
+
+
     // ── dashboard: model + synced language dropdowns, style, wakeword, vad, system settings ──
     {
         let tx = tx_cmd.clone();
@@ -6478,8 +7133,13 @@ fn dock_hop(
     {
         let tx = tx_cmd.clone();
         let wh = wakeword_handle.clone();
+        let ww_reconcile = wakeword_reconcile.clone();
         dashboard.on_set_wakeword_enabled(move |on| {
-            if let Some(ref w) = wh {
+            // Turning it OFF releases the engine + mic (that is the RAM win);
+            // turning it back ON respawns the service with every saved
+            // preference re-applied by the state sync.
+            (ww_reconcile)(on);
+            if let Some(ref w) = *mlock(&wh) {
                 if on {
                     w.start();
                 } else {
@@ -6493,7 +7153,7 @@ fn dock_hop(
         let tx = tx_cmd.clone();
         let wh = wakeword_handle.clone();
         dashboard.on_set_wakeword_sensitivity(move |v| {
-            if let Some(ref w) = wh {
+            if let Some(ref w) = *mlock(&wh) {
                 w.set_sensitivity(v as u32);
             }
             let _ = tx.try_send(OrchestratorCommand::SetWakewordSensitivity(v as u32));
@@ -6510,7 +7170,7 @@ fn dock_hop(
             }
             // Live-wires the background voice gate; the foreground
             // segmenter picks it up when its mic opens.
-            if let Some(ref w) = wh {
+            if let Some(ref w) = *mlock(&wh) {
                 w.set_vad_sensitivity(v);
             }
         });
@@ -6796,6 +7456,64 @@ fn dock_hop(
             }
         });
     }
+    /// Export one history turn into `dest_dir`.
+    ///
+    /// `with_text = false` is the "audio only" export: the wav is copied and
+    /// NO `.txt` is written beside it. Returns the exported wav path (None when
+    /// the turn has no audio on disk). Reveals the result in Explorer/xdg-open
+    /// so the user sees where it landed.
+    fn export_history_turn(
+        dest_dir: &std::path::Path,
+        id: &str,
+        created_ms: u64,
+        text: &str,
+        audio: Option<std::path::PathBuf>,
+        with_text: bool,
+    ) -> Option<std::path::PathBuf> {
+        let stamp =
+            quickstt_core::history::display_label(created_ms, quickstt_core::history::now_ms());
+        let base = format!("{}_{}", stamp.replace([':', '/'], "-"), id);
+        let wav_dest = dest_dir.join(format!("{base}.wav"));
+        let exported = match audio {
+            Some(src) => match std::fs::copy(&src, &wav_dest) {
+                Ok(_) => Some(wav_dest.clone()),
+                Err(e) => {
+                    log_line(&format!("history: audio export failed: {e}"));
+                    None
+                }
+            },
+            None => {
+                log_line(&format!("history: turn {id} has no audio to export"));
+                None
+            }
+        };
+        if with_text {
+            let txt_dest = dest_dir.join(format!("{base}.txt"));
+            if let Err(e) = std::fs::write(&txt_dest, text.as_bytes()) {
+                log_line(&format!("history: text export failed: {e}"));
+            }
+        }
+        log_line(&format!(
+            "history: exported turn {id} -> {} (audio={}, text={with_text})",
+            dest_dir.display(),
+            exported.is_some()
+        ));
+        #[cfg(target_os = "windows")]
+        if let Some(p) = &exported {
+            let _ = std::process::Command::new("explorer")
+                .arg(format!("/select,{}", p.display()))
+                .spawn();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = std::process::Command::new("xdg-open")
+                .arg(dest_dir.as_os_str())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+        exported
+    }
     {
         let state = state.clone();
         let menu_idx = history_menu_idx.clone();
@@ -6821,44 +7539,216 @@ fn dock_hop(
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(quickstt_core::history::history_dir);
             let _ = std::fs::create_dir_all(&dest_dir);
-            let stamp = quickstt_core::history::display_label(created_ms, quickstt_core::history::now_ms());
-            let base = format!("{}_{}", stamp.replace([':', '/'], "-"), id);
-            let wav_dest = dest_dir.join(format!("{base}.wav"));
-            let txt_dest = dest_dir.join(format!("{base}.txt"));
-            let mut copied_audio = false;
-            if let Some(src) = audio {
-                if let Err(e) = std::fs::copy(&src, &wav_dest) {
-                    log_line(&format!("history: audio export failed: {e}"));
-                } else {
-                    copied_audio = true;
-                }
-            }
-            if let Err(e) = std::fs::write(&txt_dest, text.as_bytes()) {
-                log_line(&format!("history: text export failed: {e}"));
-            }
-            log_line(&format!(
-                "history: exported turn {i} -> {} (audio={copied_audio})",
-                dest_dir.display()
-            ));
-            // Show the user where it landed.
-            #[cfg(target_os = "windows")]
-            if copied_audio {
-                let _ = std::process::Command::new("explorer")
-                    .arg(format!("/select,{}", wav_dest.display()))
-                    .spawn();
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = std::process::Command::new("xdg-open")
-                    .arg(dest_dir.as_os_str())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn();
-            }
+            export_history_turn(&dest_dir, &id, created_ms, &text, audio, true);
             *mlock(&menu_idx) = -1;
             *mlock(&dirty) = true;
         });
     }
+    {
+        // Audio-only export: the wav with NO transcript beside it.
+        let state = state.clone();
+        let menu_idx = history_menu_idx.clone();
+        let dirty = history_dirty.clone();
+        dashboard.on_history_download_audio(move |i| {
+            let payload = match state.lock() {
+                Ok(s) => s.history.get(i as usize).map(|it| {
+                    (
+                        it.id.clone(),
+                        it.created_ms,
+                        quickstt_core::history::audio_path(it),
+                    )
+                }),
+                Err(_) => None,
+            };
+            let Some((id, created_ms, audio)) = payload else { return };
+            if audio.is_none() {
+                log_line(&format!("history: turn {id} has no audio — nothing to export"));
+                return;
+            }
+            let dest_dir = state
+                .lock()
+                .ok()
+                .map(|s| s.settings.recording_dir.clone())
+                .filter(|d| !d.trim().is_empty())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(quickstt_core::history::history_dir);
+            let _ = std::fs::create_dir_all(&dest_dir);
+            export_history_turn(&dest_dir, &id, created_ms, "", audio, false);
+            *mlock(&menu_idx) = -1;
+            *mlock(&dirty) = true;
+        });
+    }
+    {
+        // Selection mode on/off. Leaving the mode clears the selection so the
+        // next "Select turns" starts from a clean slate (and the UI's row
+        // checkboxes all reset).
+        let selecting = history_selecting.clone();
+        let selected = history_selected.clone();
+        let dirty = history_dirty.clone();
+        dashboard.on_history_set_selecting(move |on| {
+            *mlock(&selecting) = on;
+            if !on {
+                mlock(&selected).clear();
+            }
+            *mlock(&dirty) = true;
+        });
+    }
+    {
+        // Tick/untick one row (index → id). Ids keep the selection correct
+        // when rows shift after a delete.
+        let state = state.clone();
+        let selected = history_selected.clone();
+        let dirty = history_dirty.clone();
+        dashboard.on_history_set_selected(move |i, on| {
+            let id = match state.lock() {
+                Ok(s) => s
+                    .history
+                    .get(i as usize)
+                    .map(|it| it.id.clone())
+                    .unwrap_or_default(),
+                Err(_) => return,
+            };
+            if id.is_empty() {
+                return;
+            }
+            if on {
+                mlock(&selected).insert(id);
+            } else {
+                mlock(&selected).remove(&id);
+            }
+            *mlock(&dirty) = true;
+        });
+    }
+    {
+        // Select everything (or nothing). Covers every STORED turn — not just
+        // the rendered window — so bulk actions never miss rows past the cap.
+        let state = state.clone();
+        let selected = history_selected.clone();
+        let dirty = history_dirty.clone();
+        dashboard.on_history_select_all(move |on| {
+            let all: Vec<String> = match state.lock() {
+                Ok(s) => s.history.iter().map(|it| it.id.clone()).collect(),
+                Err(_) => return,
+            };
+            let mut set = mlock(&selected);
+            if on {
+                set.extend(all);
+            } else {
+                set.clear();
+            }
+            drop(set);
+            *mlock(&dirty) = true;
+        });
+    }
+    {
+        // Export the audio of every selected turn (wav only, one file per turn).
+        let state = state.clone();
+        let selected = history_selected.clone();
+        dashboard.on_history_download_selected(move || {
+            let (items, dest_dir) = {
+                let Ok(s) = state.lock() else { return };
+                let ids = mlock(&selected).clone();
+                let items: Vec<(String, u64, Option<std::path::PathBuf>)> = s
+                    .history
+                    .iter()
+                    .filter(|it| ids.contains(&it.id))
+                    .map(|it| {
+                        (
+                            it.id.clone(),
+                            it.created_ms,
+                            quickstt_core::history::audio_path(it),
+                        )
+                    })
+                    .collect();
+                let dir = s
+                    .settings
+                    .recording_dir
+                    .clone()
+                    .trim()
+                    .to_string();
+                (items, dir)
+            };
+            if items.is_empty() {
+                log_line("history: audio export — nothing selected");
+                return;
+            }
+            let dest_dir = if dest_dir.is_empty() {
+                quickstt_core::history::history_dir()
+            } else {
+                std::path::PathBuf::from(dest_dir)
+            };
+            let _ = std::fs::create_dir_all(&dest_dir);
+            let mut ok = 0usize;
+            for (id, created_ms, audio) in items {
+                if audio.is_none() {
+                    continue;
+                }
+                export_history_turn(&dest_dir, &id, created_ms, "", audio, false);
+                ok += 1;
+            }
+            log_line(&format!(
+                "history: audio-only export for {ok} selected turns -> {}",
+                dest_dir.display()
+            ));
+        });
+    }
+    {
+        // Delete the selected turns (audio files included).
+        let state = state.clone();
+        let selected = history_selected.clone();
+        let play_idx = history_play_idx.clone();
+        let menu_idx = history_menu_idx.clone();
+        let dirty = history_dirty.clone();
+        dashboard.on_history_delete_selected(move || {
+            let (removed, _) = {
+                let Ok(mut s) = state.lock() else { return };
+                let ids: Vec<String> = mlock(&selected).iter().cloned().collect();
+                (quickstt_core::history::delete_turns(&mut s.history, &ids), ids.len())
+            };
+            if removed > 0 {
+                history_player::stop();
+                *mlock(&play_idx) = -1;
+                *mlock(&menu_idx) = -1;
+                mlock(&selected).clear();
+                if let Ok(mut s) = state.lock() {
+                    s.history_seq += 1;
+                }
+                *mlock(&dirty) = true;
+                log_line(&format!(
+                    "history: deleted {removed} selected turns (audio removed)"
+                ));
+            }
+        });
+    }
+    {
+        // Delete EVERYTHING: every stored turn and every audio file. The UI
+        // makes the user confirm (two-step "Delete all"), so no dialog here.
+        let state = state.clone();
+        let selected = history_selected.clone();
+        let selecting = history_selecting.clone();
+        let play_idx = history_play_idx.clone();
+        let menu_idx = history_menu_idx.clone();
+        let dirty = history_dirty.clone();
+        dashboard.on_history_delete_all(move || {
+            let removed = {
+                let Ok(mut s) = state.lock() else { return };
+                quickstt_core::history::clear_all(&mut s.history)
+            };
+            history_player::stop();
+            *mlock(&play_idx) = -1;
+            *mlock(&menu_idx) = -1;
+            mlock(&selected).clear();
+            *mlock(&selecting) = false;
+            if let Ok(mut s) = state.lock() {
+                s.history_seq += 1;
+            }
+            *mlock(&dirty) = true;
+            log_line(&format!(
+                "history: deleted ALL {removed} turns (audio removed)"
+            ));
+        });
+    }
+
     {
         let menu_idx = history_menu_idx.clone();
         let dirty = history_dirty.clone();
@@ -6898,7 +7788,7 @@ fn dock_hop(
         let state = state.clone();
         let wh = wakeword_handle.clone();
         dashboard.on_toggle_wakeword_phrase(move |phrase: slint::SharedString, on: bool| {
-            if let Some(ref w) = wh {
+            if let Some(ref w) = *mlock(&wh) {
                 w.set_phrase_enabled(phrase.to_string(), on);
             }
             // Only community heads exist in the pipeline; legacy custom
@@ -6926,7 +7816,7 @@ fn dock_hop(
                 s.settings.snap_action = action;
                 let _ = s.settings.save_all();
             }
-            if let Some(ref w) = wh {
+            if let Some(ref w) = *mlock(&wh) {
                 w.set_transient_action(action);
             }
         });
@@ -6979,6 +7869,26 @@ fn dock_hop(
             if let Ok(mut s) = state.lock() {
                 s.catalog_lang_filter = v.to_string();
             }
+        });
+    }
+    {
+        // Recommendation priority: persist it, then re-score immediately so
+        // the Recommended badge and the reason text follow on the same click.
+        let state = state.clone();
+        let tx = tx_cmd.clone();
+        dashboard.on_set_model_priority(move |v: slint::SharedString| {
+            let p = match v.as_str() {
+                "Fastest" => 1u32,
+                "Most accurate" => 2u32,
+                _ => 0,
+            };
+            if let Ok(mut s) = state.lock() {
+                s.settings.model_priority = p;
+                let _ = s.settings.save_all();
+            }
+            // Re-score on the spot so the Recommended badge + reason follow
+            // the click instead of waiting for the next model/language change.
+            let _ = tx.try_send(OrchestratorCommand::RefreshRecommendation);
         });
     }
     {
@@ -7067,7 +7977,13 @@ fn dock_hop(
             let ww_enabled = s.wakeword_active
                 || (!s.settings.wake_word_mode.eq_ignore_ascii_case("Off")
                     && !s.settings.wake_word_mode.trim().is_empty());
-            if let Some(ref wh) = wakeword_handle {
+            let transient_armed = s.settings.transient_action != 2;
+            // Re-apply EVERY saved preference to the listener whenever it
+            // (re)appears, so a lazy respawn behaves exactly like the
+            // always-loaded one: sensitivity, VAD gate, phrases, clap action.
+            // When nothing is armed the listener stays released (see the
+            // reconcile path above).
+            if let Some(ref wh) = *mlock(&wakeword_handle) {
                 wh.set_sensitivity(s.settings.wakeword_sensitivity);
                 wh.set_vad_sensitivity(s.settings.vad_sensitivity);
                 // Precise community heads only (legacy customs quarantined:
@@ -7078,7 +7994,6 @@ fn dock_hop(
                 wh.set_transient_action(s.settings.transient_action);
                 // Background mic runs whenever wakewords OR the clap are
                 // armed (claps work with wakewords fully off).
-                let transient_armed = s.settings.transient_action != 2;
                 if ww_enabled || transient_armed {
                     wh.start();
                 }
@@ -7103,10 +8018,13 @@ fn dock_hop(
     let state_sync = state.clone();
     let pill_sync = pill.as_weak();
     let dash_sync = dashboard.as_weak();
+    let dash_visible_sync = dash_visible.clone();
     let hist_play_idx = history_play_idx.clone();
     let hist_menu_idx = history_menu_idx.clone();
     let hist_copied = history_copied.clone();
     let hist_dirty = history_dirty.clone();
+    let hist_selected = history_selected.clone();
+    let hist_selecting = history_selecting.clone();
     let hist_toast_until = history_toast_until.clone();
     let hist_vec_tick = hist_vec_model.clone();
     let mut hist_model: Vec<HistRow> = Vec::new();
@@ -7129,6 +8047,13 @@ fn dock_hop(
             let Ok(s) = state_sync.lock() else { return };
             pill.set_pill_opacity((s.settings.active_opacity as f32 / 100.0).clamp(0.2, 1.0));
             pill.set_pill_radius(s.settings.pill_radius as f32);
+            // The dashboard spends most of its life hidden. Mirroring ~20
+            // properties at 20 Hz into an off-screen window was the only
+            // steady idle work in this loop; the history dirty flag stays set,
+            // so the first visible tick rebuilds everything anyway.
+            if !*mlock(&dash_visible_sync) {
+                return;
+            }
             dashboard.set_ui_opacity(s.settings.active_opacity.clamp(20, 100) as i32);
             dashboard.set_ui_pill_radius(s.settings.pill_radius.clamp(0, 25) as i32);
             // Recomputed per tick — the wakeword toggles can flip it live.
@@ -7225,11 +8150,16 @@ fn dock_hop(
                 let rows: Vec<HistRow> = s
                     .history
                     .iter()
+                    .take(DASHBOARD_HISTORY_ROWS)
                     .enumerate()
                     .map(|(i, it)| {
                         let dur_s = it.duration_ms as f32 / 1000.0;
                         let is_playing = play_i == i as i32 && playing_now;
                         let shown = if is_playing { pos_s } else { 0.0 };
+                        // Bulk-selection mirror (ids → rows). Rebuilt every
+                        // sync, so a delete that shifts rows keeps the right
+                        // boxes ticked.
+                        let selected_ids = mlock(&hist_selected).clone();
                         HistRow {
                             index: i as i32,
                             when: quickstt_core::history::display_label(it.created_ms, now_ms).into(),
@@ -7248,6 +8178,7 @@ fn dock_hop(
                             menu_open: menu_i == i as i32,
                             playing: is_playing,
                             copied: copied_i == i as i32,
+                            selected: selected_ids.contains(&it.id),
                             progress: if dur_s > 0.0 {
                                 (shown / dur_s).clamp(0.0, 1.0)
                             } else {
@@ -7268,6 +8199,7 @@ fn dock_hop(
                         || a.has_audio != b.has_audio
                         || a.menu_open != b.menu_open
                         || a.playing != b.playing
+                        || a.selected != b.selected
                         || a.copied != b.copied
                         || (a.progress - b.progress).abs() > 0.004
                 }
@@ -7281,6 +8213,27 @@ fn dock_hop(
                             hist_model[i] = r.clone();
                         }
                     }
+                }
+                // Bulk-selection mirror → dashboard. The set lives in Rust
+                // (ids, so it survives row shifts); the UI only ever sees the
+                // count, the all-selected flag and this tick's row flags.
+                let sel_n = mlock(&hist_selected).len() as i32;
+                let selecting = *mlock(&hist_selecting);
+                if dashboard.get_history_selecting() != selecting {
+                    dashboard.set_history_selecting(selecting);
+                }
+                if dashboard.get_history_selected_count() != sel_n {
+                    dashboard.set_history_selected_count(sel_n);
+                }
+                let all_sel = selecting
+                    && !s.history.is_empty()
+                    && mlock(&hist_selected).len() == s.history.len();
+                if dashboard.get_history_all_selected() != all_sel {
+                    dashboard.set_history_all_selected(all_sel);
+                }
+                let total = s.history.len() as i32;
+                if dashboard.get_history_total() != total {
+                    dashboard.set_history_total(total);
                 }
             }
             dashboard.set_show_waveform(s.settings.show_waveform);

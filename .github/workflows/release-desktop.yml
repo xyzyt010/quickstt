@@ -242,7 +242,8 @@ jobs:
 
           ### Install — Linux
           ```bash
-          wget -O /tmp/quickstt.deb https://github.com/__REPO__/releases/download/__VER__/quickstt_2.0.0.alpha.18-1_amd64.deb
+          # Any release asset: https://github.com/__REPO__/releases/download/__VER__/
+          wget -O /tmp/quickstt.deb https://github.com/__REPO__/releases/download/__VER__/quickstt_*_amd64.deb
           sudo apt install -y /tmp/quickstt.deb && quickstt &
           ```
           Or portable tarball:

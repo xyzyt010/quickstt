@@ -1,0 +1,472 @@
+// ═══════════════════════════════════════════════════════════════════════════
+//  First-run onboarding: five slides + a live animated demo of the app being
+//  used (a "clip" rendered in place, so nothing external has to ship).
+//
+//  Design rules carried over from the rest of the UI:
+//   * every glyph is DRAWN (paths / rectangles), never a font glyph — the
+//     mic, the caret, the check, the arrows. Identical pixels everywhere.
+//   * Skip is ALWAYS reachable: one click on the first slide finishes the
+//     tour with the defaults, exactly like the rest of the setup.
+//   * Nothing is persisted by the markup: Rust applies every choice through
+//     the same orchestrator commands the dashboard uses, so onboarding picks
+//     behave identically to dashboard picks (and survive the restart).
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { Button, CheckBox, ComboBox } from "std-widgets.slint";
+
+// Small round icon button (Back / Skip / Next footer + Skip top-right).
+component PillButton inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 38px;
+    min-width: 108px;
+    border-radius: 10px;
+    background: root.primary
+        ? (hit.has-hover ? #E4E4E4 : #FFFFFF)
+        : (hit.has-hover ? #242424 : #161616);
+    border-width: 1px;
+    border-color: root.primary ? #FFFFFF : (#303030);
+    opacity: root.enabled ? 1.0 : 0.45;
+    animate background { duration: 130ms; easing: ease-out; }
+    animate border-color { duration: 130ms; easing: ease-out; }
+
+    Text {
+        text: root.label;
+        font-size: 13px;
+        font-weight: 700;
+        color: root.primary ? #000000 : (root.danger ? #FF9A9A : #E6E6E6);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    hit := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+        mouse-cursor: root.enabled ? pointer : default;
+    }
+}
+
+// Progress dots: one per step, the current one stretches into a bar.
+component StepDots inherits HorizontalLayout {
+    in property <int> count: 5;
+    in property <int> current: 0;
+    spacing: 7px;
+    for i in count : Rectangle {
+        width: i == root.current ? 26px : 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: i <= root.current ? #FFFFFF : #333333;
+        animate width { duration: 180ms; easing: ease-out; }
+        animate background { duration: 180ms; easing: ease-out; }
+    }
+}
+
+export component OnboardingWidget inherits Window {
+    title: "Welcome to QuickSTT";
+    // Same blue mic as every other window / the exe / the tray.
+    icon: @image-url("../../assets/app_icon.svg");
+    preferred-width: 800px;
+    preferred-height: 580px;
+    min-width: 640px;
+    min-height: 520px;
+    background: #050505;
+
+    // ── state driven from Rust ──
+    in property <int> step: 0;
+    in property <[string]> languages: ["Auto"];
+    in property <int> selected-language: 0;
+    in property <[string]> models: [];
+    in property <int> selected-model: 0;
+    in property <string> recommend-reason: "";
+    in property <string> hardware-info: "";
+    in property <bool> wakeword-enabled: false;
+    in property <int> ctrl-space-output: 0;
+    in property <bool> history-enabled: true;
+    in property <string> version: "";
+
+    // ── actions (Rust applies + persists them) ──
+    callback next();
+    callback back();
+    callback skip();
+    callback set-language(string);
+    callback set-model(string);
+    callback set-wakeword(bool);
+    callback set-output(int);
+    callback set-history(bool);
+
+    // ── internal ──
+    property <int> steps: 5;
+    // "Clip" transport: the demo scene runs its own loop so the slide reads as
+    // a short recording of the app in use (pill → waveform → typed text).
+    property <int> demo_tick: 0;
+    property <bool> demo_playing: true;
+
+    Timer {
+        interval: 90ms;
+        running: root.step == 1 && root.demo_playing;
+        triggered => { root.demo_tick = root.demo_tick + 1; }
+    }
+
+    VerticalLayout {
+        padding: 26px;
+        spacing: 18px;
+
+        // ── Header: brand + Skip ──
+        HorizontalLayout {
+            spacing: 12px;
+            Image {
+                width: 34px;
+                height: 44px;
+                source: @image-url("../../assets/app_icon.svg");
+                // Gentle pulse so the brand feels alive without being noisy.
+                y: 0px;
+            }
+            VerticalLayout {
+                Text {
+                    text: "QuickSTT";
+                    font-size: 16px;
+                    font-weight: 700;
+                    color: #FFFFFF;
+                }
+                Text {
+                    text: root.version;
+                    font-size: 11px;
+                    color: #7A7A7A;
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            PillButton {
+                label: "Skip";
+                danger: true;
+                clicked => { root.skip(); }
+            }
+        }
+
+        // ── Title / subtitle per step ──
+        VerticalLayout {
+            spacing: 6px;
+            Text {
+                text: root.step == 0 ? "Dictate anywhere, offline." :
+                      root.step == 1 ? "How a turn works" :
+                      root.step == 2 ? "Choose your language" :
+                      root.step == 3 ? "Pick a speech model" :
+                      "Set your preferences";
+                font-size: 26px;
+                font-weight: 700;
+                color: #FFFFFF;
+            }
+            Text {
+                text: root.step == 0 ? "Hold Ctrl+Space, speak, and your words appear where you were typing. Everything runs on this PC — nothing is uploaded." :
+                      root.step == 1 ? "Here is a real turn, start to finish. The pill wakes, listens, and types the finished text into the app you were using." :
+                      root.step == 2 ? "Auto detects the spoken language when the model supports it. Models with a single language hide this choice entirely — and every model remembers its own setting." :
+                      root.step == 3 ? "A model that fits your machine and your language is pre-selected below. You can change it any time from Settings → Speech Models." :
+                      "Three choices, all changeable later. Defaults are shown; you are never locked in.";
+                font-size: 13px;
+                color: #9A9A9A;
+                wrap: word-wrap;
+            }
+        }
+
+        // ── Body ──
+        Rectangle {
+            horizontal-stretch: 1;
+            background: #0C0C0C;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: #1E1E1E;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 14px;
+
+                // ══ Step 0: brand hero ══
+                if root.step == 0 : VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 18px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 180px;
+                        // Concentric halo behind the mic logo: drawn rings, no
+                        // bitmap. The outer ring breathes on a slow cycle.
+                        Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 150px;
+                            height: 150px;
+                            border-radius: 75px;
+                            border-width: 1px;
+                            border-color: #FFFFFF14;
+                            opacity: 0.6 + 0.4 * sin(root.demo_tick * 90ms / 1s * 360deg);
+                        }
+                        Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 110px;
+                            height: 110px;
+                            border-radius: 55px;
+                            border-color: #FFFFFF22;
+                            border-width: 1px;
+                        }
+                        Image {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 62px;
+                            height: 80px;
+                            source: @image-url("../../assets/app_icon.svg");
+                        }
+                    }
+                    Text {
+                        text: "100% offline  ·  your voice never leaves this PC";
+                        font-size: 12px;
+                        color: #8E8E8E;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                // ══ Step 1: the animated "clip" ══
+                if root.step == 1 : VerticalLayout {
+                    spacing: 16px;
+
+                    // Mock target app: a window with a blinking caret and text
+                    // that "types" in — this is the payoff the user expects.
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 132px;
+                        border-radius: 10px;
+                        background: #101010;
+                        border-width: 1px;
+                        border-color: #242424;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 8px;
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Rectangle { width: 9px; height: 9px; border-radius: 5px; background: #3A3A3A; }
+                                Rectangle { width: 9px; height: 9px; border-radius: 5px; background: #3A3A3A; }
+                                Rectangle { width: 9px; height: 9px; border-radius: 5px; background: #3A3A3A; }
+                                Text { text: "notes.txt"; font-size: 10.5px; color: #6A6A6A; vertical-alignment: center; }
+                            }
+                            HorizontalLayout {
+                                spacing: 2px;
+                                Text {
+                                    text: "Let's ship the release notes";
+                                    font-size: 14px;
+                                    color: #EDEDED;
+                                    vertical-alignment: center;
+                                }
+                                // Caret: blinks while the text is "typing".
+                                Rectangle {
+                                    width: 2px;
+                                    height: 18px;
+                                    background: #FFFFFF;
+                                    opacity: mod(root.demo_tick, 2) == 0 ? 1.0 : 0.15;
+                                    animate opacity { duration: 90ms; }
+                                }
+                            }
+                        }
+                    }
+
+                    // The pill: idle → listening (capsule grows, mic turns red)
+                    // → done. Driven by the same demo clock, so it reads as one
+                    // continuous capture.
+                    HorizontalLayout {
+                        spacing: 16px;
+                        alignment: center;
+                        Rectangle {
+                            width: 120px;
+                            height: 52px;
+                            border-radius: 26px;
+                            background: #0F0F0F;
+                            border-width: 1px;
+                            border-color: #2A2A2A;
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 8px;
+                                Image {
+                                    width: 20px;
+                                    height: 26px;
+                                    source: @image-url("../../assets/mic_active.svg");
+                                }
+                                Rectangle {
+                                    width: 30px;
+                                    height: 12px;
+                                    border-radius: 6px;
+                                    background: #FFFFFF1A;
+                                }
+                            }
+                        }
+                        // Live waveform: 14 drawn bars driven by the demo clock
+                        // (sine + tick offset), the same shape as the pill's.
+                        HorizontalLayout {
+                            spacing: 4px;
+                            alignment: center;
+                            for i in 14 : Rectangle {
+                                width: 4px;
+                                height: 6px + 26px * abs(sin((root.demo_tick * 37 + i * 61) * 1deg));
+                                border-radius: 2px;
+                                background: #FFFFFF;
+                                animate height { duration: 90ms; easing: linear; }
+                            }
+                        }
+                    }
+
+                    // Clip progress + caption: makes the sequence read as a
+                    // recorded clip rather than an idle animation.
+                    VerticalLayout {
+                        spacing: 6px;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 4px;
+                            border-radius: 2px;
+                            background: #1A1A1A;
+                            Rectangle {
+                                width: parent.width * mod(root.demo_tick, 40) / 40;
+                                height: parent.height;
+                                border-radius: parent.border-radius;
+                                background: #FFFFFF;
+                            }
+                        }
+                        Text {
+                            text: root.step == 1 ? "Ctrl+Space held  ·  speaking  ·  released — text lands at the cursor" : "";
+                            font-size: 11.5px;
+                            color: #8E8E8E;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                // ══ Step 2: language ══
+                if root.step == 2 : VerticalLayout {
+                    spacing: 12px;
+                    Text { text: "Transcription language:"; font-size: 13px; color: #E6E6E6; }
+                    ComboBox {
+                        height: 42px;
+                        model: root.languages;
+                        current-index: root.selected-language;
+                        selected(v) => { root.set-language(v); }
+                    }
+                    Rectangle {
+                        background: #121212;
+                        border-radius: 8px;
+                        VerticalLayout {
+                            padding: 12px;
+                            Text {
+                                text: root.selected-language == 0
+                                    ? "Auto: the engine detects the spoken language from the audio."
+                                    : "Forced: this language is always used, even when another is spoken. Each model remembers its own choice.";
+                                font-size: 12px;
+                                color: #9A9A9A;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+
+                // ══ Step 3: model ══
+                if root.step == 3 : VerticalLayout {
+                    spacing: 12px;
+                    Rectangle {
+                        background: #121212;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: #2A2A2A;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 6px;
+                            Text {
+                                text: "Recommended for this PC";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #FFFFFF;
+                            }
+                            Text {
+                                text: root.recommend-reason;
+                                font-size: 11.5px;
+                                color: #9A9A9A;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: root.hardware-info;
+                                font-size: 11px;
+                                color: #6A6A6A;
+                            }
+                        }
+                    }
+                    Text { text: "Choose a model:"; font-size: 13px; color: #E6E6E6; }
+                    ComboBox {
+                        height: 42px;
+                        model: root.models;
+                        current-index: root.selected-model;
+                        selected(v) => { root.set-model(v); }
+                    }
+                }
+
+                // ══ Step 4: preferences ══
+                if root.step == 4 : VerticalLayout {
+                    spacing: 10px;
+                    Text { text: "Where finished text goes:"; font-size: 13px; color: #E6E6E6; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        for i in 3 : Rectangle {
+                            horizontal-stretch: 1;
+                            height: 54px;
+                            border-radius: 10px;
+                            background: root.ctrl-space-output == i ? #FFFFFF : #141414;
+                            border-width: 1px;
+                            border-color: root.ctrl-space-output == i ? #FFFFFF : #262626;
+                            animate background { duration: 130ms; easing: ease-out; }
+                            Text {
+                                text: i == 0 ? "Type it\n(where I'm typing)" : i == 1 ? "Clipboard\n(paste anywhere)" : "Show only\n(preview text)";
+                                font-size: 11.5px;
+                                font-weight: root.ctrl-space-output == i ? 700 : 500;
+                                color: root.ctrl-space-output == i ? #000000 : #B9B9B9;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            TouchArea { clicked => { root.set-output(i); } mouse-cursor: pointer; }
+                        }
+                    }
+                    CheckBox {
+                        height: 42px;
+                        text: "Back up every turn in History (text + audio)";
+                        checked: root.history-enabled;
+                        toggled => { root.set-history(self.checked); }
+                    }
+                    CheckBox {
+                        height: 42px;
+                        text: "Listen for wake words in the background";
+                        checked: root.wakeword-enabled;
+                        toggled => { root.set-wakeword(self.checked); }
+                    }
+                    Text {
+                        text: "Wake words load only while enabled, so keeping them off costs nothing — and turning them on later needs no restart.";
+                        font-size: 11.5px;
+                        color: #6A6A6A;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        // ── Footer: dots · Back · Next/Start ──
+        HorizontalLayout {
+            spacing: 12px;
+            StepDots { count: root.steps; current: root.step; }
+            Rectangle { horizontal-stretch: 1; }
+            PillButton {
+                label: "Back";
+                enabled: root.step > 0;
+                clicked => { root.back(); }
+            }
+            PillButton {
+                label: root.step >= root.steps - 1 ? "Start dictating" : "Next";
+                primary: true;
+                clicked => { root.next(); }
+            }
+        }
+    }
+}

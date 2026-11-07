@@ -1792,14 +1792,12 @@ fn transcribe_nemotron(
     let stem = cli.file_stem().and_then(|f| f.to_str()).unwrap_or("");
     let is_tcpp_cli = stem == "transcribe-cli" || stem == "transcribe";
 
-    let lang_code = if language.is_empty()
-        || language.eq_ignore_ascii_case("Auto")
-        || language.eq_ignore_ascii_case("English")
-    {
-        "en-US"
-    } else {
-        language
-    };
+    // Nemotron 3.5 Streaming is trained on 30 languages with in-model
+    // language ID. "Auto" (or an unmapped display name) maps to "auto" → the
+    // worker passes NULL and the model picks per segment; a forced language
+    // becomes a BCP-47 locale tag. Passing the raw display name ("German")
+    // used to reach the worker verbatim, which it rejects.
+    let lang_code = crate::models::catalog::nemotron_locale_code(language);
 
     // Q4_K_M is the working CPU quant: Q8_0 decodes to all-<unk> in the
     // shipped GGUF (verified 2026-09: Q4 gives clean JFK transcript, Q8 gives
@@ -1833,7 +1831,7 @@ fn transcribe_nemotron(
         // for broken Q8, and CPU is deterministic), correct locale.
         let output = nc
             .arg("-m").arg(&gguf)
-            .arg("--language").arg(lang_code)
+            .arg("--language").arg(&lang_code)
             .arg("--threads").arg("4")
             .arg("--backend").arg("cpu")
             .arg(wav_path)
@@ -1881,13 +1879,14 @@ fn transcribe_nemotron(
     let load_path: PathBuf = prefer_q4_gguf(model_dir)
         .unwrap_or_else(|| model_dir.to_path_buf());
     let load_key = load_path.clone();
+    let lang_arg = lang_code.clone();
     if session.loaded_model_dir.as_deref() != Some(model_dir) {
         let response = parakeet_request(
             session,
             json!({
                 "action": "load",
                 "model_path": load_path.to_string_lossy(),
-                "language": lang_code,
+                "language": lang_arg,
             }),
         )?;
         ensure_parakeet_ok(response, "load")?;

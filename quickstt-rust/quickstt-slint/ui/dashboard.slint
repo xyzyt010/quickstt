@@ -31,6 +31,8 @@ export struct HistRow {
     playing: bool,
     progress: float,
     copied: bool,
+    /// Selection checkbox state (bulk delete / download mode).
+    selected: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -322,6 +324,10 @@ component HistMenuItem inherits Rectangle {
 
 export component DashboardWidget inherits Window {
     title: "QuickSTT Control Center";
+    // Blue mic app icon: the title bar, the taskbar button and Alt+Tab all show
+    // the QuickSTT icon instead of the generic Slint/Rust one. (The exe itself
+    // carries the same icon via build.rs.)
+    icon: @image-url("../../assets/app_icon.svg");
     preferred-width: 940px;
     preferred-height: 700px;
     // Small windows must stay usable: the layout reflows (sidebar → icon rail)
@@ -349,6 +355,12 @@ export component DashboardWidget inherits Window {
     in property <int> selected-model: 0;
     in property <[string]> languages: ["Auto", "English", "German"];
     in property <int> selected-language: 0;
+    /// Shown INSTEAD of the language dropdown when the active model supports
+    /// only one language (e.g. "English only") — a picker with a single
+    /// choice is noise, so an explanatory label replaces it.
+    in property <string> language-note: "";
+    /// Recommendation priority (0 = Balanced, 1 = Fastest, 2 = Most accurate).
+    in property <int> model-priority: 0;
     in property <string> models-info: "Local, ultra-fast neural speech recognition. Runs 100% offline.";
 
     // Download & Progress Bar
@@ -430,9 +442,28 @@ export component DashboardWidget inherits Window {
     in property <string> recording-dir: "C:\\Users\\hemsh_sfya5gq\\Recordings";
     in property <string> app-version: "2.0.0-alpha.18 (Rust & Slint Edition)";
 
+    // ── Bulk history controls (History section) ──
+    /// Selection mode: rows swap their play circle for a checkbox so nothing
+    /// in the layout shifts. Rust owns the actual selected-id set.
+    in property <bool> history-selecting: false;
+    /// How many turns are currently selected (Rust counts the set).
+    in property <int> history-selected-count: 0;
+    /// Total stored turns (history may hold more than the rendered window,
+    /// so the header counts from Rust rather than the row model).
+    in property <int> history-total: 0;
+    /// True when every stored turn is selected (drives the "Select all" box).
+    in property <bool> history-all-selected: false;
+    /// Two-step guard for "Delete all": the first click arms the button
+    /// ("Tap again to confirm"), the second performs the wipe. A timer
+    /// disarms it after a few seconds so a stray click cannot nuke history
+    /// later on.
+    in-out property <bool> delete-all-armed: false;
+
     // Callbacks
     callback select-model(string);
     callback select-language(string);
+    /// Recommendation priority pick (0/1/2) — re-scores the Recommended badge.
+    callback set-model-priority(string);
     callback set-wakeword-enabled(bool);
     callback set-wakeword-sensitivity(int);
     callback set-vad-sensitivity(int);
@@ -460,6 +491,18 @@ export component DashboardWidget inherits Window {
     callback history-copy(int);
     callback history-delete(int);
     callback history-download(int);
+    // Audio-only export (wav, no .txt) — the ⋮ menu's second download entry.
+    callback history-download-audio(int);
+    // Bulk selection: set/clear one row, select/deselect every row, then act
+    // on the selection (delete or export). Rust keeps the selected id set, so
+    // it survives row rebuilds and stays correct when history shifts.
+    callback history-set-selected(int, bool);
+    callback history-set-selecting(bool);
+    callback history-select-all(bool);
+    callback history-delete-selected();
+    callback history-download-selected();
+    // Nuclear option: delete EVERY stored turn (audio included).
+    callback history-delete-all();
     callback history-menu(int, bool);
     callback set-show-waveform(bool);
     callback set-waveform-sensitivity(int);
@@ -728,6 +771,39 @@ export component DashboardWidget inherits Window {
                         }
                     }
 
+                    // Navigation Item 5: History (all transcriptions + audio)
+                    Rectangle {
+                        height: 48px;
+                        border-radius: 8px;
+                        background: root.active-tab == 5 ? #1A1A1A : (tab5_touch.has-hover ? #0E0E0E : transparent);
+                        border-width: root.active-tab == 5 ? 1px : 0px;
+                        border-color: #FFFFFF;
+
+                        HorizontalLayout {
+                            padding-left: root.rail-active ? 0px : 12px;
+                            spacing: root.rail-active ? 0px : 10px;
+                            Text {
+                                text: "🗂";
+                                font-size: 15px;
+                                color: root.active-tab == 5 ? #FFFFFF : #9A9A9A;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "History";
+                                visible: !root.rail-active;
+
+                                font-size: 13px;
+                                font-weight: root.active-tab == 5 ? 700 : 500;
+                                color: root.active-tab == 5 ? #FFFFFF : #9A9A9A;
+                                vertical-alignment: center;
+                            }
+                        }
+                        tab5_touch := TouchArea {
+                            clicked => { root.active-tab = 5; }
+                            mouse-cursor: pointer;
+                        }
+                    }
+
                     // Spacer
                     Rectangle { }
 
@@ -813,15 +889,11 @@ export component DashboardWidget inherits Window {
                             color: #9A9A9A;
                         }
 
-                        // ── Transcript History (top of General) ──
-                        // Every finished turn with its audio: a round play /
-                        // pause control, a drag-to-seek timeline with the
-                        // elapsed/total clock, the transcript, and a right-hand
-                        // action cluster (copy with a green ✓ flash, delete,
-                        // and ⋮ which opens a floating menu with copy /
-                        // download / delete). Every glyph is DRAWN, so rows
-                        // render identically on Windows and Linux, and every
-                        // button answers hover/press with a short animation.
+                        // ── History moved to its own section ──
+                        // Everything that used to live at the top of General
+                        // (turns, audio, exports, bulk delete) now lives in the
+                        // dedicated History section, so this tab stays about
+                        // behaviour and recording settings.
                         Rectangle {
                             background: #0E0E0E;
                             border-radius: 10px;
@@ -832,220 +904,35 @@ export component DashboardWidget inherits Window {
                                 padding: 16px;
                                 spacing: 12px;
 
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Text {
-                                        text: "Transcript History";
-                                        font-size: 14px;
-                                        font-weight: 600;
-                                        color: #FFFFFF;
-                                        vertical-alignment: center;
-                                    }
-                                    Text {
-                                        text: root.history-items.length == 0 ? "" : root.history-items.length + " turns";
-                                        font-size: 11px;
-                                        color: #8E8E8E;
-                                        vertical-alignment: center;
-                                    }
-                                    Rectangle { horizontal-stretch: 1; }
-                                    // Backup toggle: OFF stops new turns from
-                                    // being recorded (existing rows stay).
-                                    CheckBox {
-                                        height: 40px;
-                                        text: root.rail-mode ? "Back up" : "Back up new turns";
-                                        checked: root.history-enabled;
-                                        toggled => { root.set-history-enabled(self.checked); }
-                                    }
+                                Text {
+                                    text: "Transcription History";
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    color: #FFFFFF;
                                 }
-
-                                if root.history-items.length == 0 : Text {
-                                    text: "No transcriptions yet. Hold Ctrl+Space and speak — every finished turn lands here with its audio.";
+                                Text {
+                                    text: "Every finished turn — transcript and audio — is kept in the dedicated History section. There you can play it back, copy or export the audio and text, select turns in bulk, and delete everything.";
                                     font-size: 12px;
                                     color: #9A9A9A;
                                     wrap: word-wrap;
                                 }
-
-                                for item[i] in root.history-items : Rectangle {
-                                    background: card_touch.has-hover ? #101010 : #0A0A0A;
-                                    border-radius: 10px;
-                                    border-width: 1px;
-                                    border-color: card_touch.has-hover ? #2A2A2A : #1C1C1C;
-                                    animate background { duration: 150ms; easing: ease-out; }
-                                    animate border-color { duration: 150ms; easing: ease-out; }
-
-                                    // Whole-card hover feedback. Declared first so
-                                    // every control below stays on top of it.
-                                    card_touch := TouchArea {
-                                        mouse-cursor: default;
+                                Rectangle {
+                                    width: 176px;
+                                    height: 36px;
+                                    border-radius: 8px;
+                                    background: go_hist.has-hover ? #2A2A2A : #FFFFFF;
+                                    animate background { duration: 130ms; easing: ease-out; }
+                                    Text {
+                                        text: "Open History →";
+                                        font-size: 12.5px;
+                                        font-weight: 700;
+                                        color: go_hist.has-hover ? #FFFFFF : #000000;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
                                     }
-
-                                    VerticalLayout {
-                                        padding: 12px;
-                                        spacing: 9px;
-
-                                        // ── Line 1: play · when ───────── actions ──
-                                        HorizontalLayout {
-                                            spacing: 9px;
-
-                                            // Play / pause — the primary control.
-                                            // 44x44 fingertip target with a 36px
-                                            // visual circle (was 32x32).
-                                            Rectangle {
-                                                width: root.tap-size;
-                                                height: root.tap-size;
-                                                opacity: item.has_audio ? 1.0 : 0.4;
-
-                                                Rectangle {
-                                                    x: (parent.width - self.width) / 2;
-                                                    y: (parent.height - self.height) / 2;
-                                                    width: play_touch.pressed ? 31px : 36px;
-                                                    height: play_touch.pressed ? 31px : 36px;
-                                                    border-radius: 18px;
-                                                    background: item.playing ? #FFFFFF : (play_touch.has-hover ? #202020 : #141414);
-                                                    border-width: 1px;
-                                                    border-color: item.playing ? #FFFFFF : (play_touch.has-hover ? #303030 : #202020);
-                                                    animate background { duration: 130ms; easing: ease-out; }
-                                                    animate border-color { duration: 130ms; easing: ease-out; }
-                                                    animate width { duration: 90ms; easing: ease-out; }
-                                                    animate height { duration: 90ms; easing: ease-out; }
-                                                }
-                                                IconPlay {
-                                                    x: 8px;
-                                                    y: 8px;
-                                                    visible: !item.playing;
-                                                    tint: play_touch.has-hover ? #FFFFFF : #E6E6E6;
-                                                }
-                                                IconPause {
-                                                    x: 8px;
-                                                    y: 8px;
-                                                    visible: item.playing;
-                                                }
-                                                play_touch := TouchArea {
-                                                    enabled: item.has_audio;
-                                                    clicked => { root.history-play(i); }
-                                                    mouse-cursor: item.has_audio ? pointer : default;
-                                                }
-                                            }
-
-                                            Text {
-                                                text: item.when;
-                                                font-size: 11.5px;
-                                                color: #8E8E8E;
-                                                vertical-alignment: center;
-                                            }
-
-                                            Rectangle { horizontal-stretch: 1; }
-
-                                            // Copy transcript — flips to a green ✓ for a beat.
-                                            HistButton {
-                                                kind: 0;
-                                                copied: item.copied;
-                                                clicked => { root.history-copy(i); }
-                                            }
-
-                                            // Delete turn (instant; the ⋮ menu repeats it).
-                                            HistButton {
-                                                kind: 1;
-                                                rest-plate: #131313;
-                                                hover-plate: #2A1414;
-                                                rest-tint: #9A9A9A;
-                                                hover-tint: #FF9A9A;
-                                                clicked => { root.history-delete(i); }
-                                            }
-
-                                            // ⋮ — opens the floating action menu.
-                                            more_btn := HistButton {
-                                                kind: 2;
-                                                active: root.history-menu-idx == i;
-                                                clicked => {
-                                                    if (root.history-menu-idx == i) {
-                                                        root.history-menu(i, false);
-                                                        root.history-menu-idx = -1;
-                                                    } else {
-                                                        root.hist-menu-x = more_btn.absolute-position.x + more_btn.width;
-                                                        root.hist-menu-y = more_btn.absolute-position.y + more_btn.height + 6px;
-                                                        root.hist-menu-grown = false;
-                                                        root.history-menu-idx = i;
-                                                        root.history-menu(i, true);
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        // ── Lines 2 & 3: transcript + timeline ──
-                                        VerticalLayout {
-                                            padding-left: 53px;
-                                            spacing: 9px;
-
-                                            Text {
-                                                text: item.text;
-                                                font-size: 12.5px;
-                                                color: #EDEDED;
-                                                wrap: word-wrap;
-                                            }
-
-                                            HorizontalLayout {
-                                                spacing: 10px;
-
-                                                // Drag-to-seek timeline: 20px grab area,
-                                                // 4px track that thickens on hover with a
-                                                // round handle; the played part is white.
-                                                Rectangle {
-                                                    horizontal-stretch: 1;
-                                                    height: 34px;
-
-                                                    Rectangle {
-                                                        y: (parent.height - self.height) / 2;
-                                                        width: parent.width;
-                                                        height: seek_touch.has-hover || item.playing ? 6px : 4px;
-                                                        border-radius: seek_touch.has-hover || item.playing ? 3px : 2px;
-                                                        background: #242424;
-                                                        animate height { duration: 120ms; easing: ease-out; }
-                                                        animate border-radius { duration: 120ms; easing: ease-out; }
-
-                                                        Rectangle {
-                                                            width: parent.width * item.progress;
-                                                            height: parent.height;
-                                                            border-radius: parent.border-radius;
-                                                            background: #FFFFFF;
-                                                        }
-
-                                                        Rectangle {
-                                                            x: clamp(parent.width * item.progress - 7px, 0px, parent.width - 14px);
-                                                            y: (parent.height - self.height) / 2;
-                                                            width: 14px;
-                                                            height: 14px;
-                                                            border-radius: 7px;
-                                                            background: #FFFFFF;
-                                                            visible: item.has_audio && (item.progress > 0.001 || item.playing);
-                                                            opacity: seek_touch.has-hover || item.playing ? 1.0 : 0.0;
-                                                            animate opacity { duration: 120ms; easing: ease-out; }
-                                                        }
-                                                    }
-                                                    seek_touch := TouchArea {
-                                                        enabled: item.has_audio;
-                                                        clicked => { root.history-seek(i, clamp(self.mouse-x / self.width, 0.0, 1.0)); }
-                                                        moved => {
-                                                            if (self.pressed) {
-                                                                root.history-seek(i, clamp(self.mouse-x / self.width, 0.0, 1.0));
-                                                            }
-                                                        }
-                                                        mouse-cursor: item.has_audio ? pointer : default;
-                                                    }
-                                                }
-
-                                                // Elapsed / total clock, right of the bar.
-                                                Text {
-                                                    text: item.playing ? (item.pos + " / " + item.dur) : item.dur;
-                                                    font-size: 11px;
-                                                    color: item.playing ? #FFFFFF : #8E8E8E;
-                                                    vertical-alignment: center;
-                                                    min-width: 84px;
-                                                    horizontal-alignment: right;
-                                                    animate color { duration: 150ms; }
-                                                }
-                                            }
-                                        }
+                                    go_hist := TouchArea {
+                                        clicked => { root.active-tab = 5; }
+                                        mouse-cursor: pointer;
                                     }
                                 }
                             }
@@ -1376,11 +1263,35 @@ export component DashboardWidget inherits Window {
                                 HorizontalLayout {
                                     spacing: 12px;
                                     Text { text: "Active Language:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
-                                    ComboBox {
+                                    // Multi-language models get the picker
+                                    // (Auto included only where the engine
+                                    // can actually detect language). Models
+                                    // with a single language get a label
+                                    // instead of a one-choice dropdown.
+                                    if root.languages.length > 1 : ComboBox {
                                         height: 40px;
                                         model: root.languages;
                                         current-index: root.selected-language;
                                         selected(v) => { root.select-language(v); }
+                                    }
+                                    if root.languages.length <= 1 : Text {
+                                        text: root.language-note;
+                                        font-size: 13px;
+                                        color: #9A9A9A;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Recommendation priority: what the
+                                // "Recommended" badge should optimise for.
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text { text: "Optimise for:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
+                                    ComboBox {
+                                        height: 40px;
+                                        model: ["Balanced", "Fastest", "Most accurate"];
+                                        current-index: root.model-priority;
+                                        selected(v) => { root.set-model-priority(v); }
                                     }
                                 }
 
@@ -2019,6 +1930,424 @@ export component DashboardWidget inherits Window {
                         }
                     }
 
+                            // ══════════════════════════════════════════════════════════════════
+                            // TAB 5: TRANSCRIPTION HISTORY
+                            // ══════════════════════════════════════════════════════════════════
+                            if root.active-tab == 5 : VerticalLayout {
+                                padding: 20px;
+                                spacing: 16px;
+
+                                Text {
+                                    text: "Transcription History";
+                                    font-size: 18px;
+                                    font-weight: 700;
+                                    color: #FFFFFF;
+                                }
+                                Text {
+                                    text: "Every turn you have dictated, newest first, with its audio. Play it back, copy or export it, select turns in bulk, or delete everything.";
+                                    font-size: 12px;
+                                    color: #9A9A9A;
+                                    wrap: word-wrap;
+                                }
+
+                                                    // ── Transcription History (its own section) ──
+                                                    // Every finished turn with its audio: a round play /
+                                                    // pause control, a drag-to-seek timeline with the
+                                                    // elapsed/total clock, the transcript, and a right-hand
+                                                    // action cluster (copy with a green ✓ flash, delete,
+                                                    // and ⋮ which opens a floating menu with copy /
+                                                    // download / delete). Every glyph is DRAWN, so rows
+                                                    // render identically on Windows and Linux, and every
+                                                    // button answers hover/press with a short animation.
+                                                    Rectangle {
+                                                        background: #0E0E0E;
+                                                        border-radius: 10px;
+                                                        border-width: 1px;
+                                                        border-color: #262626;
+
+                                                        VerticalLayout {
+                                                            padding: 16px;
+                                                            spacing: 12px;
+
+                                                            HorizontalLayout {
+                                                                spacing: 8px;
+                                                                Text {
+                                                                    text: "Transcript History";
+                                                                    font-size: 14px;
+                                                                    font-weight: 600;
+                                                                    color: #FFFFFF;
+                                                                    vertical-alignment: center;
+                                                                }
+                                                                Text {
+                                                                    text: root.history-total == 0 ? "" : root.history-total + " turns";
+                                                                    font-size: 11px;
+                                                                    color: #8E8E8E;
+                                                                    vertical-alignment: center;
+                                                                }
+                                                                Rectangle { horizontal-stretch: 1; }
+
+                                                                // ── Bulk controls ──
+                                                                // "Select turns" enters selection mode (each
+                                                                // row swaps its play circle for a checkbox,
+                                                                // so nothing in the layout moves). "Delete
+                                                                // all" is deliberately two-step — the first
+                                                                // click arms it, the second wipes every
+                                                                // stored turn and its audio — and a timer
+                                                                // disarms it again, so no modal is needed
+                                                                // and history can never be nuked by one
+                                                                // stray click.
+                                                                CheckBox {
+                                                                    height: 40px;
+                                                                    text: root.rail-mode ? "Select" : "Select turns";
+                                                                    checked: root.history-selecting;
+                                                                    toggled => { root.history-set-selecting(self.checked); }
+                                                                }
+                                                                Rectangle {
+                                                                    width: 140px;
+                                                                    height: 40px;
+                                                                    border-radius: 8px;
+                                                                    background: root.delete-all-armed ? #3A1414 : (del_all_touch.has-hover ? #2A1414 : #161616);
+                                                                    border-width: 1px;
+                                                                    border-color: root.delete-all-armed ? #FF6A6A : #3A2020;
+                                                                    animate background { duration: 130ms; easing: ease-out; }
+                                                                    animate border-color { duration: 130ms; easing: ease-out; }
+                                                                    Text {
+                                                                        text: root.delete-all-armed ? "Tap again to confirm" : "Delete all";
+                                                                        font-size: 12.5px;
+                                                                        font-weight: 700;
+                                                                        color: #FF9A9A;
+                                                                        horizontal-alignment: center;
+                                                                        vertical-alignment: center;
+                                                                        overflow: elide;
+                                                                    }
+                                                                    del_all_touch := TouchArea {
+                                                                        clicked => {
+                                                                            if (root.delete-all-armed) {
+                                                                                root.history-delete-all();
+                                                                                root.delete-all-armed = false;
+                                                                            } else {
+                                                                                root.delete-all-armed = true;
+                                                                            }
+                                                                        }
+                                                                        mouse-cursor: pointer;
+                                                                    }
+                                                                }
+                                                                // Disarm "Delete all" a few seconds after
+                                                                // arming so a forgotten click stays harmless.
+                                                                Timer {
+                                                                    interval: 5s;
+                                                                    running: root.delete-all-armed;
+                                                                    triggered => { root.delete-all-armed = false; }
+                                                                }
+                                                                // Backup toggle: OFF stops new turns from
+                                                                // being recorded (existing rows stay).
+                                                                CheckBox {
+                                                                    height: 40px;
+                                                                    text: root.rail-mode ? "Back up" : "Back up new turns";
+                                                                    checked: root.history-enabled;
+                                                                    toggled => { root.set-history-enabled(self.checked); }
+                                                                }
+                                                            }
+
+                                                            // Selection action bar: counts, select-all, and
+                                                            // the two bulk exports/deletes. Only present in
+                                                            // selection mode — normal browsing never sees it.
+                                                            if root.history-selecting : HorizontalLayout {
+                                                                spacing: 8px;
+                                                                Text {
+                                                                    text: root.history-selected-count + " selected";
+                                                                    font-size: 12px;
+                                                                    color: #E6E6E6;
+                                                                    vertical-alignment: center;
+                                                                    min-width: 78px;
+                                                                }
+                                                                CheckBox {
+                                                                    height: 36px;
+                                                                    text: root.rail-mode ? "All" : "Select all";
+                                                                    checked: root.history-all-selected;
+                                                                    toggled => { root.history-select-all(self.checked); }
+                                                                }
+                                                                Rectangle { horizontal-stretch: 1; }
+                                                                Rectangle {
+                                                                    width: 150px;
+                                                                    height: 36px;
+                                                                    border-radius: 8px;
+                                                                    background: exp_touch.has-hover ? #242424 : #1A1A1A;
+                                                                    border-width: 1px;
+                                                                    border-color: #303030;
+                                                                    animate background { duration: 130ms; easing: ease-out; }
+                                                                    Text {
+                                                                        text: "Export audio";
+                                                                        font-size: 12.5px;
+                                                                        font-weight: 600;
+                                                                        color: #E6E6E6;
+                                                                        horizontal-alignment: center;
+                                                                        vertical-alignment: center;
+                                                                    }
+                                                                    exp_touch := TouchArea {
+                                                                        clicked => { root.history-download-selected(); }
+                                                                        mouse-cursor: pointer;
+                                                                    }
+                                                                }
+                                                                Rectangle {
+                                                                    width: 158px;
+                                                                    height: 36px;
+                                                                    border-radius: 8px;
+                                                                    background: del_sel_touch.has-hover ? #2A1414 : #1A1A1A;
+                                                                    border-width: 1px;
+                                                                    border-color: #3A2020;
+                                                                    animate background { duration: 130ms; easing: ease-out; }
+                                                                    Text {
+                                                                        text: "Delete selected";
+                                                                        font-size: 12.5px;
+                                                                        font-weight: 600;
+                                                                        color: #FF9A9A;
+                                                                        horizontal-alignment: center;
+                                                                        vertical-alignment: center;
+                                                                    }
+                                                                    del_sel_touch := TouchArea {
+                                                                        clicked => { root.history-delete-selected(); }
+                                                                        mouse-cursor: pointer;
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            if root.history-items.length == 0 : Text {
+                                                                text: root.history-selecting
+                                                                    ? "Nothing to select yet — every turn you dictate lands here with its audio."
+                                                                    : "No transcriptions yet. Hold Ctrl+Space and speak — every finished turn lands here with its audio.";
+                                                                font-size: 12px;
+                                                                color: #9A9A9A;
+                                                                wrap: word-wrap;
+                                                            }
+
+                                                            for item[i] in root.history-items : Rectangle {
+                                                                background: card_touch.has-hover ? #101010 : #0A0A0A;
+                                                                border-radius: 10px;
+                                                                border-width: 1px;
+                                                                border-color: card_touch.has-hover ? #2A2A2A : #1C1C1C;
+                                                                animate background { duration: 150ms; easing: ease-out; }
+                                                                animate border-color { duration: 150ms; easing: ease-out; }
+
+                                                                // Whole-card hover feedback. Declared first so
+                                                                // every control below stays on top of it.
+                                                                card_touch := TouchArea {
+                                                                    mouse-cursor: default;
+                                                                }
+
+                                                                VerticalLayout {
+                                                                    padding: 12px;
+                                                                    spacing: 9px;
+
+                                                                    // ── Line 1: play · when ───────── actions ──
+                                                                    HorizontalLayout {
+                                                                        spacing: 9px;
+
+                                                                        // ── Selection checkbox ──
+                                                                        // Sits exactly where the play circle
+                                                                        // sits (selection mode swaps them),
+                                                                        // so enabling selection never shifts
+                                                                        // the transcript or the timeline.
+                                                                        Rectangle {
+                                                                            width: root.tap-size;
+                                                                            height: root.tap-size;
+                                                                            visible: root.history-selecting;
+
+                                                                            Rectangle {
+                                                                                x: (parent.width - self.width) / 2;
+                                                                                y: (parent.height - self.height) / 2;
+                                                                                width: sel_touch.pressed ? 24px : 28px;
+                                                                                height: sel_touch.pressed ? 24px : 28px;
+                                                                                border-radius: 8px;
+                                                                                background: item.selected ? #FFFFFF : (sel_touch.has-hover ? #202020 : #141414);
+                                                                                border-width: 1px;
+                                                                                border-color: item.selected ? #FFFFFF : (sel_touch.has-hover ? #303030 : #202020);
+                                                                                animate background { duration: 120ms; easing: ease-out; }
+                                                                                animate border-color { duration: 120ms; easing: ease-out; }
+                                                                                 // Drawn check (the same Path tick as the copy
+                                                                                 // flash) - no font glyph, identical on every OS.
+                                                                                 IconCheck {
+                                                                                     visible: item.selected;
+                                                                                     width: 22px;
+                                                                                     height: 22px;
+                                                                                     x: (parent.width - self.width) / 2;
+                                                                                     y: (parent.height - self.height) / 2;
+                                                                                     tint: #000000;
+                                                                                 }
+                                                                            }
+                                                                            sel_touch := TouchArea {
+                                                                                clicked => { root.history-set-selected(i, !item.selected); }
+                                                                                mouse-cursor: pointer;
+                                                                            }
+                                                                        }
+
+                                                                        // Play / pause — the primary control.
+                                                                        // 44x44 fingertip target with a 36px
+                                                                        // visual circle (was 32x32).
+                                                                        Rectangle {
+                                                                            width: root.tap-size;
+                                                                            height: root.tap-size;
+                                                                            visible: !root.history-selecting;
+                                                                            opacity: item.has_audio ? 1.0 : 0.4;
+
+                                                                            Rectangle {
+                                                                                x: (parent.width - self.width) / 2;
+                                                                                y: (parent.height - self.height) / 2;
+                                                                                width: play_touch.pressed ? 31px : 36px;
+                                                                                height: play_touch.pressed ? 31px : 36px;
+                                                                                border-radius: 18px;
+                                                                                background: item.playing ? #FFFFFF : (play_touch.has-hover ? #202020 : #141414);
+                                                                                border-width: 1px;
+                                                                                border-color: item.playing ? #FFFFFF : (play_touch.has-hover ? #303030 : #202020);
+                                                                                animate background { duration: 130ms; easing: ease-out; }
+                                                                                animate border-color { duration: 130ms; easing: ease-out; }
+                                                                                animate width { duration: 90ms; easing: ease-out; }
+                                                                                animate height { duration: 90ms; easing: ease-out; }
+                                                                            }
+                                                                            IconPlay {
+                                                                                x: 8px;
+                                                                                y: 8px;
+                                                                                visible: !item.playing;
+                                                                                tint: play_touch.has-hover ? #FFFFFF : #E6E6E6;
+                                                                            }
+                                                                            IconPause {
+                                                                                x: 8px;
+                                                                                y: 8px;
+                                                                                visible: item.playing;
+                                                                            }
+                                                                            play_touch := TouchArea {
+                                                                                enabled: item.has_audio;
+                                                                                clicked => { root.history-play(i); }
+                                                                                mouse-cursor: item.has_audio ? pointer : default;
+                                                                            }
+                                                                        }
+
+                                                                        Text {
+                                                                            text: item.when;
+                                                                            font-size: 11.5px;
+                                                                            color: #8E8E8E;
+                                                                            vertical-alignment: center;
+                                                                        }
+
+                                                                        Rectangle { horizontal-stretch: 1; }
+
+                                                                        // Copy transcript — flips to a green ✓ for a beat.
+                                                                        HistButton {
+                                                                            kind: 0;
+                                                                            copied: item.copied;
+                                                                            visible: !root.history-selecting;
+                                                                            clicked => { root.history-copy(i); }
+                                                                        }
+
+                                                                        // Delete turn (instant; the ⋮ menu repeats it).
+                                                                        HistButton {
+                                                                            kind: 1;
+                                                                            rest-plate: #131313;
+                                                                            hover-plate: #2A1414;
+                                                                            rest-tint: #9A9A9A;
+                                                                            hover-tint: #FF9A9A;
+                                                                            clicked => { root.history-delete(i); }
+                                                                        }
+
+                                                                        // ⋮ — opens the floating action menu.
+                                                                        more_btn := HistButton {
+                                                                            kind: 2;
+                                                                            active: root.history-menu-idx == i;
+                                                                            visible: !root.history-selecting;
+                                                                            clicked => {
+                                                                                if (root.history-menu-idx == i) {
+                                                                                    root.history-menu(i, false);
+                                                                                    root.history-menu-idx = -1;
+                                                                                } else {
+                                                                                    root.hist-menu-x = more_btn.absolute-position.x + more_btn.width;
+                                                                                    root.hist-menu-y = more_btn.absolute-position.y + more_btn.height + 6px;
+                                                                                    root.hist-menu-grown = false;
+                                                                                    root.history-menu-idx = i;
+                                                                                    root.history-menu(i, true);
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+
+                                                                    // ── Lines 2 & 3: transcript + timeline ──
+                                                                    VerticalLayout {
+                                                                        padding-left: 53px;
+                                                                        spacing: 9px;
+
+                                                                        Text {
+                                                                            text: item.text;
+                                                                            font-size: 12.5px;
+                                                                            color: #EDEDED;
+                                                                            wrap: word-wrap;
+                                                                        }
+
+                                                                        HorizontalLayout {
+                                                                            spacing: 10px;
+
+                                                                            // Drag-to-seek timeline: 20px grab area,
+                                                                            // 4px track that thickens on hover with a
+                                                                            // round handle; the played part is white.
+                                                                            Rectangle {
+                                                                                horizontal-stretch: 1;
+                                                                                height: 34px;
+
+                                                                                Rectangle {
+                                                                                    y: (parent.height - self.height) / 2;
+                                                                                    width: parent.width;
+                                                                                    height: seek_touch.has-hover || item.playing ? 6px : 4px;
+                                                                                    border-radius: seek_touch.has-hover || item.playing ? 3px : 2px;
+                                                                                    background: #242424;
+                                                                                    animate height { duration: 120ms; easing: ease-out; }
+                                                                                    animate border-radius { duration: 120ms; easing: ease-out; }
+
+                                                                                    Rectangle {
+                                                                                        width: parent.width * item.progress;
+                                                                                        height: parent.height;
+                                                                                        border-radius: parent.border-radius;
+                                                                                        background: #FFFFFF;
+                                                                                    }
+
+                                                                                    Rectangle {
+                                                                                        x: clamp(parent.width * item.progress - 7px, 0px, parent.width - 14px);
+                                                                                        y: (parent.height - self.height) / 2;
+                                                                                        width: 14px;
+                                                                                        height: 14px;
+                                                                                        border-radius: 7px;
+                                                                                        background: #FFFFFF;
+                                                                                        visible: item.has_audio && (item.progress > 0.001 || item.playing);
+                                                                                        opacity: seek_touch.has-hover || item.playing ? 1.0 : 0.0;
+                                                                                        animate opacity { duration: 120ms; easing: ease-out; }
+                                                                                    }
+                                                                                }
+                                                                                seek_touch := TouchArea {
+                                                                                    enabled: item.has_audio;
+                                                                                    clicked => { root.history-seek(i, clamp(self.mouse-x / self.width, 0.0, 1.0)); }
+                                                                                    moved => {
+                                                                                        if (self.pressed) {
+                                                                                            root.history-seek(i, clamp(self.mouse-x / self.width, 0.0, 1.0));
+                                                                                        }
+                                                                                    }
+                                                                                    mouse-cursor: item.has_audio ? pointer : default;
+                                                                                }
+                                                                            }
+
+                                                                            // Elapsed / total clock, right of the bar.
+                                                                            Text {
+                                                                                text: item.playing ? (item.pos + " / " + item.dur) : item.dur;
+                                                                                font-size: 11px;
+                                                                                color: item.playing ? #FFFFFF : #8E8E8E;
+                                                                                vertical-alignment: center;
+                                                                                min-width: 84px;
+                                                                                horizontal-alignment: right;
+                                                                                animate color { duration: 150ms; }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                            }
                     // ══════════════════════════════════════════════════════════════════
                     // TAB 4: SYSTEM & UPDATES
                     // ══════════════════════════════════════════════════════════════════
@@ -2202,7 +2531,7 @@ export component DashboardWidget inherits Window {
             x: clamp(root.hist-menu-x - self.width, 10px, root.width - self.width - 10px);
             y: clamp(root.hist-menu-y + (root.hist-menu-grown ? 0px : 7px), 10px, root.height - self.height - 10px);
             width: 252px;
-            height: 155px;
+            height: 224px;
             opacity: root.hist-menu-grown ? 1.0 : 0.0;
             animate opacity { duration: 130ms; easing: ease-out; }
 
@@ -2260,6 +2589,17 @@ export component DashboardWidget inherits Window {
                     label: root.history-items[root.history-menu-idx].has_audio ? "Download audio + transcript" : "Download transcript";
                     clicked => {
                         root.history-download(root.history-menu-idx);
+                        root.history-menu-idx = -1;
+                    }
+                }
+
+                // Audio only: the wav with NO transcript beside it.
+                HistMenuItem {
+                    kind: 1;
+                    label: "Download audio only (no text)";
+                    visible: root.history-items[root.history-menu-idx].has_audio;
+                    clicked => {
+                        root.history-download-audio(root.history-menu-idx);
                         root.history-menu-idx = -1;
                     }
                 }

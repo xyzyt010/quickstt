@@ -593,9 +593,22 @@ pub fn display_name(desc: &ModelDescriptor) -> String {
     format!("{} ({}MB){}", desc.name, desc.size_mb, installed)
 }
 
+/// The multilingual list shared by every auto-detecting engine (Nemotron
+/// streaming, whisper multilingual, …). Display names; "Auto" is the first
+/// entry wherever the engine can detect language from the audio itself.
+pub const MULTILINGUAL_LANGUAGES: &[&str] = &[
+    "Auto", "English", "German", "French", "Spanish", "Italian", "Portuguese", "Dutch",
+    "Polish", "Russian", "Turkish", "Arabic", "Hindi", "Chinese", "Japanese",
+];
+
 /// Languages a model can transcribe, as UI display names. The first entry
-/// is the default. "Auto" means detect from audio (multilingual engines).
-/// English-only checkpoints expose exactly one entry.
+/// is the default ("Auto" wherever the engine detects language in-model).
+/// English-only checkpoints expose exactly one entry — the dashboard then
+/// hides the language dropdown entirely, because a one-choice picker is
+/// noise. Rules:
+///   * one entry            → single-language model, no dropdown
+///   * "Auto" + more        → auto-detect + force any listed language
+///   * more, without "Auto" → multi-language, auto NOT selectable
 pub fn supported_languages(desc: &ModelDescriptor) -> Vec<String> {
     if desc.name.contains("German") {
         return vec!["German".to_string()];
@@ -614,21 +627,28 @@ pub fn supported_languages(desc: &ModelDescriptor) -> Vec<String> {
     if matches!(desc.engine_family, EngineFamily::Qwen3Asr) {
         return vec!["Auto".to_string()];
     }
+    // Nemotron 3.5 ASR Streaming is trained on 30 languages with in-model
+    // language ID — it is NOT the English-only checkpoint it was registered
+    // as. Auto stays the default; forcing a language maps to a locale code.
+    if matches!(desc.engine_family, EngineFamily::Nemotron) {
+        return MULTILINGUAL_LANGUAGES.iter().map(|s| s.to_string()).collect();
+    }
     if matches!(desc.engine_family, EngineFamily::Whistle) {
         return ["Auto", "English", "German", "French", "Spanish", "Italian", "Dutch", "Polish"]
             .iter()
             .map(|s| s.to_string())
             .collect();
     }
-    // Canary 180M Flash: EN/DE/FR/ES (+ translation). First entry is default.
+    // Canary 180M Flash: EN/DE/FR/ES (+ translation). First entry is default;
+    // the GGUF worker has no in-model detector, so no "Auto" here.
     if matches!(desc.engine_family, EngineFamily::Canary) {
         return vec!["English", "German", "French", "Spanish"]
             .into_iter()
             .map(|s| s.to_string())
             .collect();
     }
-    // Nemotron streaming + Parakeet/Vosk/Moonshine/Photon/Canary-Qwen
-    // checkpoints ship English-only weights.
+    // Parakeet/Vosk/Moonshine/Photon/Canary-Qwen checkpoints ship
+    // English-only weights.
     if matches!(
         desc.engine_family,
         EngineFamily::ParakeetRust
@@ -637,7 +657,6 @@ pub fn supported_languages(desc: &ModelDescriptor) -> Vec<String> {
             | EngineFamily::SherpaOnnx
             | EngineFamily::NemoCTC
             | EngineFamily::NemoTransducer
-            | EngineFamily::Nemotron
             | EngineFamily::Photon
             | EngineFamily::CanaryQwen
     ) {
@@ -647,14 +666,22 @@ pub fn supported_languages(desc: &ModelDescriptor) -> Vec<String> {
     if desc.name.contains(" EN ") || desc.name.ends_with(" EN") {
         return vec!["English".to_string()];
     }
-    // Multilingual-capable (Whisper Large, Nemotron streaming, ...).
-    vec![
-        "Auto", "English", "German", "French", "Spanish", "Italian", "Portuguese", "Dutch",
-        "Polish", "Russian", "Turkish", "Arabic", "Hindi", "Chinese", "Japanese",
-    ]
-    .into_iter()
-    .map(|s| s.to_string())
-    .collect()
+    // Multilingual-capable (Whisper Large, ...): auto-detect plus forcing.
+    MULTILINGUAL_LANGUAGES.iter().map(|s| s.to_string()).collect()
+}
+
+/// True when the engine detects the spoken language from the audio itself
+/// (i.e. "Auto" is a real choice, not just a label for the single language).
+pub fn supports_auto_detect(desc: &ModelDescriptor) -> bool {
+    supported_languages(desc)
+        .first()
+        .map(|l| l == "Auto")
+        .unwrap_or(false)
+}
+
+/// True when the model has exactly one language — the UI hides the selector.
+pub fn is_single_language(desc: &ModelDescriptor) -> bool {
+    supported_languages(desc).len() <= 1
 }
 
 /// Hardware-aware model list: discrete-GPU machines see the two Whisper GPU
@@ -686,18 +713,85 @@ pub fn models_for_hardware(
         .collect()
 }
 
-/// Sophisticated best-model recommendation.
+/// What the user wants to optimise for. Previously the recommendation had one
+/// fixed weighting, so a user who asked for "fastest possible" got the same
+/// answer as one who asked for "most accurate". The axis is explicit now, and
+/// it is a persisted preference (dashboard + onboarding).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecommendPriority {
+    /// Accuracy first, but not at the cost of usability.
+    Balanced,
+    /// Latency first: smallest, quickest, already-installed models win.
+    Fastest,
+    /// Accuracy first: bigger models acceptable when RAM/VRAM allow.
+    MostAccurate,
+}
+
+impl RecommendPriority {
+    /// From the persisted setting (0/1/2). Unknown → Balanced.
+    pub fn from_u32(v: u32) -> Self {
+        match v {
+            1 => RecommendPriority::Fastest,
+            2 => RecommendPriority::MostAccurate,
+            _ => RecommendPriority::Balanced,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            RecommendPriority::Balanced => "Balanced",
+            RecommendPriority::Fastest => "Fastest",
+            RecommendPriority::MostAccurate => "Most accurate",
+        }
+    }
+
+    /// (accuracy, speed, size) weights — they always sum to 1.
+    ///
+    /// The size weight shrinks as accuracy matters more: a 1.5 GB checkpoint
+    /// is a fine answer to "most accurate" on a 32 GB machine, and a terrible
+    /// answer to "fastest". RAM guards (below) are what actually keep a model
+    /// affordable — the size term only breaks ties between viable models.
+    fn weights(&self) -> (f32, f32, f32) {
+        match self {
+            RecommendPriority::Balanced => (0.50, 0.30, 0.20),
+            RecommendPriority::Fastest => (0.15, 0.60, 0.25),
+            RecommendPriority::MostAccurate => (0.85, 0.10, 0.05),
+        }
+    }
+}
+
+/// A recommendation plus the runner-up, so the UI can show a real alternative
+/// ("or X — smallest and already installed") instead of a single opaque pick.
+#[derive(Debug, Clone)]
+pub struct Recommendation {
+    pub name: Option<String>,
+    pub reason: String,
+    /// Second choice with a different trade-off (usually the smallest or the
+    /// already-installed option). Never the same model as `name`.
+    pub alt_name: Option<String>,
+    pub alt_reason: String,
+}
+
+/// Hardware- and preference-aware model recommendation.
 ///
-/// Rules (in priority order):
-/// 1. Discrete GPU + VRAM > 3GB (3072MB) → Whisper Large v3 Turbo only.
-///    It is the most accurate model that fits; Tiny stays as manual fallback.
-/// 2. Discrete GPU + VRAM ≤ 3GB (or unknown VRAM) → Whisper Tiny (only model
-///    guaranteed to fit + fastest on limited VRAM).
-/// 3. CPU/iGPU → weighted score over accuracy (50%), speed (30%), footprint
-///    (20%: smaller is better), plus a multilingual bonus when the user asked
-///    for a non-English language, plus a low-RAM guard (≤8GB prefers ≤200MB).
-/// Returns the recommended descriptor NAME (stable across index shifts) plus
-/// a human-readable reason for the dashboard banner.
+/// How it decides (this replaces the old fixed 50/30/20 score):
+///
+/// 1. **Language is a filter, not a bonus.** If the user needs a language, only
+///    models that can actually produce it compete — a model that cannot serve
+///    the request is not "recommended at a lower score", it is not recommended
+///    at all. (The old ±12/±25 bonus still let English-only weights win.)
+/// 2. **RAM class guards.** ≤4 GB machines never get a multi-hundred-MB model
+///    (it would thrash); ≤8 GB machines get a hard penalty above ~400 MB.
+/// 3. **Priority shifts the weights.** "Fastest" weights speed 0.60 and size
+///    0.20; "Most accurate" weights accuracy 0.70.
+/// 4. **Installed models win ties decisively** (+8): a model that works this
+///    second beats one that needs a download first.
+/// 5. **GPU machines still consider CPU models** when they score better under
+///    the chosen priority (Whisper Tiny is often the wrong answer for someone
+///    who asked for the smallest multilingual model); VRAM is respected by
+///    preferring models that fit.
+/// The runner-up is the best model that makes a DIFFERENT trade-off, so the
+/// reason strings can name the deciding factor instead of a score.
 pub fn recommend_model(
     candidates: &[ModelDescriptor],
     has_discrete_gpu: bool,
@@ -706,105 +800,177 @@ pub fn recommend_model(
     vram_mb: u64,
     system_ram_gb: u64,
     selected_language: &str,
-) -> (Option<String>, String) {
+    priority: RecommendPriority,
+) -> Recommendation {
     if candidates.is_empty() {
-        return (None, "No models available for this hardware.".to_string());
+        return Recommendation {
+            name: None,
+            reason: "No models available for this hardware.".to_string(),
+            alt_name: None,
+            alt_reason: String::new(),
+        };
     }
-    // GPU path first — deterministic, VRAM-gated.
-    if has_discrete_gpu {
-        let large = candidates
+    let lang_wanted = !selected_language.trim().is_empty()
+        && !selected_language.eq_ignore_ascii_case("English")
+        && !selected_language.eq_ignore_ascii_case("Auto");
+    let lang_is_auto = selected_language.eq_ignore_ascii_case("Auto")
+        || selected_language.trim().is_empty();
+
+    // ── 1. Hard language filter ──
+    let pool: Vec<&ModelDescriptor> = if lang_wanted {
+        let speak: Vec<&ModelDescriptor> = candidates
             .iter()
-            .find(|d| d.name.contains("Whisper Large v3 Turbo"));
-        let tiny = candidates
-            .iter()
-            .find(|d| d.name.contains("Whisper Tiny EN Q5_1"));
-        if vram_mb > 3072 {
-            if let Some(l) = large {
-                return (
-                    Some(l.name.clone()),
-                    format!(
-                        "Discrete {} {} with {} MB VRAM — Large v3 Turbo fits and is the most accurate; Tiny remains as instant fallback.",
-                        gpu_vendor,
-                        gpu_name,
-                        vram_mb
-                    ),
-                );
-            }
-        }
-        if let Some(t) = tiny {
-            return (
-                Some(t.name.clone()),
-                if vram_mb > 0 {
-                    format!(
-                        "Discrete {} {} with {} MB VRAM — Tiny is the fastest model guaranteed to fit; Large needs >3GB.",
-                        gpu_vendor, gpu_name, vram_mb
-                    )
-                } else {
-                    format!(
-                        "Discrete {} {} (VRAM unknown) — Tiny is the safe default; install a VRAM-reporting driver for a Large recommendation.",
-                        gpu_vendor, gpu_name
-                    )
-                },
-            );
-        }
-    }
-    // CPU/iGPU path — score every candidate.
-    let want_non_english = !selected_language.eq_ignore_ascii_case("English")
-        && !selected_language.eq_ignore_ascii_case("Auto")
-        && !selected_language.trim().is_empty();
-    let mut best: Option<(&ModelDescriptor, f32)> = None;
-    for d in candidates {
-        // Footprint score: 100 at ≤32MB → 0 at ≥800MB.
-        let footprint = (100.0 - ((d.size_mb as f32 - 32.0) / (800.0 - 32.0) * 100.0)).clamp(0.0, 100.0);
-        let mut score = d.accuracy as f32 * 0.5 + d.speed as f32 * 0.3 + footprint * 0.2;
-        // Multilingual bonus when the user needs it.
-        if want_non_english {
-            let langs = supported_languages(d);
-            if langs.iter().any(|l| l == selected_language) {
-                score += 12.0;
+            .filter(|d| supported_languages(d).iter().any(|l| l == selected_language))
+            .collect();
+        if !speak.is_empty() {
+            speak
+        } else {
+            // No installed/candidate model speaks it: fall back to everything
+            // and say so, rather than recommending nothing.
+            let biling: Vec<&ModelDescriptor> = candidates
+                .iter()
+                .filter(|d| supported_languages(d).len() > 1)
+                .collect();
+            if biling.is_empty() {
+                candidates.iter().collect()
             } else {
-                score -= 25.0; // English-only weights cannot serve the request.
+                biling
             }
         }
-        // Low-RAM guard: penalise >400MB models hard on ≤8GB machines.
+    } else {
+        candidates.iter().collect()
+    };
+
+    // ── 2. RAM class guards (hard) ──
+    let ram_fit: Vec<&ModelDescriptor> = pool
+        .iter()
+        .copied()
+        .filter(|d| !(system_ram_gb <= 4 && d.size_mb > 600))
+        .collect();
+    let pool2 = if ram_fit.is_empty() { pool.clone() } else { ram_fit };
+
+    // ── 3. Score ──
+    let (w_acc, w_spd, w_size) = priority.weights();
+    let mut scored: Vec<(&ModelDescriptor, f32)> = Vec::new();
+    for d in &pool2 {
+        let footprint = (100.0 - ((d.size_mb as f32 - 32.0) / (800.0 - 32.0) * 100.0)).clamp(0.0, 100.0);
+        let mut score = d.accuracy as f32 * w_acc + d.speed as f32 * w_spd + footprint * w_size;
+        // ≤8 GB: a big model is a bad experience even when it scores.
         if system_ram_gb <= 8 && d.size_mb > 400 {
             score -= 20.0;
         }
-        // Prefer installed models slightly (instant use beats download wait).
+        // Already on disk: usable right now, no download wait.
         if is_model_installed(d) {
-            score += 3.0;
+            score += 8.0;
         }
-        match &best {
-            Some((_, s)) if *s >= score => {}
-            _ => best = Some((d, score)),
+        // Language coverage among the pool: multilingual models keep a graded
+        // edge when the user asked for nothing specific (Auto), because the
+        // first "wrong-language" dictation otherwise costs a trip to settings.
+        // Graded by coverage (not a flat bonus) so a 7-language model does not
+        // outrank a 30-language one on accuracy.
+        if lang_is_auto {
+            let n = supported_languages(d).len() as f32;
+            score += (n * 0.8).min(12.0);
         }
+        // A discrete GPU with room is a reason to prefer the GPU-accelerated
+        // checkpoint over an equivalent CPU one — but only when it fits.
+        if has_discrete_gpu && vram_mb > 0 && vram_mb >= d.size_mb as u64 {
+            score += 4.0;
+        }
+        scored.push((d, score));
     }
-    match best {
-        Some((d, s)) => (
-            Some(d.name.clone()),
-            format!(
-                "CPU path ({} GB RAM{}) — {} scores highest ({:.0}): accuracy {} / speed {} / {}MB{}.",
-                system_ram_gb,
-                if want_non_english {
-                    format!(", language {}", selected_language)
-                } else {
-                    String::new()
-                },
-                d.name,
-                s,
-                d.accuracy,
-                d.speed,
-                d.size_mb,
-                if is_model_installed(d) {
-                    ", already installed"
-                } else {
-                    ", 1-click download"
-                }
-            ),
-        ),
-        None => (None, "No candidate models.".to_string()),
+    // Stable order: score desc, then smallest, then name (deterministic output).
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.size_mb.cmp(&b.0.size_mb))
+            .then(a.0.name.cmp(&b.0.name))
+    });
+
+    let (best, best_score) = scored[0];
+    let hw_bits = if has_discrete_gpu && vram_mb > 0 {
+        format!("discrete {} {} with {} MB VRAM", gpu_vendor, gpu_name, vram_mb)
+    } else if has_discrete_gpu {
+        format!("discrete {} {} (VRAM unknown)", gpu_vendor, gpu_name)
+    } else {
+        format!("{} GB system RAM", system_ram_gb)
+    };
+    let lang_bits = if lang_wanted {
+        format!(", must speak {}", selected_language)
+    } else if lang_is_auto {
+        ", auto language".to_string()
+    } else {
+        String::new()
+    };
+    let reason = format!(
+        "{} ({}) · {} priority{} — {} MB, accuracy {} / speed {}{}{}.",
+        hw_bits,
+        if has_discrete_gpu { "GPU path" } else { "CPU path" },
+        priority.label(),
+        lang_bits,
+        best.size_mb,
+        best.accuracy,
+        best.speed,
+        if is_model_installed(best) {
+            ", already installed"
+        } else {
+            ", 1-click download"
+        },
+        if lang_wanted && !supported_languages(best).iter().any(|l| l == selected_language) {
+            " · no model speaks this language yet — closest match"
+        } else {
+            ""
+        },
+    );
+    let _ = best_score;
+
+    // ── 4. Runner-up with a DIFFERENT trade-off ──
+    // "Different" = a materially different footprint or install state, so the
+    // suggestion is a genuine alternative, not model #2 of the same kind.
+    let alt = scored
+        .iter()
+        .skip(1)
+        .find(|(d, _)| (d.size_mb as i64 - best.size_mb as i64).abs() > 80 || is_model_installed(d) != is_model_installed(best))
+        .map(|(d, _)| {
+            let why = if is_model_installed(d) && !is_model_installed(best) {
+                "already on disk — starts instantly".to_string()
+            } else if !is_model_installed(d) && is_model_installed(best) {
+                "needs a download first".to_string()
+            } else if d.size_mb < best.size_mb {
+                format!("{} MB lighter, near-equal quality", best.size_mb - d.size_mb)
+            } else {
+                format!("heavier ({} MB) for more accuracy", d.size_mb - best.size_mb)
+            };
+            (
+                d.name.clone(),
+                format!(
+                    "{} — {}{}.",
+                    d.name,
+                    why,
+                    if lang_wanted && !supported_languages(d).iter().any(|l| l == selected_language) {
+                        " (does not cover this language)"
+                    } else {
+                        ""
+                    }
+                ),
+            )
+        });
+    match alt {
+        Some((n, why)) => Recommendation {
+            name: Some(best.name.clone()),
+            reason,
+            alt_name: Some(n),
+            alt_reason: why,
+        },
+        None => Recommendation {
+            name: Some(best.name.clone()),
+            reason,
+            alt_name: None,
+            alt_reason: String::new(),
+        },
     }
 }
+
 
 /// Map a UI language name to a whisper.cpp `-l` code. "Auto" and unknown
 /// names return None (caller omits `-l` for auto-detect).
@@ -826,6 +992,40 @@ pub fn whisper_code(display: &str) -> Option<&'static str> {
         "Japanese" => "ja",
         _ => return None,
     })
+}
+
+/// Map a UI language name to a locale tag for the Nemotron/transcribe.cpp
+/// worker (`--language` flag and the `load` request's `language` field).
+/// "Auto" — or a language with no tag — returns "auto", which the worker
+/// maps to NULL: the model's own language ID decides per segment. English
+/// is pinned to en-US (the model's default locale) so forcing it is a no-op
+/// instead of a rejected value.
+pub fn nemotron_locale_code(display: &str) -> String {
+    match display.trim() {
+        "" | "Auto" => "auto".to_string(),
+        "English" => "en-US".to_string(),
+        other => whisper_code(other)
+            .map(|code| match code {
+                // BCP-47 region tags Nemotron was trained with.
+                "en" => "en-US",
+                "de" => "de-DE",
+                "fr" => "fr-FR",
+                "es" => "es-ES",
+                "it" => "it-IT",
+                "pt" => "pt-PT",
+                "nl" => "nl-NL",
+                "pl" => "pl-PL",
+                "ru" => "ru-RU",
+                "tr" => "tr-TR",
+                "ar" => "ar-EG",
+                "hi" => "hi-IN",
+                "zh" => "zh-CN",
+                "ja" => "ja-JP",
+                _ => "auto",
+            })
+            .unwrap_or("auto")
+            .to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -947,5 +1147,162 @@ mod tests {
         assert!(models_for_hardware(false).iter().any(|d| d.name == s.name));
         // Per-utterance CTC — never treated as a streaming/paste-after model.
         assert!(!is_streaming_model(&s.name));
+    }
+
+    #[test]
+    fn nemotron_is_multilingual_with_auto_not_english_only() {
+        let n = all_descriptors()
+            .into_iter()
+            .find(|d| matches!(d.engine_family, EngineFamily::Nemotron))
+            .expect("Nemotron descriptor registered");
+        // Nemotron 3.5 ASR Streaming is trained on 30 languages with in-model
+        // language ID: Auto default plus forcing, never the English-only list
+        // it used to be registered with (that hid the language selector).
+        let langs = supported_languages(&n);
+        assert_eq!(langs.first().map(String::as_str), Some("Auto"));
+        assert!(langs.iter().any(|l| l == "German"), "German forceable");
+        assert!(supports_auto_detect(&n));
+        assert!(!is_single_language(&n));
+        assert!(is_streaming_model(&n.name), "streaming family");
+    }
+
+    #[test]
+    fn language_table_rules_per_engine() {
+        let find = |f: &dyn Fn(&ModelDescriptor) -> bool| {
+            all_descriptors()
+                .into_iter()
+                .find(|d| f(d))
+                .expect("descriptor present")
+        };
+        let is = |fam: EngineFamily| move |d: &ModelDescriptor| d.engine_family == fam;
+
+        // Single-language models: the dropdown must be hidden.
+        let english_only = find(&is(EngineFamily::Vosk));
+        assert_eq!(supported_languages(&english_only), vec!["English"]);
+        assert!(is_single_language(&english_only));
+        assert!(!supports_auto_detect(&english_only));
+
+        // Multi-language WITHOUT a detector: no "Auto" entry at all.
+        let canary = find(&is(EngineFamily::Canary));
+        assert_eq!(
+            supported_languages(&canary),
+            vec!["English", "German", "French", "Spanish"]
+        );
+        assert!(!supports_auto_detect(&canary));
+        assert!(!is_single_language(&canary));
+
+        // Auto-only model (port rejects explicit hints).
+        let qwen = find(&is(EngineFamily::Qwen3Asr));
+        assert!(supports_auto_detect(&qwen));
+        assert!(is_single_language(&qwen), "one entry = no dropdown");
+    }
+
+    #[test]
+    fn nemotron_locale_codes() {
+        assert_eq!(nemotron_locale_code("Auto"), "auto");
+        assert_eq!(nemotron_locale_code(""), "auto");
+        assert_eq!(nemotron_locale_code("English"), "en-US");
+        assert_eq!(nemotron_locale_code("German"), "de-DE");
+        assert_eq!(nemotron_locale_code("Japanese"), "ja-JP");
+        // Unknown/unsupported falls back to in-model detection.
+        assert_eq!(nemotron_locale_code("Klingon"), "auto");
+    }
+
+    #[test]
+    fn priority_changes_the_pick() {
+        // Whistle (tiny, fast, multilingual) vs Whisper Large (huge, accurate):
+        // "Fastest" must take the tiny one, "Most accurate" the big one.
+        let whistle = all_descriptors()
+            .into_iter()
+            .find(|d| matches!(d.engine_family, EngineFamily::Whistle))
+            .unwrap();
+        let large = all_descriptors()
+            .into_iter()
+            .find(|d| d.name.contains("Whisper Large"))
+            .unwrap();
+        let pool = [whistle.clone(), large.clone()];
+        let fast =
+            recommend_model(&pool, false, "", "", 0, 32, "Auto", RecommendPriority::Fastest);
+        let accurate = recommend_model(
+            &pool,
+            false,
+            "",
+            "",
+            0,
+            32,
+            "Auto",
+            RecommendPriority::MostAccurate,
+        );
+        let whistle_name = "Cactus Whistle 16M (CACT)";
+        let large_name = "Whisper Large v3 Turbo Q8_0 (GGML)";
+        assert_eq!(fast.name.as_deref(), Some(whistle_name));
+        assert_eq!(accurate.name.as_deref(), Some(large_name));
+        assert!(fast.reason.contains("Fastest"));
+        assert!(accurate.reason.contains("Most accurate"));
+        // Runner-up is a real alternative with its own explanation.
+        assert!(fast.alt_name.is_some());
+        assert!(!fast.alt_reason.is_empty());
+    }
+
+    #[test]
+    fn language_is_a_filter_not_a_bonus() {
+        // German request: an English-only model must never be recommended,
+        // even when it scores better than a multilingual one.
+        let vosk = all_descriptors()
+            .into_iter()
+            .find(|d| matches!(d.engine_family, EngineFamily::Vosk))
+            .unwrap();
+        let whistle = all_descriptors()
+            .into_iter()
+            .find(|d| matches!(d.engine_family, EngineFamily::Whistle))
+            .unwrap();
+        let pool = [vosk, whistle];
+        let rec = recommend_model(
+            &pool,
+            false,
+            "",
+            "",
+            0,
+            32,
+            "German",
+            RecommendPriority::Balanced,
+        );
+        assert_eq!(rec.name.as_deref(), Some("Cactus Whistle 16M (CACT)"));
+        assert!(rec.reason.contains("must speak German"));
+    }
+
+    #[test]
+    fn low_ram_never_recommends_a_huge_model() {
+        // 3 GB machine: the multi-hundred-MB Parakeet is filtered out even
+        // though it has the highest accuracy in the pool.
+        let parakeet = all_descriptors()
+            .into_iter()
+            .find(|d| matches!(d.engine_family, EngineFamily::ParakeetRust))
+            .unwrap();
+        let vosk = all_descriptors()
+            .into_iter()
+            .find(|d| matches!(d.engine_family, EngineFamily::Vosk))
+            .unwrap();
+        let pool = [parakeet, vosk];
+        let rec = recommend_model(
+            &pool,
+            false,
+            "",
+            "",
+            0,
+            3,
+            "Auto",
+            RecommendPriority::MostAccurate,
+        );
+        assert_eq!(rec.name.as_deref(), Some("Vosk Small EN (50M)"));
+        assert!(rec.reason.contains("3 GB system RAM"));
+    }
+
+    #[test]
+    fn priority_from_u32_clamps() {
+        assert_eq!(RecommendPriority::from_u32(0), RecommendPriority::Balanced);
+        assert_eq!(RecommendPriority::from_u32(1), RecommendPriority::Fastest);
+        assert_eq!(RecommendPriority::from_u32(2), RecommendPriority::MostAccurate);
+        assert_eq!(RecommendPriority::from_u32(99), RecommendPriority::Balanced);
     }
 }

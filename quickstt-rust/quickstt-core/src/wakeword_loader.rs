@@ -75,12 +75,24 @@ pub fn discover_oww_heads(models_dir: &Path) -> Vec<(PathBuf, String, String)> {
     ];
     let mut out = Vec::new();
     for (file, name, phrase) in HEADS {
-        let path = models_dir.join(file);
-        if path.exists() {
-            tracing::info!("Discovered OWW head: {} (phrase: {:?})", name, phrase);
-            out.push((path, name.to_string(), phrase.to_string()));
-        } else {
-            tracing::warn!("Missing OWW head: {}", path.display());
+        // Accept BOTH on-disk layouts:
+        //   <dir>/hey_jarvis_v0.1.onnx            (flat — installers, old copies)
+        //   <dir>/hey_jarvis/model.onnx           (per-phrase subfolders)
+        // The workspace tree only ships the subfolder form, so matching just
+        // the flat name meant the listener silently found nothing (and the
+        // wake-word toggle appeared broken even with models present).
+        let candidates = [
+            models_dir.join(file),
+            models_dir.join(name).join("model.onnx"),
+        ];
+        match candidates.iter().find(|p| p.exists()) {
+            Some(path) => {
+                tracing::info!("Discovered OWW head: {} (phrase: {:?})", name, phrase);
+                out.push((path.clone(), name.to_string(), phrase.to_string()));
+            }
+            None => {
+                tracing::warn!("Missing OWW head: {}", models_dir.join(file).display());
+            }
         }
     }
     out

@@ -186,6 +186,42 @@ pub fn delete_turn(items: &mut Vec<HistoryItem>, id: &str) -> bool {
     true
 }
 
+/// Delete every turn whose id is in `ids` (audio files included). Returns the
+/// number actually removed. Ids that no longer exist are ignored, so a stale
+/// selection can never delete the wrong turn.
+pub fn delete_turns(items: &mut Vec<HistoryItem>, ids: &[String]) -> usize {
+    let mut removed = 0usize;
+    for item in std::mem::take(items) {
+        if ids.iter().any(|id| id == &item.id) {
+            if !item.audio_file.is_empty() {
+                let _ = std::fs::remove_file(history_dir().join(&item.audio_file));
+            }
+            removed += 1;
+        } else {
+            items.push(item);
+        }
+    }
+    if removed > 0 {
+        save(items);
+    }
+    removed
+}
+
+/// Delete the ENTIRE history: every row and every audio file (the "delete all
+/// the transcriptions and their data" action). Returns the number removed.
+pub fn clear_all(items: &mut Vec<HistoryItem>) -> usize {
+    let dir = history_dir();
+    for item in items.iter() {
+        if !item.audio_file.is_empty() {
+            let _ = std::fs::remove_file(dir.join(&item.audio_file));
+        }
+    }
+    let removed = items.len();
+    items.clear();
+    save(items);
+    removed
+}
+
 /// Relative age label (`now_ms` = display time): "just now" / "5m ago" /
 /// "3h ago" / "12 Oct" (UTC civil date past 24h — midnight-edge TZ skew at
 /// most, no tz database needed).

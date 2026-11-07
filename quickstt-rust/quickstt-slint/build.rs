@@ -16,6 +16,16 @@ fn main() {
 </assembly>
 "#,
         );
+        // The blue mic app icon, baked into the exe: Explorer, the taskbar,
+        // Alt+Tab and every shortcut that points at this binary show the real
+        // app icon instead of the default Rust/generic one. Absolute path —
+        // winresource resolves icons relative to its own CWD, which is not
+        // guaranteed to be the manifest dir.
+        let icon = std::fs::canonicalize(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/icon_app.ico"),
+        )
+        .expect("assets/icon_app.ico must exist");
+        res.set_icon(icon.to_string_lossy().as_ref());
         res.compile().unwrap();
     }
 }

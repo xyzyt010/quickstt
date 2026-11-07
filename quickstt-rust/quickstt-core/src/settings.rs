@@ -22,6 +22,12 @@ pub struct Settings {
     pub selected_model: String,
     #[serde(default = "default_selected_language")]
     pub selected_language: String,
+    /// Language forced PER MODEL: catalog name → language display name.
+    /// A model the user never touched is absent here and follows
+    /// `selected_language` ("Auto" by default), so every engine starts in
+    /// auto mode unless the user explicitly picked a language for it.
+    #[serde(default)]
+    pub model_languages: HashMap<String, String>,
     pub widget_models: Vec<String>,
     pub cloud_widget_models: Vec<String>,
     pub favorite_models: Vec<String>,
@@ -41,6 +47,12 @@ pub struct Settings {
     pub widget_flexible: bool,
     pub first_launch: bool,
     pub setup_completed: bool,
+    /// First-run onboarding finished (or skipped). While false the app opens
+    /// with the welcome / preferences / how-it-works slides; every pick made
+    /// there is applied through the normal commands, so it behaves exactly
+    /// like the dashboard. Default false = show on first launch.
+    #[serde(default)]
+    pub onboarding_completed: bool,
     pub pill_width: u32,
     pub pill_height: u32,
     pub pill_radius: u32,
@@ -132,6 +144,10 @@ pub struct Settings {
     /// Selected microphone (OS device name). Empty = system default input.
     #[serde(default)]
     pub selected_microphone: String,
+    /// Model recommendation priority: 0 = Balanced, 1 = Fastest,
+    /// 2 = Most accurate. Drives the hardware-aware recommendation weights.
+    #[serde(default)]
+    pub model_priority: u32,
     /// Widget visibility (Show/Hide). Default shown; toggles persist across
     /// restarts/updates. Hidden only hides the pill window — the app, tray,
     /// hotkeys and wakewords keep running, and any trigger re-shows it.
@@ -169,6 +185,7 @@ impl Default for Settings {
         Self {
             selected_model: String::new(),
             selected_language: "Auto".to_string(),
+            model_languages: HashMap::new(),
             widget_models: vec![],
             cloud_widget_models: vec![],
             favorite_models: vec![],
@@ -188,6 +205,7 @@ impl Default for Settings {
             widget_flexible: DEFAULT_WIDGET_FLEXIBLE,
             first_launch: DEFAULT_FIRST_LAUNCH,
             setup_completed: DEFAULT_SETUP_COMPLETED,
+            onboarding_completed: false,
             pill_width: DEFAULT_PILL_WIDTH,
             pill_height: DEFAULT_PILL_HEIGHT,
             pill_radius: DEFAULT_PILL_RADIUS,
@@ -238,6 +256,7 @@ impl Default for Settings {
             snap_action: 0,
             transient_action: 0,
             selected_microphone: String::new(),
+            model_priority: 0,
             show_widget: true,
             extra: HashMap::new(),
         }
@@ -299,6 +318,14 @@ impl Settings {
         settings.selected_language = read_string(key, "selectedLanguage")
             .or_else(|| read_string(key, "selected_language"))
             .unwrap_or_else(|| "Auto".to_string());
+        // Per-model language memory: one "model=language" pair per entry.
+        settings.model_languages = read_multi_string(key, "modelLanguages")
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|entry| entry.split_once('='))
+            .map(|(model, lang)| (model.trim().to_string(), lang.trim().to_string()))
+            .filter(|(model, lang)| !model.is_empty() && !lang.is_empty())
+            .collect();
         settings.widget_models = read_multi_string(key, "widgetModels").unwrap_or_default();
         if settings.widget_models.len() == 1
             && settings.widget_models[0].trim().eq_ignore_ascii_case("Vosk Small En")
@@ -338,6 +365,8 @@ impl Settings {
         settings.first_launch = read_bool(key, "firstLaunch").unwrap_or(DEFAULT_FIRST_LAUNCH);
         settings.setup_completed =
             read_bool(key, "setupCompleted").unwrap_or(DEFAULT_SETUP_COMPLETED);
+        settings.onboarding_completed =
+            read_bool(key, "onboardingCompleted").unwrap_or(false);
 
         settings.pill_width = read_dword(key, "pillWidth").unwrap_or(DEFAULT_PILL_WIDTH);
         settings.pill_height = read_dword(key, "pillHeight").unwrap_or(DEFAULT_PILL_HEIGHT);
@@ -435,6 +464,10 @@ impl Settings {
         settings.selected_microphone = read_string(key, "selectedMicrophone")
             .or_else(|| read_string(key, "selected_microphone"))
             .unwrap_or_default();
+        settings.model_priority = read_dword(key, "modelPriority")
+            .or_else(|| read_dword(key, "model_priority"))
+            .unwrap_or(0)
+            .min(2);
 
         // Migrate legacy extra keys if Registry had them as strings
         Self::migrate_extra(&mut settings);
@@ -659,7 +692,13 @@ impl Settings {
             "ctrlSpaceEnabled" | "ctrl_space_enabled" => self.ctrl_space_enabled = value.eq_ignore_ascii_case("true") || value == "1",
             "onCommandTranscription" | "on_command_transcription" => self.on_command_transcription = value.eq_ignore_ascii_case("true") || value == "1",
             "wakeWordMode" | "wake_word_mode" => self.wake_word_mode = value.to_string(),
+            "onboardingCompleted" | "onboarding_completed" => {
+                self.onboarding_completed = value.eq_ignore_ascii_case("true") || value == "1"
+            }
             "selectedMicrophone" | "selected_microphone" => self.selected_microphone = value.to_string(),
+            "modelPriority" | "model_priority" => {
+                self.model_priority = value.parse::<u32>().unwrap_or(0).min(2)
+            }
             _ => { self.extra.insert(key.to_string(), value.to_string()); }
         }
     }
@@ -695,10 +734,68 @@ impl Settings {
             "favoriteModels" => self.favorite_models = values.to_vec(),
             "wakeWords" => self.wake_words = values.to_vec(),
             "closeWords" => self.close_words = values.to_vec(),
+            "modelLanguages" => {
+                self.model_languages = values
+                    .iter()
+                    .filter_map(|entry| entry.split_once('='))
+                    .map(|(model, lang)| (model.trim().to_string(), lang.trim().to_string()))
+                    .filter(|(model, lang)| !model.is_empty() && !lang.is_empty())
+                    .collect();
+            }
             _ => {
                 // Store as comma-joined fallback
                 self.extra.insert(key.to_string(), values.join(","));
             }
+        }
+    }
+
+    // ── Per-model language memory ──
+
+    /// The language that applies to `model`: the user's explicit choice for
+    /// that model, else the global default (itself defaulting to "Auto").
+    pub fn language_for_model(&self, model: &str) -> String {
+        self.model_languages
+            .get(model)
+            .cloned()
+            .unwrap_or_else(|| {
+                let global = self.selected_language.trim();
+                if global.is_empty() {
+                    "Auto".to_string()
+                } else {
+                    global.to_string()
+                }
+            })
+    }
+
+    /// Remember `lang` for `model`. Passing "" removes the entry so the model
+    /// falls back to the global default again.
+    pub fn set_language_for_model(&mut self, model: &str, lang: &str) {
+        let model = model.trim();
+        if model.is_empty() {
+            return;
+        }
+        if lang.trim().is_empty() {
+            self.model_languages.remove(model);
+        } else {
+            self.model_languages
+                .insert(model.to_string(), lang.trim().to_string());
+        }
+    }
+
+    /// Persist just the per-model language map (dashboard dropdown writes).
+    pub fn save_model_languages(&self) -> QuickSttResult<()> {
+        let pairs: Vec<String> = self
+            .model_languages
+            .iter()
+            .map(|(model, lang)| format!("{model}={lang}"))
+            .collect();
+        #[cfg(target_os = "windows")]
+        {
+            Self::save_multi_string_windows("modelLanguages", &pairs)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.save_to_toml()
         }
     }
 
@@ -743,6 +840,13 @@ impl Settings {
             let _ = write_multi("favoriteModels", &self.favorite_models);
             let _ = write_multi("wakeWords", &self.wake_words);
             let _ = write_multi("closeWords", &self.close_words);
+            // Per-model language memory ("model=language" pairs).
+            let model_lang_pairs: Vec<String> = self
+                .model_languages
+                .iter()
+                .map(|(model, lang)| format!("{model}={lang}"))
+                .collect();
+            let _ = write_multi("modelLanguages", &model_lang_pairs);
             let _ = write_str("wakeEngine", &self.wake_engine);
             let _ = write_str("porcupineAccessKey", &self.porcupine_access_key);
             let _ = write_str("recordingDir", &self.recording_dir);
@@ -757,6 +861,7 @@ impl Settings {
             let _ = write_str("widgetFlexible", if self.widget_flexible { "true" } else { "false" });
             let _ = write_str("firstLaunch", if self.first_launch { "true" } else { "false" });
             let _ = write_str("setupCompleted", if self.setup_completed { "true" } else { "false" });
+            let _ = write_str("onboardingCompleted", if self.onboarding_completed { "true" } else { "false" });
             let _ = write_dword("pillWidth", self.pill_width);
             let _ = write_dword("pillHeight", self.pill_height);
             let _ = write_dword("pillRadius", self.pill_radius);
@@ -807,6 +912,7 @@ impl Settings {
             let _ = write_dword("snapAction", self.snap_action);
             let _ = write_dword("transientAction", self.transient_action);
             let _ = write_str("selectedMicrophone", &self.selected_microphone);
+            let _ = write_str("modelPriority", &self.model_priority.to_string());
             unsafe { let _ = RegCloseKey(key); }
             let _ = self.save_to_toml();
             return Ok(());
