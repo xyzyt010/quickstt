@@ -97,6 +97,7 @@ fn menu_action(
     pill: &slint::Weak<PillWidget>,
     dash_visible: &Arc<Mutex<bool>>,
     state: &Arc<Mutex<quickstt_core::orchestration::AppState>>,
+    onboarding: &slint::Weak<OnboardingWidget>,
 ) {
     match i {
         0 => {
@@ -133,6 +134,42 @@ fn menu_action(
                         log_line(&format!("show_widget persist failed: {e}"));
                     }
                 }
+            }
+        }
+        5 => {
+            // Re-run the onboarding tour from the top. The flag is cleared
+            // (not toggled) so the tour can be shown any number of times, and
+            // the window is raised above everything else.
+            log_line("menu: show the intro tour");
+            if let Ok(mut s) = state.lock() {
+                s.settings.onboarding_completed = false;
+                let _ = s.settings.save_all();
+            }
+            if let Some(o) = onboarding.upgrade() {
+                // Fresh preferences: the tour opens on its own picks.
+                let ww_on = state
+                    .lock()
+                    .map(|s| {
+                        s.wakeword_active
+                            || (!s.settings.wake_word_mode.eq_ignore_ascii_case("Off")
+                                && !s.settings.wake_word_mode.trim().is_empty())
+                    })
+                    .unwrap_or(false);
+                o.set_wakeword_enabled(ww_on);
+                o.set_ctrl_space_output(
+                    state
+                        .lock()
+                        .map(|s| s.settings.ctrl_space_output)
+                        .unwrap_or(0) as i32,
+                );
+                o.set_history_enabled(
+                    state
+                        .lock()
+                        .map(|s| s.settings.history_enabled)
+                        .unwrap_or(true),
+                );
+                o.set_step(0);
+                widget_platform::show_app_window(o.window());
             }
         }
         _ => {
@@ -2072,41 +2109,67 @@ fn flatten_delivery_text(raw: &str) -> String {
 /// - 1 = Clipboard (fast paste via clipboard + Ctrl+V)
 /// - 2 = Show only (TextBoard preview only)
 ///
-/// The text is written EXACTLY as dictated. This used to append a space to
-/// every delivery, which was invisible when it fired once per turn but turned
-/// into endless stray spaces when the streaming path called it per delta —
-/// the "keeps pressing space" report. Multi-utterance turns are joined by
-/// `flatten_delivery_text`, which supplies the separators explicitly.
+/// Deliver finished text into the target app.
+///
+/// ALWAYS pastes: the "Show only (TextBoard)" mode is retired — the transcript
+/// is previewed on the TextBoard regardless, so a "display only" choice only
+/// ever meant "my dictation did not reach the text box" (the "it just displayed
+/// it" report). An old stored value of 2 is coerced to 0 (type) so a profile
+/// saved before this change behaves correctly instead of silently swallowing
+/// every turn.
+///
+/// When no text box can be targeted (focus could not be restored — the user
+/// never clicked into an editable field, or it closed) the text stays on the
+/// clipboard and the pill flashes a very small "Copied to clipboard" notice, so
+/// the words are never lost and always obviously recoverable.
 fn deliver_transcription_output(delta: &str, output_mode: u32, target_hwnd: Option<isize>) {
     let text = flatten_delivery_text(delta);
     if text.is_empty() {
         return;
     }
-    match output_mode {
-        2 => {
-            log_line("output_mode: show only (TextBoard)");
-        }
-        _ => {
-            log_line(&format!(
-                "output_mode: fast paste into text box ({} chars, mode={output_mode})",
-                text.len()
-            ));
-            #[cfg(target_os = "windows")]
-            {
-                // Skip the keystroke when the clipboard never took the text:
-                // injecting Ctrl+V then pastes stale content (the "paste
-                // lost my dictation" report). Text stays in history/paste-row.
-                if copy_to_windows_clipboard(&text) {
-                    unsafe {
-                        paste_via_ctrl_v(target_hwnd);
-                    }
-                }
+    let mode = if output_mode == 2 { 0 } else { output_mode };
+    log_line(&format!(
+        "output: paste into text box ({} chars, mode={mode})",
+        text.len()
+    ));
+    #[cfg(target_os = "windows")]
+    {
+        // Skip the keystroke when the clipboard never took the text: injecting
+        // Ctrl+V then pastes stale content (the "paste lost my dictation"
+        // report). Text stays in history + the clipboard notice below.
+        if copy_to_windows_clipboard(&text) {
+            let focus_ok = unsafe { restore_typing_focus(target_hwnd) };
+            unsafe {
+                paste_via_ctrl_v(target_hwnd);
             }
-            #[cfg(not(target_os = "windows"))]
-            deliver_linux(&text, target_hwnd);
+            if !focus_ok {
+                // Nothing to paste into: the clipboard already holds the text,
+                // so make that LOUD-but-tiny instead of losing the words.
+                note_clipboard_fallback(text.len());
+            }
+        } else {
+            note_clipboard_fallback(text.len());
         }
     }
+    #[cfg(not(target_os = "windows"))]
+    deliver_linux(&text, target_hwnd);
 }
+
+/// Tiny on-screen notice: "Copied to clipboard". Raised for ~2.5s on the pill
+/// (the `alert` slot, which renders as a small caption under the capsule) so a
+/// turn with no text box to type into is visibly saved and recoverable.
+fn note_clipboard_fallback(len: usize) {
+    let msg = "No text box selected — copied to clipboard".to_string();
+    if let Ok(mut slot) = CLIPBOARD_NOTICE_LOCK.lock() {
+        *slot = Some((msg, std::time::Instant::now(), len));
+    }
+    log_line("paste skipped: no focusable text box — text left on the clipboard");
+}
+
+/// Last "copied to clipboard" notice (message, when, char count). The pill tick
+/// reads it to render the caption and clears it after ~2.5s.
+static CLIPBOARD_NOTICE_LOCK: std::sync::Mutex<Option<(String, std::time::Instant, usize)>> =
+    std::sync::Mutex::new(None);
 
 #[allow(dead_code)]
 fn toggle_cpp_widget(
@@ -2439,7 +2502,10 @@ fn main() -> QuickSttResult<()> {
         } else {
             None
         }
-    };
+    };    // Shared weak handle: any menu (tray, pill, dashboard) can re-open the tour.
+    let onboarding_menu: slint::Weak<OnboardingWidget> =
+        onboarding.as_ref().map(|o| o.as_weak()).unwrap_or_default();
+
     // DPI + initial geometry. The dashboard is the resizable app window, so it
     // opens at its designed size in DIPs (not at the winit minimum, which made
     // it look cramped), clamped to the monitor work area so it never opens
@@ -3007,9 +3073,46 @@ fn dock_hop(
                     }
                     match GlobalHotKeyEvent::receiver().try_recv() {
                         Ok(ev) if ev.id == ptt_id => {
+                            // Trigger mode: 0 = push-to-talk (hold), 1 = toggle
+                            // (press on / press off). Toggle must be honoured
+                            // HERE — the old handler always did hold, so the
+                            // dashboard's mode selector had no effect at all.
+                            let toggle = st
+                                .lock()
+                                .map(|s| s.settings.ctrl_space_mode == 1)
+                                .unwrap_or(false);
                             if ev.state == HotKeyState::Pressed {
                                 capture_current_fg_window(&fg_ptt);
-                                log_line("PTT press");
+                                log_line(&format!(
+                                    "Ctrl+Space pressed ({} mode)",
+                                    if toggle { "toggle" } else { "hold" }
+                                ));
+                                if toggle {
+                                    // Press #2 while a session is live STOPS it
+                                    // (ignoring an in-flight cleaner), so a
+                                    // toggle can always be switched off.
+                                    let live = st
+                                        .lock()
+                                        .map(|s| {
+                                            s.mode == AppMode::Recording
+                                                || s.mode == AppMode::Transcribing
+                                                || s.mode == AppMode::WakewordListening
+                                                || s.pending_transcribes > 0
+                                                || s.mic_open
+                                        })
+                                        .unwrap_or(false);
+                                    if live {
+                                        *mlock(&ph) = false;
+                                        log_line("toggle: session live → stopping");
+                                        if tx
+                                            .try_send(OrchestratorCommand::StopListening)
+                                            .is_err()
+                                        {
+                                            log_line("PTT send FAILED (command loop dead?)");
+                                        }
+                                        continue;
+                                    }
+                                }
                                 *mlock(&ph) = true;
                                 // Hide-1h is NOT cancelled by a trigger. Only a
                                 // PTT session may transiently show the pill for
@@ -3050,7 +3153,13 @@ fn dock_hop(
                                 }
                                 if tx.try_send(OrchestratorCommand::StartListening).is_err() {
                                     log_line("PTT send FAILED (command loop dead?)");
-                                }                            } else if ev.state == HotKeyState::Released {
+                                }
+                            } else if ev.state == HotKeyState::Released {
+                                // In toggle mode the release is irrelevant — the
+                                // session keeps running until the next press.
+                                if toggle {
+                                    continue;
+                                }
                                 log_line("PTT release");
                                 *mlock(&ph) = false;
                                 if tx.try_send(OrchestratorCommand::StopListening).is_err() {
@@ -3821,6 +3930,7 @@ fn dock_hop(
         let pill_menu_w = pill.as_weak();
         let dash_visible_menu = dash_visible.clone();
         let state_menu = state.clone();
+        let onboarding_menu = onboarding_menu.clone();
         pillmenu.on_settings_row(move || {
             hide_pill_menus(&pm, &fly);
             if let Some(p) = pw.upgrade() {
@@ -3833,7 +3943,7 @@ fn dock_hop(
                     uo0,
                 });
             }
-            menu_action(0, &dash_menu, &pill_menu_w, &dash_visible_menu, &state_menu);
+            menu_action(0, &dash_menu, &pill_menu_w, &dash_visible_menu, &state_menu, &onboarding_menu);
         });
     }
     {
@@ -4136,6 +4246,7 @@ fn dock_hop(
         let state_menu = state.clone();
         let hide_until_menu = hide_until.clone();
         let snooze_ptt_menu = snooze_ptt_show.clone();
+        let onboarding_menu = onboarding_menu.clone();
         traymenu.on_row_clicked(move |i| {
             if let Some(t) = tm.upgrade() {
                 let _ = t.hide();
@@ -4145,7 +4256,7 @@ fn dock_hop(
             if i == 3 {
                 snooze_pill_1h(&pill_menu_w, &hide_until_menu, &snooze_ptt_menu);
             } else {
-                menu_action(i, &dash_menu, &pill_menu_w, &dash_visible_menu, &state_menu);
+                menu_action(i, &dash_menu, &pill_menu_w, &dash_visible_menu, &state_menu, &onboarding_menu);
             }
         });
     }
@@ -4825,7 +4936,7 @@ fn dock_hop(
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(-1);
                     log_line(&format!("menutest row {n}"));
-                    menu_action(n, &dash_timer, &pill_w, &dash_visible_timer, &state_timer);
+                    menu_action(n, &dash_timer, &pill_w, &dash_visible_timer, &state_timer, &onboarding_w.clone().unwrap_or_default());
                 } else if cmd == "CYCLE" {
                     // Deterministic dock hop (bypasses Slint double-click
                     // detection, which needs OS-timed press pairs).
@@ -4993,7 +5104,7 @@ fn dock_hop(
                                         match cmd {
                                             1 => {
                                                 log_line("tray native menu: Dashboard");
-                                                menu_action(0, &dash_timer, &pill_w, &dash_visible_timer, &state_timer);
+                                                menu_action(0, &dash_timer, &pill_w, &dash_visible_timer, &state_timer, &onboarding_w.clone().unwrap_or_default());
                                             }
                                             2 => {
                                                 log_line("tray native menu: Show/Hide Widget");
@@ -5105,7 +5216,7 @@ fn dock_hop(
                 };
                 if let Some(i) = row {
                     log_line(&format!("tray native menu row {i}"));
-                    menu_action(i, &dash_timer, &pill_w, &dash_visible_timer, &state_timer);
+                    menu_action(i, &dash_timer, &pill_w, &dash_visible_timer, &state_timer, &onboarding_w.clone().unwrap_or_default());
                 }
             }
             // Deferred single left-click (fires only when no second click
@@ -6033,6 +6144,18 @@ fn dock_hop(
                 } else {
                     s.status_message.clone()
                 };
+                // While the cleanup model is working, say so in the board
+                // title: the board shows the RAW transcript first and the text
+                // visibly changes when the cleaned version lands, so the user
+                // understands why it changed rather than thinking the engine
+                // "fixed" (or broke) their words.
+                let msg = if cleanup_busy_timer.load(Ordering::Relaxed)
+                    && !msg.to_lowercase().contains("clean")
+                {
+                    format!("{msg} · cleaning transcript…")
+                } else {
+                    msg
+                };
                 // Phase morph: idle / recording bars / transcribing dots /
                 // done check / no-model hint. Mic-ON and PTT both render as
                 // recording (bars + red mic).
@@ -6147,6 +6270,22 @@ fn dock_hop(
                     alert_until = now + std::time::Duration::from_secs(4);
                     log_line("alert: hotkey busy");
                 }
+                // Clipboard fallback notice: no text box was focused when the
+                // turn ended, so the words went to the clipboard. Small, brief,
+                // and never in the way (2.5s, the pill's alert slot).
+                let mut clipboard_note = false;
+                {
+                    let note = mlock(&CLIPBOARD_NOTICE_LOCK);
+                    if let Some((msg, at, _len)) = note.as_ref() {
+                        let age = std::time::Instant::now().duration_since(*at);
+                        if age < std::time::Duration::from_millis(2500) {
+                            alert_msg = msg.clone();
+                            alert_until = now + std::time::Duration::from_millis(300);
+                            clipboard_note = true;
+                        }
+                    }
+                }
+                let _ = clipboard_note;
                 if now < alert_until {
                     if p.get_alert_text().as_str() != alert_msg {
                         p.set_alert_text(alert_msg.clone().into());
@@ -7951,6 +8090,44 @@ fn dock_hop(
     {
         dashboard.on_check_updates(move || {
             log_line("dashboard: check updates requested");
+        });
+    }
+    {
+        // Same action as the tray's "Show the intro tour": clear the flag, then
+        // raise the (already built) onboarding window from slide 0.
+        let state = state.clone();
+        let onboarding_menu = onboarding_menu.clone();
+        dashboard.on_show_onboarding(move || {
+            log_line("dashboard: show the intro tour");
+            if let Ok(mut s) = state.lock() {
+                s.settings.onboarding_completed = false;
+                let _ = s.settings.save_all();
+            }
+            if let Some(o) = onboarding_menu.upgrade() {
+                let ww_on = state
+                    .lock()
+                    .map(|s| {
+                        s.wakeword_active
+                            || (!s.settings.wake_word_mode.eq_ignore_ascii_case("Off")
+                                && !s.settings.wake_word_mode.trim().is_empty())
+                    })
+                    .unwrap_or(false);
+                o.set_wakeword_enabled(ww_on);
+                o.set_ctrl_space_output(
+                    state
+                        .lock()
+                        .map(|s| s.settings.ctrl_space_output)
+                        .unwrap_or(0) as i32,
+                );
+                o.set_history_enabled(
+                    state
+                        .lock()
+                        .map(|s| s.settings.history_enabled)
+                        .unwrap_or(true),
+                );
+                o.set_step(0);
+                widget_platform::show_app_window(o.window());
+            }
         });
     }
     {

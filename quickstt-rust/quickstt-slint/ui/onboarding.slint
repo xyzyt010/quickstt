@@ -598,7 +598,7 @@ export component OnboardingWidget inherits Window {
                     Text { text: "Where finished text goes:"; font-size: 13px; color: #E6E6E6; }
                     HorizontalLayout {
                         spacing: 8px;
-                        for i in 3 : Rectangle {
+                        for i in 2 : Rectangle {
                             horizontal-stretch: 1;
                             height: 54px;
                             border-radius: 10px;
@@ -607,7 +607,7 @@ export component OnboardingWidget inherits Window {
                             border-color: root.ctrl-space-output == i ? #FFFFFF : #262626;
                             animate background { duration: 130ms; easing: ease-out; }
                             Text {
-                                text: i == 0 ? "Type it\n(where I'm typing)" : i == 1 ? "Clipboard\n(paste anywhere)" : "Show only\n(preview text)";
+                                text: i == 0 ? "Type it\n(where I'm typing)" : "Clipboard\n(paste anywhere)";
                                 font-size: 11.5px;
                                 font-weight: root.ctrl-space-output == i ? 700 : 500;
                                 color: root.ctrl-space-output == i ? #000000 : #B9B9B9;

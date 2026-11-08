@@ -517,6 +517,8 @@ export component DashboardWidget inherits Window {
     callback set-catalog-lang-filter(string);
     callback browse-recording-dir();
     callback check-updates();
+    /// Re-run the first-run onboarding tour from the top.
+    callback show-onboarding();
     callback close-dashboard();
 
     // Hardware-aware catalog (dynamic cards, image-inspired)
@@ -1109,10 +1111,16 @@ export component DashboardWidget inherits Window {
                                     HorizontalLayout {
                                         spacing: 8px;
                                         Text { text: "Output Target:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
+                                        // Two options only. "Show only" is
+                                        // retired: the transcript is previewed
+                                        // on the TextBoard either way, so a
+                                        // display-only choice could only mean
+                                        // "my dictation never reached the text
+                                        // box".
                                         ComboBox {
                                             height: 40px;
-                                            model: ["Type into active app", "Copy to clipboard", "Show only"];
-                                            current-index: root.ctrl-space-output;
+                                            model: ["Type into active app", "Copy to clipboard"];
+                                            current-index: root.ctrl-space-output == 1 ? 1 : 0;
                                             selected(v) => { root.set-ctrl-space-output(self.current-index); }
                                         }
                                     }
@@ -2445,6 +2453,40 @@ export component DashboardWidget inherits Window {
                                             clicked => { root.check-updates(); }
                                             mouse-cursor: pointer;
                                         }
+                                    }
+                                }
+
+                                // Re-run the onboarding tour: the tour is never
+                                // one-shot, so a new install (or a user who
+                                // skipped it) can always come back to it.
+                                Rectangle {
+                                    height: 40px;
+                                    border-radius: 8px;
+                                    background: tour_touch.has-hover ? #242424 : #161616;
+                                    border-width: 1px;
+                                    border-color: #303030;
+                                    animate background { duration: 130ms; easing: ease-out; }
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        spacing: 10px;
+                                        Text {
+                                            text: "Show the intro tour again";
+                                            font-size: 12.5px;
+                                            color: #E6E6E6;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Text {
+                                            text: "language · model · how to dictate";
+                                            font-size: 11px;
+                                            color: #6A6A6A;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle { width: 12px; }
+                                    }
+                                    tour_touch := TouchArea {
+                                        clicked => { root.show-onboarding(); }
+                                        mouse-cursor: pointer;
                                     }
                                 }
                             }

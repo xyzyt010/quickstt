@@ -138,8 +138,12 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilen
 Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "QuickSTT"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
-; Offer to start it right away (the first run shows the onboarding tour).
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}}"; Flags: nowait postinstall skipifsilent
+; Launch on Finish. `nowait` returns immediately; `postinstall` shows the
+; checkbox on the Finished page; `skipifsilent` keeps /SILENT quiet.
+; NOTE: if a previous QuickSTT is still running, the new instance hands off to
+; it (single-instance IPC) and the onboarding tour is NOT re-shown — quit the
+; old instance first, or use "Show the intro tour" in the tray/dashboard.
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}}"; Flags: nowait postinstall skipifsilent shellexec
 
 [UninstallDelete]
 ; Logs and installer scratch data only — real user data (models/history) is

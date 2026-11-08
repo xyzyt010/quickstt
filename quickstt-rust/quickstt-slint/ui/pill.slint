@@ -591,6 +591,26 @@ export component TrayMenu inherits Window {
             }
         }
 
+        // Row: Show the intro tour again (the onboarding is always re-runnable)
+        Rectangle {
+            height: 30px;
+            border-radius: 6px;
+            background: t5.has-hover ? #21262D : transparent;
+            t5 := TouchArea {
+                clicked => { row_clicked(5); }
+                mouse-cursor: pointer;
+            }
+            Text {
+                x: 10px;
+                height: 30px;
+                text: "Show the intro tour";
+                color: #F0F6FC;
+                font-size: 13px;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+        }
+
         // Separator
         Rectangle {
             height: 6px;
