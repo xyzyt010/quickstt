@@ -5240,6 +5240,7 @@ fn dock_hop(
                             &pill_w,
                             &dash_visible_timer,
                             &state_timer,
+                            &onboarding_w.clone().unwrap_or_default(),
                         ),
                         ToggleWidget => toggle_pill_widget(&pill_w, &state_timer, &hide_until_timer, &snooze_ptt_show_timer, "sni-menu"),
                         Snooze => snooze_pill_1h(&pill_w, &hide_until_timer, &snooze_ptt_show_timer),
