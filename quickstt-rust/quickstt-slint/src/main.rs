@@ -2316,6 +2316,40 @@ fn load_tray_icon() -> Option<(Vec<u8>, u32, u32)> {
 
 fn main() -> QuickSttResult<()> {
     #[cfg(target_os = "windows")]
+    {
+        // The dashboard (and pill) are CPU software-rendered, so when the
+        // machine is slammed — several model loads at once, a dictation
+        // engine mid-decode — Windows may throttle this process's CPU and
+        // timer resolution (battery/efficiency mode) and the window starves:
+        // frames drop, controls flicker, content appears to vanish. Ask the
+        // scheduler to exempt us from execution/timer power throttling and
+        // give the UI thread headroom over the one-shot workers.
+        unsafe {
+            use windows::Win32::System::Threading::{
+                GetCurrentProcess, GetCurrentThread, SetPriorityClass, SetProcessInformation,
+                SetThreadPriority, ABOVE_NORMAL_PRIORITY_CLASS, THREAD_PRIORITY_ABOVE_NORMAL,
+                ProcessPowerThrottling, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+                PROCESS_POWER_THROTTLING_STATE,
+            };
+            let mut state = PROCESS_POWER_THROTTLING_STATE {
+                Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+                    | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+                StateMask: 0,
+            };
+            let _ = SetProcessInformation(
+                GetCurrentProcess(),
+                ProcessPowerThrottling,
+                &mut state as *mut _ as *const _,
+                std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+            );
+            let _ = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
     enable_dark_native_menus();
 
     // Lean renderer: Slint's default GL (FemtoVG/ANGLE/D3D12 + vendor driver)
