@@ -1151,9 +1151,17 @@ fn install_lfm3_audio(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Re
         .metadata()
         .map(|m| m.len() >= model_floor)
         .unwrap_or(false);
-    let mmproj_ok = mmproj_dest
-        .metadata()
-        .map(|m| m.len() >= mmproj_floor)
+    // Any mmproj present counts: Liquid ships quant-matched mmprojs but the
+    // F16 mmproj with a Q4 body is a valid, common pairing.
+    let mmproj_ok = std::fs::read_dir(&model_dir)
+        .map(|rd| {
+            rd.flatten().any(|e| {
+                let n = e.file_name().to_string_lossy().to_lowercase();
+                n.starts_with("mmproj-LFM3-Audio-2B")
+                    && n.ends_with(".gguf")
+                    && e.metadata().map(|m| m.len() >= 150_000_000).unwrap_or(false)
+            })
+        })
         .unwrap_or(false);
     if model_ok && mmproj_ok {
         return Ok(());
@@ -1173,10 +1181,10 @@ fn install_lfm3_audio(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Re
         ),
     );
 
-    let files = [
-        (model_file, &model_dest, model_floor),
-        (mmproj_file, &mmproj_dest, mmproj_floor),
-    ];
+    let mut files = vec![(model_file, &model_dest, model_floor)];
+    if !mmproj_ok {
+        files.push((mmproj_file, &mmproj_dest, mmproj_floor));
+    }
     for (i, (name, dest, floor)) in files.iter().enumerate() {
         let already = dest
             .metadata()

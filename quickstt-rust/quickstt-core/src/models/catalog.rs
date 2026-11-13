@@ -451,25 +451,30 @@ pub fn is_model_installed(desc: &ModelDescriptor) -> bool {
                 || complete("Qwen3-ASR-0.6B-BF16.gguf", 1_550_000_000)
         }
         EngineFamily::Lfm3Audio => {
-            // BOTH halves must be on disk: the speech LLM GGUF and the
-            // mmproj (audio encoder) — the CLI loads neither without the
-            // other. Size floors reject truncated downloads.
-            let pick = if desc.name.contains("Q4_0") && !desc.name.contains("Q4_K_M") {
-                ("LFM3-Audio-2B-Q4_0.gguf", 1_000_000_000u64,
-                 "mmproj-LFM3-Audio-2B-Q4_0.gguf", 150_000_000u64)
+            // BOTH halves must be on disk: the speech LLM GGUF and an mmproj
+            // (audio encoder). The mmproj may be ANY quant — Liquid ships
+            // them interchangeably (F16 mmproj with a Q4_K_M body works fine
+            // and is the best-conditioned audio encoder available) — so the
+            // check is name-agnostic, only size floors apply.
+            let model_file = if desc.name.contains("Q4_0") && !desc.name.contains("Q4_K_M") {
+                ("LFM3-Audio-2B-Q4_0.gguf", 1_000_000_000u64)
             } else {
-                ("LFM3-Audio-2B-Q4_K_M.gguf", 1_050_000_000,
-                 "mmproj-LFM3-Audio-2B-Q4_K_M.gguf", 160_000_000)
+                ("LFM3-Audio-2B-Q4_K_M.gguf", 1_050_000_000)
             };
             let big_ok = model_path
-                .join(pick.0)
+                .join(model_file.0)
                 .metadata()
-                .map(|m| m.len() >= pick.1)
+                .map(|m| m.len() >= model_file.1)
                 .unwrap_or(false);
-            let mm_ok = model_path
-                .join(pick.2)
-                .metadata()
-                .map(|m| m.len() >= pick.3)
+            let mm_ok = std::fs::read_dir(&model_path)
+                .map(|rd| {
+                    rd.flatten().any(|e| {
+                        let n = e.file_name().to_string_lossy().to_lowercase();
+                        n.starts_with("mmproj-LFM3-Audio-2B")
+                            && n.ends_with(".gguf")
+                            && e.metadata().map(|m| m.len() >= 150_000_000).unwrap_or(false)
+                    })
+                })
                 .unwrap_or(false);
             big_ok && mm_ok
         }
