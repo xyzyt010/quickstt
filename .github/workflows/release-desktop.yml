@@ -150,6 +150,11 @@ jobs:
           cp -f target/release/tools/whisper_cpp/whisper-cli dist/AppDir/usr/bin/tools/whisper_cpp/ 2>/dev/null || true
           mkdir -p dist/AppDir/usr/bin/tools/lfm3_audio
           cp -f target/release/tools/lfm3_audio/llama-cli dist/AppDir/usr/bin/tools/lfm3_audio/ 2>/dev/null || true
+          cp -f assets/Inter-VariableFont.ttf dist/AppDir/usr/bin/Inter-VariableFont.ttf 2>/dev/null || true
+          cp -f assets/MaterialSymbolsOutlined.ttf dist/AppDir/usr/bin/MaterialSymbolsOutlined.ttf 2>/dev/null || true
+          mkdir -p dist/AppDir/usr/lib/quickstt
+          cp -f assets/Inter-VariableFont.ttf dist/AppDir/usr/lib/quickstt/Inter-VariableFont.ttf 2>/dev/null || true
+          cp -f assets/MaterialSymbolsOutlined.ttf dist/AppDir/usr/lib/quickstt/MaterialSymbolsOutlined.ttf 2>/dev/null || true
           if ! ls dist/*.AppImage 1>/dev/null 2>&1; then
             echo "AppImage failed — building plain tarball payload"
             rm -rf dist/payload && mkdir -p dist/payload
@@ -159,6 +164,8 @@ jobs:
             cp -f target/release/stt_service dist/payload/stt_service 2>/dev/null || true
             cp -f ../Source/mic_active.svg ../Source/mic_inactive.svg ../Source/Untitled-1.svg dist/payload/ 2>/dev/null || true
             cp -f assets/icon_app.png dist/payload/icon_app.png 2>/dev/null || true
+            cp -f assets/Inter-VariableFont.ttf dist/payload/Inter-VariableFont.ttf
+            cp -f assets/MaterialSymbolsOutlined.ttf dist/payload/MaterialSymbolsOutlined.ttf
             cp -r target/release/tools dist/payload/tools 2>/dev/null || true
             cp -r target/release/wakeword_models dist/payload/wakeword_models 2>/dev/null || true
             mkdir -p dist/payload/assets

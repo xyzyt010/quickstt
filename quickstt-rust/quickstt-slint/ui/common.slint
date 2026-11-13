@@ -1,0 +1,74 @@
+// Shared building blocks used by every screen.
+
+// Material Symbols glyph rendered as text — the font is registered at app
+// startup from the vendored MaterialSymbolsOutlined.ttf (see main.rs), so
+// the PUA codepoint characters below resolve to the icon, not a box.
+// Drawn icons would be pixel-identical everywhere, but maintaining ~40
+// hand-drawn glyphs per OS is what made the UI look dated; Google's icon
+// font is the consistent baseline the user asked for.
+export component IconSym inherits Rectangle {
+    in property <string> glyph;
+    in property <color> tint: #9A9A9A;
+    in property <length> size: 22px;
+    in property <int> weight: 400;
+
+    width: root.size;
+    height: root.size;
+    clip: false;
+
+    Text {
+        text: root.glyph;
+        // The literal codepoint characters are stored in the string, so no
+        // escape handling is required here.
+        font-family: "Material Symbols Outlined";
+        font-size: root.size;
+        font-weight: root.weight;
+        color: root.tint;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// One-tap segmented toggle: leading icon + label, hairline plate, filled
+// when armed. Replaces std-widgets CheckBox in the history toolbar (the
+// stock checkbox was visually from 2012).
+export component ToggleRow inherits Rectangle {
+    in property <string> glyph;
+    in property <string> label: "";
+    in property <bool> on: false;
+    callback toggled(bool);
+
+    height: 40px;
+    border-radius: 8px;
+    background: root.on ? #1A1A1A : (hit.has-hover ? #131313 : transparent);
+    border-width: 1px;
+    border-color: root.on ? #FFFFFF : (hit.has-hover ? #2A2A2A : transparent);
+    animate background { duration: 130ms; easing: ease-out; }
+    animate border-color { duration: 130ms; easing: ease-out; }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+        IconSym {
+            glyph: root.glyph;
+            size: 18px;
+            tint: root.on ? #FFFFFF : #8E8E8E;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.label;
+            font-size: 12px;
+            font-weight: root.on ? 600 : 500;
+            color: root.on ? #FFFFFF : #B9B9B9;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    hit := TouchArea {
+        clicked => { root.toggled(!root.on); }
+        mouse-cursor: pointer;
+    }
+}
+

@@ -104,6 +104,9 @@ Name: "autostart"; Description: "Start QuickSTT automatically when I sign in"; G
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 ; The blue mic icon, also used for every shortcut the installer creates.
 Source: "..\..\icon_app.ico"; DestDir: "{app}"; Flags: ignoreversion; Components: core
+Source: "..\assets\MaterialSymbolsOutlined.ttf"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: core
+Source: "..\assets\Inter-VariableFont.ttf"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: core
+Source: "..\assets\Inter-VariableFont.ttf.license"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: core
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion skipifsourcedoesntexist; Components: core
 
 ; ── engine runtimes the app resolves from <exe>\tools at runtime ──

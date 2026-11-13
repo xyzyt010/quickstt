@@ -1,4 +1,5 @@
 import { Button, CheckBox, ComboBox, LineEdit, Slider, ScrollView } from "std-widgets.slint";
+import { IconSym, ToggleRow } from "common.slint";
 
 // Model card for the hardware-aware catalog (image-inspired): name, blurb,
 // badge (Active/Recommended/Legacy/"", pink pills), accuracy/speed 0-100,
@@ -35,196 +36,6 @@ export struct HistRow {
     selected: bool,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Transcript History building blocks.
-//
-// Every glyph below is DRAWN (paths and rectangles), never a font glyph ("▶",
-// "🗑", "⋮", …). Font glyphs render at different weights/baselines per OS and
-// emoji can come out in colour; drawn shapes are pixel-identical everywhere.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// "Copy" — two stacked sheets. The front sheet paints the plate colour behind
-// it so the back sheet's stroke never crosses through the paper.
-component IconCopy inherits Rectangle {
-    in property <color> tint: #9A9A9A;
-    in property <color> sheet-bg: #131313;
-    width: 28px;
-    height: 28px;
-
-    Rectangle {
-        x: 12.25px;
-        y: 7px;
-        width: 8px;
-        height: 10.5px;
-        border-radius: 2.5px;
-        border-width: 1.4px;
-        border-color: root.tint;
-    }
-    Rectangle {
-        x: 7.75px;
-        y: 10.5px;
-        width: 8px;
-        height: 10.5px;
-        border-radius: 2.5px;
-        border-width: 1.4px;
-        border-color: root.tint;
-        background: root.sheet-bg;
-        animate background { duration: 130ms; easing: ease-out; }
-    }
-}
-
-// "Copied" tick.
-component IconCheck inherits Rectangle {
-    in property <color> tint: #4ADE80;
-    width: 28px;
-    height: 28px;
-    Path {
-        commands: "M 8.6 14.6 L 12.2 18.2 L 19.4 10.6";
-        fill: transparent;
-        stroke: root.tint;
-        stroke-width: 2.2px;
-        stroke-line-cap: round;
-        stroke-line-join: round;
-        // Pin the viewbox to the icon canvas. Without it, Slint scales the
-        // path's implicit bounding box to fill the element (glyphs render
-        // several times too big and off-center).
-        viewbox-width: 28;
-        viewbox-height: 28;
-    }
-}
-
-// "Delete" — lid bar + handle bracket + tapered can; the strokes meet at the
-// lid instead of crossing, so no occluder is needed.
-component IconTrash inherits Rectangle {
-    in property <color> tint: #9A9A9A;
-    width: 28px;
-    height: 28px;
-
-    Rectangle {
-        x: 8px;
-        y: 9.6px;
-        width: 12px;
-        height: 1.4px;
-        border-radius: 0.7px;
-        background: root.tint;
-    }
-    Path {
-        commands: "M 11.2 10.3 L 11.2 7.8 L 16.8 7.8 L 16.8 10.3";
-        fill: transparent;
-        stroke: root.tint;
-        stroke-width: 1.4px;
-        stroke-line-cap: round;
-        stroke-line-join: round;
-        viewbox-width: 28;
-        viewbox-height: 28;
-    }
-    Path {
-        commands: "M 9.6 10.9 L 10.4 20.8 L 17.6 20.8 L 18.4 10.9";
-        fill: transparent;
-        stroke: root.tint;
-        stroke-width: 1.4px;
-        stroke-line-cap: round;
-        stroke-line-join: round;
-        viewbox-width: 28;
-        viewbox-height: 28;
-    }
-    Rectangle {
-        x: 12.2px;
-        y: 13.6px;
-        width: 1.2px;
-        height: 4.6px;
-        border-radius: 0.6px;
-        background: root.tint;
-        opacity: 0.75;
-    }
-    Rectangle {
-        x: 14.8px;
-        y: 13.6px;
-        width: 1.2px;
-        height: 4.6px;
-        border-radius: 0.6px;
-        background: root.tint;
-        opacity: 0.75;
-    }
-}
-
-// "⋮" — three drawn dots.
-component IconMore inherits Rectangle {
-    in property <color> tint: #9A9A9A;
-    width: 28px;
-    height: 28px;
-    Rectangle { x: 12.3px; y: 6.9px; width: 3.4px; height: 3.4px; border-radius: 1.7px; background: root.tint; }
-    Rectangle { x: 12.3px; y: 12.3px; width: 3.4px; height: 3.4px; border-radius: 1.7px; background: root.tint; }
-    Rectangle { x: 12.3px; y: 17.7px; width: 3.4px; height: 3.4px; border-radius: 1.7px; background: root.tint; }
-}
-
-// Hamburger (☰) — three drawn bars. Collapse / expand the sidebar exactly like
-// the old chevron, but it reads as a menu affordance at touch sizes and never
-// rotates (a rotating glyph looked like a spinner mid-animation).
-component IconMenuBars inherits Rectangle {
-    in property <color> tint: #9A9A9A;
-    width: 28px;
-    height: 28px;
-    Rectangle { x: 7px; y: 8.9px; width: 14px; height: 1.8px; border-radius: 0.9px; background: root.tint; }
-    Rectangle { x: 7px; y: 13.1px; width: 14px; height: 1.8px; border-radius: 0.9px; background: root.tint; }
-    Rectangle { x: 7px; y: 17.3px; width: 14px; height: 1.8px; border-radius: 0.9px; background: root.tint; }
-}
-
-// "Download" — arrow into a tray (row menu).
-component IconDownload inherits Rectangle {
-    in property <color> tint: #B9B9B9;
-    width: 28px;
-    height: 28px;
-    Rectangle {
-        x: 13.35px;
-        y: 7.4px;
-        width: 1.4px;
-        height: 7.2px;
-        border-radius: 0.7px;
-        background: root.tint;
-    }
-    Path {
-        commands: "M 10.7 11.6 L 14.05 15 L 17.4 11.6";
-        fill: transparent;
-        stroke: root.tint;
-        stroke-width: 1.4px;
-        stroke-line-cap: round;
-        stroke-line-join: round;
-        viewbox-width: 28;
-        viewbox-height: 28;
-    }
-    Path {
-        commands: "M 9.4 18.6 L 9.4 20.6 L 18.6 20.6 L 18.6 18.6";
-        fill: transparent;
-        stroke: root.tint;
-        stroke-width: 1.4px;
-        stroke-line-cap: round;
-        stroke-line-join: round;
-        viewbox-width: 28;
-        viewbox-height: 28;
-    }
-}
-
-// Play triangle / pause bars (28px canvases dropped into the 32px circle).
-component IconPlay inherits Rectangle {
-    in property <color> tint: #E6E6E6;
-    width: 28px;
-    height: 28px;
-    Path {
-        commands: "M 11 8.2 L 11 19.8 L 19.6 14 Z";
-        fill: root.tint;
-        viewbox-width: 28;
-        viewbox-height: 28;
-    }
-}
-component IconPause inherits Rectangle {
-    in property <color> tint: #000000;
-    width: 28px;
-    height: 28px;
-    Rectangle { x: 10.2px; y: 8.2px; width: 2.8px; height: 11.6px; border-radius: 1.4px; background: root.tint; }
-    Rectangle { x: 15px; y: 8.2px; width: 2.8px; height: 11.6px; border-radius: 1.4px; background: root.tint; }
-}
-
 // Row action button: 40x40 hit target (touch-friendly — a 28px plate alone is
 // below the 44px fingertip rule once the row is scaled), plate + drawn glyph,
 // hover / press / active states with quick consistent animations.
@@ -255,25 +66,37 @@ component HistButton inherits Rectangle {
         animate height { duration: 90ms; easing: ease-out; }
     }
 
-    IconCopy {
+    IconSym {
+        glyph: "\u{E14D}";
         x: 6px;
         y: 6px;
         visible: root.kind == 0 && !root.copied;
         tint: (bt.has-hover || root.active) ? root.hover-tint : root.rest-tint;
-        sheet-bg: root.copied ? #14301F : ((bt.has-hover || root.active) ? root.hover-plate : root.rest-plate);
+        size: 18px;
     }
-    IconCheck { x: 6px; y: 6px; visible: root.kind == 0 && root.copied; }
-    IconTrash {
+    IconSym {
+        glyph: "\u{E5CA}";
+        x: 6px;
+        y: 6px;
+        visible: root.kind == 0 && root.copied;
+        tint: #4ADE80;
+        size: 18px;
+    }
+    IconSym {
+        glyph: "\u{E872}";
         x: 6px;
         y: 6px;
         visible: root.kind == 1;
         tint: (bt.has-hover || root.active) ? root.hover-tint : root.rest-tint;
+        size: 18px;
     }
-    IconMore {
+    IconSym {
+        glyph: "\u{E5D4}";
         x: 6px;
         y: 6px;
         visible: root.kind == 2;
         tint: (bt.has-hover || root.active) ? root.hover-tint : root.rest-tint;
+        size: 18px;
     }
 
     bt := TouchArea {
@@ -296,10 +119,10 @@ component HistMenuItem inherits Rectangle {
     background: hit.has-hover ? (root.danger ? #2A1414 : #242424) : transparent;
     animate background { duration: 110ms; easing: ease-out; }
 
-    IconCopy { x: 8px; y: 8px; visible: root.kind == 0 && !root.copied; tint: root.danger ? #FF8A8A : #B9B9B9; sheet-bg: hit.has-hover ? (root.danger ? #2A1414 : #242424) : #171717; }
-    IconCheck { x: 8px; y: 8px; visible: root.kind == 0 && root.copied; }
-    IconDownload { x: 8px; y: 8px; visible: root.kind == 1; }
-    IconTrash { x: 8px; y: 8px; visible: root.kind == 2; tint: #FF8A8A; }
+    IconSym { glyph: "\u{E14D}"; x: 8px; y: 8px; visible: root.kind == 0 && !root.copied; tint: root.danger ? #FF8A8A : #B9B9B9; size: 17px; }
+    IconSym { glyph: "\u{E5CA}"; x: 8px; y: 8px; visible: root.kind == 0 && root.copied; tint: #4ADE80; size: 17px; }
+    IconSym { glyph: "\u{E171}"; x: 8px; y: 8px; visible: root.kind == 1; size: 17px; }
+    IconSym { glyph: "\u{E872}"; x: 8px; y: 8px; visible: root.kind == 2; tint: #FF8A8A; size: 17px; }
 
     Text {
         x: 46px;
@@ -574,26 +397,58 @@ export component DashboardWidget inherits Window {
                 border-color: #1A1A1A;
 
                 VerticalLayout {
-                    padding: root.rail-active ? 4px : 12px;
-                    spacing: 6px;
+                    padding: root.rail-active ? 6px : 12px;
+                    spacing: 8px;
 
-                    // Collapse / expand — TOP RIGHT of the rail (the panel's
-                    // title-bar control): right-aligned, always reachable and
-                    // visible in both states, and it never shifts nav items.
-                    // Drawn hamburger (☰), 44x40 touch target, no rotation.
+                    // Brand row: the app logo centred against the wordmark,
+                    // right-aligned menu button for collapse/expand. The same
+                    // icon_app.png ships everywhere (exe, tray, installer, both
+                    // platforms), so the brand is pixel-identical on Windows/Mint.
                     HorizontalLayout {
-                        alignment: end;
+                        spacing: 10px;
+                        padding-left: root.rail-active ? 0px : 4px;
+                        padding-right: 2px;
+
+                        Image {
+                            source: @image-url("../../assets/app_icon.svg");
+                            width: root.rail-active ? 28px : 34px;
+                            height: root.rail-active ? 28px : 34px;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        VerticalLayout {
+                            visible: !root.rail-active;
+                            spacing: 0px;
+                            padding-top: 2px;
+                            Text {
+                                text: "QuickSTT";
+                                font-size: 16px;
+                                font-weight: 700;
+                                color: #FFFFFF;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Offline voice typing";
+                                font-size: 10.5px;
+                                color: #6A6A6A;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        // Collapse / expand — minimal Material Symbols menu glyph
+                        // in a 40px touch target (was a hand-drawn hamburger).
                         Rectangle {
                             width: root.tap-size;
                             height: 40px;
                             border-radius: 8px;
-                            background: chev_touch.has-hover ? #1A1A1A : transparent;
+                            background: chev_touch.has-hover ? #161616 : transparent;
                             border-width: chev_touch.has-hover ? 1px : 0px;
                             border-color: #262626;
-                            IconMenuBars {
+                            IconSym {
+                                glyph: "\u{E5D2}";
+                                tint: chev_touch.has-hover ? #FFFFFF : #9A9A9A;
+                                size: 22px;
                                 x: (parent.width - self.width) / 2;
                                 y: (parent.height - self.height) / 2;
-                                tint: chev_touch.has-hover ? #FFFFFF : #9A9A9A;
                             }
                             chev_touch := TouchArea {
                                 // Write the property directly for a 0 ms visual
@@ -619,11 +474,11 @@ export component DashboardWidget inherits Window {
                         HorizontalLayout {
                             padding-left: root.rail-active ? 0px : 12px;
                             spacing: root.rail-active ? 0px : 10px;
-                            Text {
-                                text: "⚙";
-                                font-size: 15px;
-                                color: root.active-tab == 0 ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
+                            alignment: root.rail-active ? center : start;
+                            IconSym {
+                                glyph: "\u{E8B8}";
+                                tint: root.active-tab == 0 ? #FFFFFF : #9A9A9A;
+                                size: 22px;
                             }
                             Text {
                                 text: "General";
@@ -652,11 +507,11 @@ export component DashboardWidget inherits Window {
                         HorizontalLayout {
                             padding-left: root.rail-active ? 0px : 12px;
                             spacing: root.rail-active ? 0px : 10px;
-                            Text {
-                                text: "🎙";
-                                font-size: 15px;
-                                color: root.active-tab == 1 ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
+                            alignment: root.rail-active ? center : start;
+                            IconSym {
+                                glyph: "\u{E1B8}";
+                                tint: root.active-tab == 1 ? #FFFFFF : #9A9A9A;
+                                size: 22px;
                             }
                             Text {
                                 text: "Speech Models";
@@ -685,11 +540,11 @@ export component DashboardWidget inherits Window {
                         HorizontalLayout {
                             padding-left: root.rail-active ? 0px : 12px;
                             spacing: root.rail-active ? 0px : 10px;
-                            Text {
-                                text: "🎨";
-                                font-size: 15px;
-                                color: root.active-tab == 2 ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
+                            alignment: root.rail-active ? center : start;
+                            IconSym {
+                                glyph: "\u{E3B7}";
+                                tint: root.active-tab == 2 ? #FFFFFF : #9A9A9A;
+                                size: 22px;
                             }
                             Text {
                                 text: "Widget Style";
@@ -718,11 +573,11 @@ export component DashboardWidget inherits Window {
                         HorizontalLayout {
                             padding-left: root.rail-active ? 0px : 12px;
                             spacing: root.rail-active ? 0px : 10px;
-                            Text {
-                                text: "👂";
-                                font-size: 15px;
-                                color: root.active-tab == 3 ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
+                            alignment: root.rail-active ? center : start;
+                            IconSym {
+                                glyph: "\u{E023}";
+                                tint: root.active-tab == 3 ? #FFFFFF : #9A9A9A;
+                                size: 22px;
                             }
                             Text {
                                 text: "Wake Words & VAD";
@@ -751,11 +606,11 @@ export component DashboardWidget inherits Window {
                         HorizontalLayout {
                             padding-left: root.rail-active ? 0px : 12px;
                             spacing: root.rail-active ? 0px : 10px;
-                            Text {
-                                text: "🔄";
-                                font-size: 15px;
-                                color: root.active-tab == 4 ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
+                            alignment: root.rail-active ? center : start;
+                            IconSym {
+                                glyph: "\u{E30A}";
+                                tint: root.active-tab == 4 ? #FFFFFF : #9A9A9A;
+                                size: 22px;
                             }
                             Text {
                                 text: "System & Info";
@@ -784,11 +639,11 @@ export component DashboardWidget inherits Window {
                         HorizontalLayout {
                             padding-left: root.rail-active ? 0px : 12px;
                             spacing: root.rail-active ? 0px : 10px;
-                            Text {
-                                text: "🗂";
-                                font-size: 15px;
-                                color: root.active-tab == 5 ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
+                            alignment: root.rail-active ? center : start;
+                            IconSym {
+                                glyph: "\u{E28E}";
+                                tint: root.active-tab == 5 ? #FFFFFF : #9A9A9A;
+                                size: 22px;
                             }
                             Text {
                                 text: "History";
@@ -820,12 +675,11 @@ export component DashboardWidget inherits Window {
                         HorizontalLayout {
                             alignment: center;
                             spacing: 6px;
-                            Rectangle {
-                                width: 8px;
-                                height: 8px;
-                                border-radius: 4px;
-                                background: #FFFFFF;
-                                y: 14px;
+                            IconSym {
+                                glyph: "\u{E932}";
+                                tint: #34D399;
+                                size: 15px;
+                                y: (parent.height - self.height) / 2;
                             }
                             Text {
                                 text: "Offline Ready";
@@ -2004,12 +1858,13 @@ export component DashboardWidget inherits Window {
                                                                 // disarms it again, so no modal is needed
                                                                 // and history can never be nuked by one
                                                                 // stray click.
-                                                                CheckBox {
-                                                                    height: 40px;
-                                                                    text: root.rail-mode ? "Select" : "Select turns";
-                                                                    checked: root.history-selecting;
-                                                                    toggled => { root.history-set-selecting(self.checked); }
-                                                                }
+                                                                ToggleRow {
+                                                                     width: 132px;
+                                                                     glyph: "\u{E834}";
+                                                                     label: root.rail-mode ? "Select" : "Select turns";
+                                                                     on: root.history-selecting;
+                                                                     toggled(v) => { root.history-set-selecting(v); }
+                                                                 }
                                                                 Rectangle {
                                                                     width: 140px;
                                                                     height: 40px;
@@ -2049,12 +1904,13 @@ export component DashboardWidget inherits Window {
                                                                 }
                                                                 // Backup toggle: OFF stops new turns from
                                                                 // being recorded (existing rows stay).
-                                                                CheckBox {
-                                                                    height: 40px;
-                                                                    text: root.rail-mode ? "Back up" : "Back up new turns";
-                                                                    checked: root.history-enabled;
-                                                                    toggled => { root.set-history-enabled(self.checked); }
-                                                                }
+                                                                ToggleRow {
+                                                                     width: 148px;
+                                                                     glyph: "\u{E2C7}";
+                                                                     label: root.rail-mode ? "Back up" : "Back up new turns";
+                                                                     on: root.history-enabled;
+                                                                     toggled(v) => { root.set-history-enabled(v); }
+                                                                 }
                                                             }
 
                                                             // Selection action bar: counts, select-all, and
@@ -2069,12 +1925,14 @@ export component DashboardWidget inherits Window {
                                                                     vertical-alignment: center;
                                                                     min-width: 78px;
                                                                 }
-                                                                CheckBox {
-                                                                    height: 36px;
-                                                                    text: root.rail-mode ? "All" : "Select all";
-                                                                    checked: root.history-all-selected;
-                                                                    toggled => { root.history-select-all(self.checked); }
-                                                                }
+                                                                ToggleRow {
+                                                                     width: 108px;
+                                                                     height: 36px;
+                                                                     glyph: "\u{E162}";
+                                                                     label: root.rail-mode ? "All" : "Select all";
+                                                                     on: root.history-all-selected;
+                                                                     toggled(v) => { root.history-select-all(v); }
+                                                                 }
                                                                 Rectangle { horizontal-stretch: 1; }
                                                                 Rectangle {
                                                                     width: 150px;
@@ -2120,14 +1978,32 @@ export component DashboardWidget inherits Window {
                                                                 }
                                                             }
 
-                                                            if root.history-items.length == 0 : Text {
-                                                                text: root.history-selecting
-                                                                    ? "Nothing to select yet — every turn you dictate lands here with its audio."
-                                                                    : "No transcriptions yet. Hold Ctrl+Space and speak — every finished turn lands here with its audio.";
-                                                                font-size: 12px;
-                                                                color: #9A9A9A;
-                                                                wrap: word-wrap;
-                                                            }
+                                                             if root.history-items.length == 0 : Rectangle {
+                                                                 height: 230px;
+                                                                 VerticalLayout {
+                                                                     alignment: center;
+                                                                     spacing: 8px;
+                                                                     IconSym {
+                                                                         glyph: "\u{E1B8}";
+                                                                         size: 46px;
+                                                                         tint: #2E2E2E;
+                                                                     }
+                                                                     Text {
+                                                                         text: root.history-selecting ? "Nothing to select yet" : "Nothing recorded yet";
+                                                                         font-size: 14px;
+                                                                         font-weight: 600;
+                                                                         color: #D8D8D8;
+                                                                         horizontal-alignment: center;
+                                                                     }
+                                                                     Text {
+                                                                         text: "Hold Ctrl+Space and speak — every finished turn lands here with its audio.";
+                                                                         font-size: 11.5px;
+                                                                         color: #8E8E8E;
+                                                                         horizontal-alignment: center;
+                                                                         wrap: word-wrap;
+                                                                     }
+                                                                 }
+                                                             }
 
                                                             for item[i] in root.history-items : Rectangle {
                                                                 background: card_touch.has-hover ? #101010 : #0A0A0A;
@@ -2174,14 +2050,16 @@ export component DashboardWidget inherits Window {
                                                                                 animate border-color { duration: 120ms; easing: ease-out; }
                                                                                  // Drawn check (the same Path tick as the copy
                                                                                  // flash) - no font glyph, identical on every OS.
-                                                                                 IconCheck {
-                                                                                     visible: item.selected;
-                                                                                     width: 22px;
-                                                                                     height: 22px;
-                                                                                     x: (parent.width - self.width) / 2;
-                                                                                     y: (parent.height - self.height) / 2;
-                                                                                     tint: #000000;
-                                                                                 }
+                                                                                 IconSym {
+                                                                                      visible: item.selected;
+                                                                                      width: 22px;
+                                                                                      height: 22px;
+                                                                                      x: (parent.width - self.width) / 2;
+                                                                                      y: (parent.height - self.height) / 2;
+                                                                                      glyph: "\u{E5CA}";
+                                                                                      tint: #000000;
+                                                                                      size: 20px;
+                                                                                  }
                                                                             }
                                                                             sel_touch := TouchArea {
                                                                                 clicked => { root.history-set-selected(i, !item.selected); }
@@ -2212,16 +2090,21 @@ export component DashboardWidget inherits Window {
                                                                                 animate width { duration: 90ms; easing: ease-out; }
                                                                                 animate height { duration: 90ms; easing: ease-out; }
                                                                             }
-                                                                            IconPlay {
+                                                                            IconSym {
                                                                                 x: 8px;
                                                                                 y: 8px;
                                                                                 visible: !item.playing;
+                                                                                glyph: "\u{E037}";
                                                                                 tint: play_touch.has-hover ? #FFFFFF : #E6E6E6;
+                                                                                size: 20px;
                                                                             }
-                                                                            IconPause {
+                                                                            IconSym {
                                                                                 x: 8px;
                                                                                 y: 8px;
                                                                                 visible: item.playing;
+                                                                                glyph: "\u{E034}";
+                                                                                tint: #000000;
+                                                                                size: 20px;
                                                                             }
                                                                             play_touch := TouchArea {
                                                                                 enabled: item.has_audio;
@@ -2427,6 +2310,37 @@ export component DashboardWidget inherits Window {
                                 padding: 16px;
                                 spacing: 12px;
 
+                                // Brand row: the same app icon that ships in the exe,
+                                // tray and both installers — centered, always.
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 10px;
+                                    padding-top: 4px;
+                                    padding-bottom: 2px;
+                                    Image {
+                                        source: @image-url("../../assets/app_icon.svg");
+                                        width: 44px;
+                                        height: 56px;
+                                    }
+                                    VerticalLayout {
+                                        spacing: 0px;
+                                        padding-top: 2px;
+                                        Text {
+                                            text: "QuickSTT";
+                                            font-size: 17px;
+                                            font-weight: 700;
+                                            color: #FFFFFF;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: "Offline voice typing";
+                                            font-size: 10.5px;
+                                            color: #6A6A6A;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
                                 Text { text: "Version & Software Updates"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
                                 HorizontalLayout {
@@ -2519,7 +2433,7 @@ export component DashboardWidget inherits Window {
         animate opacity { duration: 260ms; easing: ease-in-out; }
         animate y { duration: 260ms; easing: ease-out; }
 
-        IconCheck { x: 10px; y: 6px; }
+        IconSym { glyph: "\u{E5CA}"; x: 10px; y: 6px; tint: #4ADE80; size: 24px; }
 
         Text {
             x: 44px;

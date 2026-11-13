@@ -105,6 +105,9 @@ export component OnboardingWidget inherits Window {
     property <bool> demo_playing: true;
     // Teaching-scene phase (0..89): cursor click, Ctrl+Space, then pill hover.
     property <int> demo_phase: mod(root.demo_tick, 90);
+    // Haze backdrop: the demo slides render inside a single warm glow with
+    // hard vignette edges, so the eye lands on the pill — not the chrome.
+    property <brush> haze: @radial-gradient(circle, #16120A 0%, #0C0B07 42%, #050505 100%);
 
     Timer {
         interval: 90ms;
@@ -151,23 +154,23 @@ export component OnboardingWidget inherits Window {
         VerticalLayout {
             spacing: 6px;
             Text {
-                text: root.step == 0 ? "Dictate anywhere, offline." :
-                      root.step == 1 ? "How a turn works" :
-                      root.step == 2 ? "How to start a turn" :
-                      root.step == 3 ? "Choose your language" :
-                      root.step == 4 ? "Pick a speech model" :
-                      "Set your preferences";
+                text: root.step == 0 ? "Hold Ctrl+Space. Speak." :
+                      root.step == 1 ? "See it land." :
+                      root.step == 2 ? "Try it now." :
+                      root.step == 3 ? "Language" :
+                      root.step == 4 ? "Pick your model" :
+                      "You are set";
                 font-size: 26px;
                 font-weight: 700;
                 color: #FFFFFF;
             }
             Text {
-                text: root.step == 0 ? "Hold Ctrl+Space, speak, and your words appear where you were typing. Everything runs on this PC — nothing is uploaded." :
-                      root.step == 1 ? "Here is a real turn, start to finish. The pill wakes, listens, and types the finished text into the app you were using." :
-                      root.step == 2 ? "Three ways to start, shown below: click into any text box and hold Ctrl+Space, click the pill's mic, or say a wake word. Every turn is saved to History with its audio." :
-                      root.step == 3 ? "Auto detects the spoken language when the model supports it. Models with a single language hide this choice entirely — and every model remembers its own setting." :
-                      root.step == 4 ? "A model that fits your machine and your language is pre-selected below. You can change it any time from Settings → Speech Models." :
-                      "Three choices, all changeable later. Defaults are shown; you are never locked in.";
+                text: root.step == 0 ? "Your words appear where you were typing — every dictation runs on this PC, nothing is uploaded." :
+                      root.step == 1 ? "The pill wakes, hears you, and types at your cursor." :
+                      root.step == 2 ? "The same three moves work anywhere you can type." :
+                      root.step == 3 ? "Auto detects, or pin one language — each model remembers its choice." :
+                      root.step == 4 ? "Recommended for this PC — change any time in Settings." :
+                      "Defaults are sensible. You can change everything later.";
                 font-size: 13px;
                 color: #9A9A9A;
                 wrap: word-wrap;
@@ -177,7 +180,7 @@ export component OnboardingWidget inherits Window {
         // ── Body ──
         Rectangle {
             horizontal-stretch: 1;
-            background: #0C0C0C;
+            background: (root.step == 1 || root.step == 2) ? root.haze : #0C0C0C;
             border-radius: 14px;
             border-width: 1px;
             border-color: #1E1E1E;
@@ -186,45 +189,61 @@ export component OnboardingWidget inherits Window {
                 padding: 20px;
                 spacing: 14px;
 
-                // ══ Step 0: brand hero ══
+                // ══ Step 0: hero — the one move that matters ══
                 if root.step == 0 : VerticalLayout {
                     horizontal-stretch: 1;
                     alignment: center;
                     spacing: 18px;
                     Rectangle {
                         horizontal-stretch: 1;
-                        height: 180px;
-                        // Concentric halo behind the mic logo: drawn rings, no
-                        // bitmap. The outer ring breathes on a slow cycle.
-                        Rectangle {
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            width: 150px;
-                            height: 150px;
-                            border-radius: 75px;
-                            border-width: 1px;
-                            border-color: #FFFFFF14;
-                            opacity: 0.6 + 0.4 * sin(root.demo_tick * 90ms / 1s * 360deg);
-                        }
-                        Rectangle {
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            width: 110px;
-                            height: 110px;
-                            border-radius: 55px;
-                            border-color: #FFFFFF22;
-                            border-width: 1px;
-                        }
+                        height: 110px;
                         Image {
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
-                            width: 62px;
-                            height: 80px;
+                            width: 84px;
+                            height: 108px;
                             source: @image-url("../../assets/app_icon.svg");
                         }
                     }
+                    // The whole app in one image: two keys, held together.
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 12px;
+                        Rectangle {
+                            width: 92px;
+                            height: 48px;
+                            border-radius: 10px;
+                            background: #161616;
+                            border-width: 1px;
+                            border-color: #2A2A2A;
+                            Text {
+                                text: "Ctrl";
+                                font-size: 15px;
+                                font-weight: 700;
+                                color: #FFFFFF;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Rectangle {
+                            width: 148px;
+                            height: 48px;
+                            border-radius: 10px;
+                            background: #161616;
+                            border-width: 1px;
+                            border-color: #2A2A2A;
+                            Text {
+                                text: "Space";
+                                font-size: 15px;
+                                font-weight: 700;
+                                color: #FFFFFF;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
                     Text {
-                        text: "100% offline  ·  your voice never leaves this PC";
+                        text: "hold both  ·  release when you are done  ·  100% offline";
                         font-size: 12px;
                         color: #8E8E8E;
                         horizontal-alignment: center;
@@ -430,7 +449,17 @@ export component OnboardingWidget inherits Window {
                             }
                         }
 
-                        // ── the mini pill (hover → grow → click the mic) ──
+                        // ── the pill (hover → grow → click the mic) ──
+                        // Haze glow behind it: a soft warm bloom that pulls
+                        // the eye to the one control that matters.
+                        Rectangle {
+                            x: parent.width - 260px;
+                            y: parent.height - 130px;
+                            width: 240px;
+                            height: 130px;
+                            border-radius: 130px;
+                            background: @radial-gradient(circle, #FFFFFF14 0%, transparent 70%);
+                        }
                         Rectangle {
                             x: parent.width - 150px;
                             y: parent.height - 52px;

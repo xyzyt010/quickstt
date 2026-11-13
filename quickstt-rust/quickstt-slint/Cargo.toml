@@ -63,6 +63,9 @@ depends = "libgtk-3-0, libayatana-appindicator3-1 | libappindicator3-1, librsvg2
 recommends = "wtype, wl-clipboard, ydotool, libqt6core6, libqt6gui6, libqt6widgets6, libqt6svg6, libqt6network6"
 assets = [
   ["../target/release/quickstt-slint", "usr/bin/quickstt", "755"],
+  ["../assets/Inter-VariableFont.ttf", "usr/lib/quickstt/Inter-VariableFont.ttf", "644"],
+  ["../assets/MaterialSymbolsOutlined.ttf", "usr/lib/quickstt/MaterialSymbolsOutlined.ttf", "644"],
+  ["../assets/Inter-VariableFont.ttf.license", "usr/lib/quickstt/Inter-VariableFont.ttf.license", "644"],
   ["../assets/quickstt.desktop", "usr/share/applications/quickstt.desktop", "644"],
   ["../assets/icon_app.png", "usr/share/pixmaps/quickstt.png", "644"],
   ["../assets/icon_app.png", "usr/share/icons/hicolor/256x256/apps/quickstt.png", "644"],

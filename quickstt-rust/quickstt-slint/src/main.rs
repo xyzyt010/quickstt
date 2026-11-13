@@ -2364,6 +2364,63 @@ fn main() -> QuickSttResult<()> {
     #[cfg(target_os = "windows")]
     enable_dark_native_menus();
 
+    // Text fonts: Inter (Slint's own bundled metrics) as the primary family and
+    // Material Symbols for icon glyphs. Registering ANY SLINT_FONT_PATH font
+    // makes it the ONLY generic SansSerif/SystemUi family (sharedfontique
+    // replaces, not merges), so registering the icon font alone renders all
+    // body text as icon outlines — exactly the "weird text" report. Both fonts
+    // ship together; dev/bare builds fall back to the embedded copies.
+    {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+        let inter_embedded = include_bytes!("../../assets/Inter-VariableFont.ttf");
+        let ms_embedded = include_bytes!("../../assets/MaterialSymbolsOutlined.ttf");
+        let mut fonts: Vec<std::path::PathBuf> = Vec::new();
+        for (name, embedded) in [
+            ("Inter-VariableFont.ttf", inter_embedded.as_slice()),
+            ("MaterialSymbolsOutlined.ttf", ms_embedded.as_slice()),
+        ] {
+            let mut chosen: Option<std::path::PathBuf> = None;
+            if let Some(ref d) = exe_dir {
+                let rels = [
+                    name.to_string(),
+                    format!("assets/{name}"),
+                    format!("../lib/quickstt/{name}"),
+                    format!("../lib/quickstt/assets/{name}"),
+                    format!("../share/quickstt/{name}"),
+                ];
+                for rel in &rels {
+                    let p = d.join(rel);
+                    if p.exists() {
+                        chosen = Some(p);
+                        break;
+                    }
+                }
+            }
+            let path = match chosen {
+                Some(p) => p,
+                None => {
+                    let dest = exe_dir
+                        .as_ref()
+                        .map(|d| d.join(name))
+                        .unwrap_or_else(|| std::env::temp_dir().join(name));
+                    let _ = std::fs::write(&dest, embedded);
+                    dest
+                }
+            };
+            fonts.push(path);
+        }
+        let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+        let mut joined = std::env::var_os("SLINT_FONT_PATH").unwrap_or_default();
+        for f in &fonts {
+            if !joined.is_empty() {
+                joined.push(sep);
+            }
+            joined.push(f.as_os_str());
+        }
+        std::env::set_var("SLINT_FONT_PATH", joined);
+    }
     // Lean renderer: Slint's default GL (FemtoVG/ANGLE/D3D12 + vendor driver)
     // idles at ~190MB private bytes for our few-hundred-pixel widgets. The
     // CPU software rasterizer draws this near-static UI identically for ~6MB
@@ -3664,7 +3721,11 @@ fn dock_hop(
     // Dashboard window close request (native OS 'X' button)
     {
         let dash_vis = dash_visible.clone();
+        let dash_w = dashboard.as_weak();
         dashboard.window().on_close_requested(move || {
+            if let Some(d) = dash_w.upgrade() {
+                widget_platform::demote_app_window(d.window());
+            }
             if let Ok(mut v) = dash_vis.lock() {
                 *v = false;
             }
@@ -4367,6 +4428,15 @@ fn dock_hop(
     let mut last_toppin = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
+    // Same heartbeat for the two app windows winit unsets (dashboard and the
+    // onboarding tour) — they must stay above whatever had focus when the
+    // user asked for them.
+    let mut last_dash_toppin = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(10))
+        .unwrap_or_else(std::time::Instant::now);
+    let mut last_onb_toppin = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(10))
+        .unwrap_or_else(std::time::Instant::now);
     // Trigger-opened turn (wakeword/clap, not held PTT/mic): the silence
     // setting only auto-closes these — PTT/mic turns end by release/tap.
     let mut sess_triggered = false;
@@ -4420,6 +4490,8 @@ fn dock_hop(
     let dash_w = dashboard.as_weak();
     // The onboarding tour (shown on first run only, None afterwards).
     let onboarding_w = onboarding.as_ref().map(|o| o.as_weak());
+    // Cloned for the 50ms tick (re-asserts topmost while the tour is up).
+    let onboarding_poll = onboarding_w.clone();
     let overlay_w = overlay.as_weak();
     let traymenu_w = traymenu.as_weak();
     let textboard_w = textboard.as_weak();
@@ -4662,6 +4734,21 @@ fn dock_hop(
             // (cheap); the fullscreen overlay has its own 150ms throttle.
             if d.window().is_visible() {
                 d.window().request_redraw();
+                // App-window heartbeat (~2s): winit unsets topmost on its own
+                // schedule (the pill lives with the same race — see the pin
+                // above). Re-raise with a flicker-free NOACTIVATE SetWindowPos.
+                if last_dash_toppin.elapsed() > std::time::Duration::from_secs(2) {
+                    last_dash_toppin = std::time::Instant::now();
+                    widget_platform::restack_topmost(d.window());
+                }
+            }
+            if let Some(ob) = onboarding_poll.as_ref().and_then(|w| w.upgrade()) {
+                if ob.window().is_visible()
+                    && last_onb_toppin.elapsed() > std::time::Duration::from_secs(2)
+                {
+                    last_onb_toppin = std::time::Instant::now();
+                    widget_platform::restack_topmost(ob.window());
+                }
             }
             if let Some(o) = overlay_w.upgrade() {
                 if o.window().is_visible() {
@@ -7157,6 +7244,7 @@ fn dock_hop(
         let dash_w = dashboard.as_weak();
         dashboard.on_close_dashboard(move || {
             if let Some(d) = dash_w.upgrade() {
+                widget_platform::demote_app_window(d.window());
                 let _ = d.hide();
             }
             if let Ok(mut v) = dash_visible.lock() {
@@ -7365,7 +7453,11 @@ fn dock_hop(
 
         // Show it. The dashboard stays closed until the user opens it, so the
         // first thing a new user sees is the tour, not a settings window.
-        widget_platform::show_widget(ob.window());
+        // NOTE: show_app_window — the tour is a real app window (caption,
+        // topmost, APPWINDOW). show_widget styles it like the pill: a
+        // borderless layered overlay with no title bar, which is why the
+        // tour looked "totally inaccurate" next to the actual app.
+        widget_platform::show_app_window(ob.window());
         ob.set_step(0);
         log_line("onboarding shown (first run)");
     }

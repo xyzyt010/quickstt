@@ -166,7 +166,7 @@ pub fn configure_app_window(window: &slint::Window) {
         let hwnd = HWND(raw as _);
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging::{
-                HWND_NOTOPMOST, SetForegroundWindow, SetWindowTextW,
+                HWND_TOPMOST, SetForegroundWindow, SetWindowTextW,
             };
 
             let _ = RemoveWindowSubclass(hwnd, Some(frameless_subclass_proc), 0x51554943);
@@ -199,14 +199,36 @@ pub fn configure_app_window(window: &slint::Window) {
 
             let _ = SetWindowPos(
                 hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE,
+            );
+            SetForegroundWindow(hwnd);
+        }
+    }
+}
+
+/// Drop an app window back below other windows (the inverse of
+/// `configure_app_window`'s topmost promote), so a merely hidden dashboard
+/// never sits above games, players or work.
+pub fn demote_app_window(window: &slint::Window) {
+    #[cfg(target_os = "windows")]
+    if let Some(raw) = hwnd_of(window) {
+        let hwnd = HWND(raw as _);
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::HWND_NOTOPMOST;
+            let _ = SetWindowPos(
+                hwnd,
                 HWND_NOTOPMOST,
                 0,
                 0,
                 0,
                 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED,
+                SWP_NOMOVE | SWP_NOSIZE,
             );
-            SetForegroundWindow(hwnd);
         }
     }
 }
@@ -254,6 +276,10 @@ pub fn show_app_window(window: &slint::Window) {
         }
     }
     window.request_redraw();
+    // Resurrect topmost: winit resets z-order a hair after show (same race the
+    // pill survives with restack_topmost). Re-assert for ~2s so the window
+    // stays above whatever had focus when it was asked to appear.
+    restack_topmost_borrowed(window);
 }
 
 /// Show a widget window, then strip OS chrome. Styling MUST run after
@@ -394,6 +420,40 @@ pub fn configure_overlay_window(window: &slint::Window) {
     }
 }
 
+/// Bounded resurrection: winit resets z-order styles a hair after show
+/// (the same race the pill lives with), so re-assert TOPMOST for ~2s after
+/// the window is shown. Cheap, silent, and matches how the pill survives
+/// being raised behind fullscreen apps.
+pub fn restack_topmost_borrowed(window: &slint::Window) {
+    #[cfg(target_os = "windows")]
+    if let Some(raw) = hwnd_of(window) {
+        let hwnd = HWND(raw as _);
+        std::thread::Builder::new()
+            .name("app-window-topmost".into())
+            .spawn(move || {
+                for _ in 0..40 {
+                    unsafe {
+                        use windows::Win32::UI::WindowsAndMessaging::{HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE};
+                        let _ = SetWindowPos(
+                            hwnd,
+                            HWND_TOPMOST,
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            })
+            .ok();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+    }
+}
 /// Keep the pill above the docking overlay while dragging. Pure Z-order
 /// restack — deliberately NO SWP_FRAMECHANGED: a frame recalc forces Windows
 /// to repaint the non-client frame, which flashes the OS caption ("QuickSTT"
