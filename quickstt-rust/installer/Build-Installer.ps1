@@ -63,21 +63,32 @@ if (-not (Test-Path $lfm3Cli)) {
     "==> staging LFM3-Audio runtime (llama.cpp b11960, win-cpu-x64)..."
     $url = 'https://github.com/ggml-org/llama.cpp/releases/download/b11960/llama-b11960-bin-win-cpu-x64.zip'
     $zip = Join-Path $env:TEMP 'llama-b11960-bin-win-cpu-x64.zip'
-    $extract = Join-Path $env:TEMP 'llama-b11960-lfm3-stage'
+    # Fail fast: this machine may be unable to reach the release-assets CDN.
+    # A 10-15s probe is enough to decide; the installer must not hang on it.
+    $probeOk = $false
     try {
-        Invoke-WebRequest -Uri $url -OutFile $zip -TimeoutSec 600 -ErrorAction Stop
-        if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
-        Expand-Archive $zip -DestinationPath $extract -Force
-        New-Item -ItemType Directory -Force -Path $lfm3Dir | Out-Null
-        $copied = Get-ChildItem $extract -Recurse -File | Where-Object {
-            $_.Extension -eq '.dll' -or $_.Name -ieq 'llama-cli.exe'
-        }
-        foreach ($f in $copied) { Copy-Item $f.FullName (Join-Path $lfm3Dir $f.Name) -Force }
-        "    staged $($copied.Count) files into tools\lfm3_audio"
+        Invoke-WebRequest -Uri $url -Method Head -TimeoutSec 15 -ErrorAction Stop | Out-Null
+        $probeOk = $true
     } catch {
-        "WARNING: could not stage LFM3-Audio runtime: $_"
-        "The installer will ship without it; LFM3-Audio models will report"
-        "'LFM3-Audio engine not found' until tools\lfm3_audio is populated."
+        "WARNING: llama.cpp CDN unreachable ($($_.Exception.Message)); skipping LFM3-Audio staging."
+    }
+    if ($probeOk) {
+        $extract = Join-Path $env:TEMP 'llama-b11960-lfm3-stage'
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $zip -TimeoutSec 600 -ErrorAction Stop
+            if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+            Expand-Archive $zip -DestinationPath $extract -Force
+            New-Item -ItemType Directory -Force -Path $lfm3Dir | Out-Null
+            $copied = Get-ChildItem $extract -Recurse -File | Where-Object {
+                $_.Extension -eq '.dll' -or $_.Name -ieq 'llama-cli.exe'
+            }
+            foreach ($f in $copied) { Copy-Item $f.FullName (Join-Path $lfm3Dir $f.Name) -Force }
+            "    staged $($copied.Count) files into tools\lfm3_audio"
+        } catch {
+            "WARNING: could not stage LFM3-Audio runtime: $_"
+            "The installer will ship without it; LFM3-Audio models will report"
+            "'LFM3-Audio engine not found' until tools\lfm3_audio is populated."
+        }
     }
 } else {
     "==> LFM3-Audio runtime already staged: $lfm3Cli"
