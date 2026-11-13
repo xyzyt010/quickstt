@@ -2278,6 +2278,7 @@ fn parse_lfm3_asr_artifact(artifact: &str) -> String {
 /// Language is auto-detected unless the UI selects one of the seven supported
 /// languages. The process exits after the turn, so no RAM stays resident.
 fn transcribe_whistle(
+
     config: &SttEngineConfig,
     model_dir: &Path,
     wav_path: &Path,
@@ -2579,3 +2580,54 @@ unsafe fn libc_madvise_hint() {
     let _ = malloc_trim(0);
 }
 
+
+
+#[cfg(test)]
+mod lfm3_asr_artifact_tests {
+    use super::parse_lfm3_asr_artifact;
+
+    #[test]
+    fn plain_artifact_returns_transcript() {
+        let artifact = "User:\n<__media__>\n\nAssistant:\nThe quick brown fox jumps over the lazy dog.\n\n";
+        assert_eq!(
+            parse_lfm3_asr_artifact(artifact),
+            "The quick brown fox jumps over the lazy dog."
+        );
+    }
+
+    #[test]
+    fn reasoning_block_is_stripped() {
+        let artifact = "User:\n<__media__>\n\nAssistant:\n[Start thinking]\nI should transcribe this clip.\n[End thinking]\n\nActual transcript text.\n\n";
+        assert_eq!(parse_lfm3_asr_artifact(artifact), "Actual transcript text.");
+    }
+
+    #[test]
+    fn missing_marker_returns_trimmed_whole() {
+        let artifact = "some unexpected llama output\n";
+        assert_eq!(parse_lfm3_asr_artifact(artifact), "some unexpected llama output");
+    }
+
+    #[test]
+    fn empty_assistant_body_is_empty() {
+        // silence / un-decodable audio — the caller treats this as "nothing heard"
+        let artifact = "User:\n<__media__>\n\nAssistant:\n\n";
+        assert_eq!(parse_lfm3_asr_artifact(artifact), "");
+    }
+
+    #[test]
+    fn multiline_transcript_is_preserved_with_trimmed_lines() {
+        let artifact = "User:\n<__media__>\n\nAssistant:\nFirst line.  \nSecond line.\n\n\n";
+        assert_eq!(
+            parse_lfm3_asr_artifact(artifact),
+            "First line.\nSecond line."
+        );
+    }
+
+    #[test]
+    fn last_marker_wins_over_prompt_echo() {
+        // Defensive: even if the banner/echo leaks into the file with an
+        // "Assistant:"-looking fragment, the final one is the model's turn.
+        let artifact = "User:\nAssistant: fake\n\nAssistant:\nReal answer.\n";
+        assert_eq!(parse_lfm3_asr_artifact(artifact), "Real answer.");
+    }
+}
