@@ -156,6 +156,10 @@ if not exist "%DIST_APP%\tools\nemotron" mkdir "%DIST_APP%\tools\nemotron"
 if exist "%BASE_DIR%tools\nemotron" (
     xcopy /E /I /Y "%BASE_DIR%tools\nemotron" "%DIST_APP%\tools\nemotron" >nul
 )
+if not exist "%DIST_APP%\tools\lfm3_audio" mkdir "%DIST_APP%\tools\lfm3_audio"
+if exist "%BASE_DIR%tools\lfm3_audio" (
+    xcopy /E /I /Y "%BASE_DIR%tools\lfm3_audio" "%DIST_APP%\tools\lfm3_audio" >nul
+)
 if not exist "%BASE_DIR%third_party\AutoHotkey\v2\AutoHotkey64.exe" (
     if exist "%USERPROFILE%\Downloads\AutoHotkey_2.0.21_setup.exe" (
         echo [3/6] Installing embedded AutoHotkey runtime - builder only...

@@ -79,6 +79,7 @@ assets = [
   ["../tools/canary/canary_worker.py", "usr/lib/quickstt/tools/canary/canary_worker.py", "644"],
   ["../tools/disfluency/disfluency_worker.py", "usr/lib/quickstt/tools/disfluency/disfluency_worker.py", "644"],
   ["../target/release/tools/whisper_cpp/whisper-cli", "usr/lib/quickstt/tools/whisper_cpp/whisper-cli", "755"],
+  ["../target/release/tools/lfm3_audio/llama-cli", "usr/lib/quickstt/tools/lfm3_audio/llama-cli", "755"],
   ["../../wakeword_models/hey_jarvis_v0.1.onnx", "usr/lib/quickstt/wakeword_models/hey_jarvis_v0.1.onnx", "644"],
   ["../../wakeword_models/alexa_v0.1.onnx", "usr/lib/quickstt/wakeword_models/alexa_v0.1.onnx", "644"],
 ]

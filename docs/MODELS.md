@@ -1,4 +1,4 @@
-# Models — Vosk, Parakeet, Phonon-2, SenseVoice, Nemotron, Qwen3-ASR (offline, local)
+# Models — Vosk, Parakeet, Phonon-2, SenseVoice, Nemotron, Qwen3-ASR, LFM3-Audio (offline, local)
 
 QuickSTT is **100% offline** by default. Every model runs on-device via `quickstt-core/src/models/catalog.rs:15` `EngineFamily` and `models/engine.rs` dispatch.
 
@@ -12,7 +12,20 @@ QuickSTT is **100% offline** by default. Every model runs on-device via `quickst
 | **SenseVoice Small Multilingual INT8** | `SenseVoice` (ONNX Runtime CTC, CPU) | `sensevoice/small_multilingual/` | same | same | 229 MB | Fast multilingual (zh/en/ja/ko/yue) with auto language detect |
 | **Nemotron 3.5 Streaming 0.6B Q4_K_M** | `Nemotron` (`tools/nemotron/nemotron_engine` `transcribe.cpp` Handy GGML) | `nemotron/nemotron-3.5-asr-streaming-0.6b/` | same | same | 473 MB | Streaming + VAD, low latency |
 | **Qwen3-ASR 0.6B Q4_K_M** | `Qwen3Asr` (same `transcribe.cpp` worker, offline) | `qwen3_asr/qwen3-0.6b-q4km/` | same | same | 562 MB | 30-language offline ASR with auto language detect |
+| **LFM3-Audio 2B Q4_0** | `Lfm3Audio` (llama.cpp `llama cli` b11960 / v0.8.0+, GGUF + mmproj) | `lfm3_audio/lfm3_audio_2b_q4_0/` | same | same | 1155 MB | Liquid any-to-any speech LLM ASR, 18 languages, English-class accuracy |
+| **LFM3-Audio 2B Q4_K_M** | `Lfm3Audio` (llama.cpp `llama cli` b11960 / v0.8.0+, GGUF + mmproj) | `lfm3_audio/lfm3_audio_2b_q4_k_m/` | same | same | 1213 MB | Recommended 4-bit quant of LFM3-Audio-2B, 18 languages |
 | **Cactus Whistle 16M** | `Whistle` (Cactus `needle` CLI, `.cact`) | `whistle/whistle-16m/` | same | same | 17 MB | Tiny 7-language CPU ASR, one-shot |
+
+LFM3-Audio needs the **llama.cpp `llama-cli` runtime**, which the installers
+ship under `tools/lfm3_audio/` (Windows: CPU binary + ggml dispatch DLLs;
+Linux: static `llama-cli` from `usr/lib/quickstt/tools/lfm3_audio/`). Each
+model folder holds two files: the speech-LLM GGUF and its `mmproj` audio
+encoder, downloaded together from `LiquidAI/LFM3-Audio-2B-GGUF` (pinned
+revision, LFM Open License v1.0, license file included at install).
+`llama cli` runs an in-process llama-server and exits per turn — no idle RAM,
+but a model load per turn. ASR uses the Liquid system-prompt contract:
+`Perform ASR in <language>.` (forced) or `Perform ASR.` (auto detect), greedy
+decoding (`--temp 0`), audio from a 16 kHz mono WAV, 4096-token context cap.
 
 Also in catalog (Whisper/Moonshine for fallback): `whisper_cpp/tiny_en_q5` 32M, `base_en_q8` 74M, `small_en_q8` 264M, `large_v3_turbo_q8` 1500M, `moonshine_v2/*`.
 

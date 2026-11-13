@@ -74,6 +74,12 @@ pub enum EngineFamily {
     /// Weights (~5GB) auto-fetch from HuggingFace into the shared HF cache
     /// on first GPU load — never bundled, never fetched by our downloader.
     CanaryQwen,
+    /// Liquid AI LFM3-Audio-2B via the llama.cpp `llama-cli` one-shot path.
+    /// An any-to-any audio speech LLM (18 languages, in-model handling of
+    /// the "Perform ASR in <language>." system prompt); GGUF on CPU.
+    /// One-shot process per utterance — no persistent worker, so idle RAM
+    /// is zero; the cost is a model load per turn (like whisper.cpp).
+    Lfm3Audio,
 }
 
 impl EngineFamily {
@@ -93,6 +99,7 @@ impl EngineFamily {
             EngineFamily::Canary => "canary",
             EngineFamily::Photon => "photon",
             EngineFamily::CanaryQwen => "canary-qwen",
+            EngineFamily::Lfm3Audio => "lfm3-audio",
         }
     }
 }
@@ -209,6 +216,35 @@ pub fn all_descriptors() -> Vec<ModelDescriptor> {
             accuracy: 88,
             speed: 70,
             blurb: "Live multilingual transcription across 28 languages".into(),
+            gpu_only: false,
+        },
+        // Liquid AI LFM3-Audio-2B (LFM Open License v1.0) — Liquid's any-to-any
+        // audio speech LLM run via llama.cpp's `llama cli` (b11960 / v0.8.0+).
+        // 18 languages via the "Perform ASR in <language>." system prompt;
+        // plain "Perform ASR." lets the model detect the language. GGUF +
+        // mmproj (audio encoder) both download with the model. ONE-SHOT
+        // process per utterance (the CLI runs an in-process llama-server) —
+        // no idle RAM, but a model load per turn like whisper-cli.
+        ModelDescriptor {
+            name: "LFM3-Audio 2B Q4_0 (GGUF)".into(),
+            engine_family: EngineFamily::Lfm3Audio,
+            model_dir: "lfm3_audio/lfm3_audio_2b_q4_0".into(),
+            size_mb: 1155,
+            widget_selectable: true,
+            accuracy: 85,
+            speed: 60,
+            blurb: "LFM3-Audio-2B Q4_0 — 18-language speech LLM ASR, one-shot".into(),
+            gpu_only: false,
+        },
+        ModelDescriptor {
+            name: "LFM3-Audio 2B Q4_K_M (GGUF)".into(),
+            engine_family: EngineFamily::Lfm3Audio,
+            model_dir: "lfm3_audio/lfm3_audio_2b_q4_k_m".into(),
+            size_mb: 1213,
+            widget_selectable: true,
+            accuracy: 88,
+            speed: 55,
+            blurb: "LFM3-Audio-2B Q4_K_M — recommended 4-bit, 18 languages".into(),
             gpu_only: false,
         },
         ModelDescriptor {
@@ -414,6 +450,29 @@ pub fn is_model_installed(desc: &ModelDescriptor) -> bool {
                 || complete("Qwen3-ASR-0.6B-F16.gguf", 1_560_000_000)
                 || complete("Qwen3-ASR-0.6B-BF16.gguf", 1_550_000_000)
         }
+        EngineFamily::Lfm3Audio => {
+            // BOTH halves must be on disk: the speech LLM GGUF and the
+            // mmproj (audio encoder) — the CLI loads neither without the
+            // other. Size floors reject truncated downloads.
+            let pick = if desc.name.contains("Q4_0") && !desc.name.contains("Q4_K_M") {
+                ("LFM3-Audio-2B-Q4_0.gguf", 1_000_000_000u64,
+                 "mmproj-LFM3-Audio-2B-Q4_0.gguf", 150_000_000u64)
+            } else {
+                ("LFM3-Audio-2B-Q4_K_M.gguf", 1_050_000_000,
+                 "mmproj-LFM3-Audio-2B-Q4_K_M.gguf", 160_000_000)
+            };
+            let big_ok = model_path
+                .join(pick.0)
+                .metadata()
+                .map(|m| m.len() >= pick.1)
+                .unwrap_or(false);
+            let mm_ok = model_path
+                .join(pick.2)
+                .metadata()
+                .map(|m| m.len() >= pick.3)
+                .unwrap_or(false);
+            big_ok && mm_ok
+        }
         EngineFamily::Whistle => {
             // Single-file container: 16,919,407 B for the shipped Whistle.
             // A truncation must show "[Not Installed]" so the card offers a
@@ -601,6 +660,15 @@ pub const MULTILINGUAL_LANGUAGES: &[&str] = &[
     "Polish", "Russian", "Turkish", "Arabic", "Hindi", "Chinese", "Japanese",
 ];
 
+/// LFM3-Audio-2B speech languages (GGUF metadata `language` tag, all 18).
+/// Auto lets the model detect; a forced language becomes the
+/// "Perform ASR in <language>." system prompt at inference time.
+pub const LFM3_LANGUAGES: &[&str] = &[
+    "Auto", "English", "Arabic", "Danish", "German", "Greek", "Finnish", "French",
+    "Hebrew", "Italian", "Japanese", "Korean", "Dutch", "Polish", "Portuguese",
+    "Spanish", "Swedish", "Turkish", "Chinese",
+];
+
 /// Languages a model can transcribe, as UI display names. The first entry
 /// is the default ("Auto" wherever the engine detects language in-model).
 /// English-only checkpoints expose exactly one entry — the dashboard then
@@ -626,6 +694,11 @@ pub fn supported_languages(desc: &ModelDescriptor) -> Vec<String> {
     // is the only valid selection.
     if matches!(desc.engine_family, EngineFamily::Qwen3Asr) {
         return vec!["Auto".to_string()];
+    }
+    // LFM3-Audio-2B: 18 languages, "Perform ASR in <language>." or bare
+    // "Perform ASR." when auto-detecting (the model card's guidance).
+    if matches!(desc.engine_family, EngineFamily::Lfm3Audio) {
+        return LFM3_LANGUAGES.iter().map(|s| s.to_string()).collect();
     }
     // Nemotron 3.5 ASR Streaming is trained on 30 languages with in-model
     // language ID — it is NOT the English-only checkpoint it was registered
@@ -706,6 +779,7 @@ pub fn models_for_hardware(
                     || d.name.contains("Phonon-2")
                     || d.name.contains("Qwen3-ASR")
                     || d.name.contains("Whistle")
+                    || d.name.contains("LFM3-Audio")
             } else {
                 !d.gpu_only
             }

@@ -165,6 +165,7 @@ fn install_model(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<
         EngineFamily::SenseVoice => install_sensevoice(desc, state),
         EngineFamily::Nemotron => install_nemotron(desc, state),
         EngineFamily::Qwen3Asr => install_qwen3_asr(desc, state),
+        EngineFamily::Lfm3Audio => install_lfm3_audio(desc, state),
         EngineFamily::Whistle => install_whistle(desc, state),
         EngineFamily::Canary => install_canary(desc, state),
         EngineFamily::Photon => install_photon(desc, state),
@@ -1107,6 +1108,121 @@ fn install_qwen3_asr(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Res
             count: 1,
         },
     )?;
+    Ok(())
+}
+
+// ── Liquid AI LFM3-Audio-2B (llama.cpp GGUF, b11960 / v0.8.0+) ──
+// LFM Open License v1.0. Two files ship per quant pair, both required:
+// the speech LLM GGUF (Q4_0 or Q4_K_M) and the matching mmproj (audio
+// encoder, quant-matched by Liquid so the whole package stays 4-bit).
+// Pinned revision keeps the bytes reproducible; integrity is enforced by
+// byte-size floors on both files (GGUF sha256s are published on the
+// model card — add them here if the downloader grows checksum support).
+
+const LFM3_AUDIO_REPO: &str = "LiquidAI/LFM3-Audio-2B-GGUF";
+const LFM3_AUDIO_REV: &str = "39670cb5c42e9c4bfe046519ba7ffbe47f9552ad";
+
+fn install_lfm3_audio(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<()> {
+    let models_root = catalog::models_root();
+    let model_dir = models_root.join(&desc.model_dir);
+    std::fs::create_dir_all(&model_dir)?;
+
+    // Quant is pinned by the descriptor's model_dir; never guess from order.
+    let (model_file, model_floor, mmproj_file, mmproj_floor) =
+        if desc.model_dir.ends_with("q4_0") {
+            (
+                "LFM3-Audio-2B-Q4_0.gguf",
+                1_000_000_000u64,
+                "mmproj-LFM3-Audio-2B-Q4_0.gguf",
+                150_000_000u64,
+            )
+        } else {
+            (
+                "LFM3-Audio-2B-Q4_K_M.gguf",
+                1_050_000_000,
+                "mmproj-LFM3-Audio-2B-Q4_K_M.gguf",
+                160_000_000,
+            )
+        };
+
+    let model_dest = model_dir.join(model_file);
+    let mmproj_dest = model_dir.join(mmproj_file);
+    let model_ok = model_dest
+        .metadata()
+        .map(|m| m.len() >= model_floor)
+        .unwrap_or(false);
+    let mmproj_ok = mmproj_dest
+        .metadata()
+        .map(|m| m.len() >= mmproj_floor)
+        .unwrap_or(false);
+    if model_ok && mmproj_ok {
+        return Ok(());
+    }
+
+    // Q4_0 pair: 1,049,613,856 + 161,393,408 B; Q4_K_M pair: 1,099,626,016 + 172,418,048 B.
+    let total_mb = if desc.model_dir.ends_with("q4_0") {
+        1155
+    } else {
+        1213
+    };
+    set_status(
+        state,
+        format!(
+            "Downloading LFM3-Audio-2B (~{} MB: speech LLM + audio encoder)…",
+            total_mb
+        ),
+    );
+
+    let files = [
+        (model_file, &model_dest, model_floor),
+        (mmproj_file, &mmproj_dest, mmproj_floor),
+    ];
+    for (i, (name, dest, floor)) in files.iter().enumerate() {
+        let already = dest
+            .metadata()
+            .map(|m| m.len() >= *floor)
+            .unwrap_or(false);
+        if already {
+            continue;
+        }
+        let url = format!(
+            "https://huggingface.co/{}/resolve/{}/{}",
+            LFM3_AUDIO_REPO, LFM3_AUDIO_REV, name
+        );
+        download_file(
+            &url,
+            dest.as_path(),
+            state,
+            &FileDl {
+                label: name,
+                index: i,
+                count: files.len(),
+            },
+        )?;
+    }
+
+    // Ship the license with the weights (LFM Open License v1.0). Failure to
+    // fetch it must never fail the model install — the weights are the point.
+    let license_dest = model_dir.join("LFM-LICENSE.txt");
+    if !license_dest.exists() {
+        let url = format!(
+            "https://huggingface.co/{}/resolve/{}/LICENSE",
+            LFM3_AUDIO_REPO, LFM3_AUDIO_REV
+        );
+        match download_file(
+            &url,
+            &license_dest,
+            state,
+            &FileDl {
+                label: "LICENSE",
+                index: 2,
+                count: 3,
+            },
+        ) {
+            Ok(()) => {}
+            Err(e) => warn!("LFM3-Audio LICENSE fetch failed (non-fatal): {e:#}"),
+        }
+    }
     Ok(())
 }
 

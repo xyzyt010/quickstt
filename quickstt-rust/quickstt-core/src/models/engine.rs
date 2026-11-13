@@ -27,6 +27,8 @@ pub struct SttEngineConfig {
     pub nemotron_path: Option<PathBuf>,
     /// Cactus `needle` CLI for Whistle `.cact` models (one-shot per turn).
     pub whistle_path: Option<PathBuf>,
+    /// llama.cpp `llama-cli` (b11960 / v0.8.0+) for LFM3-Audio-2B GGUF models.
+    pub lfm3_audio_path: Option<PathBuf>,
     /// Persistent Photon worker script (tools/photon/photon_worker.py).
     pub photon_worker_path: Option<PathBuf>,
     /// Python interpreter that has `moondream` installed (probed once).
@@ -40,6 +42,7 @@ pub struct SttEngineConfig {
     pub whisper_cli_fallbacks: Vec<PathBuf>,
     pub nemotron_fallbacks: Vec<PathBuf>,
     pub whistle_fallbacks: Vec<PathBuf>,
+    pub lfm3_audio_fallbacks: Vec<PathBuf>,
 }
 
 /// Probe well-known Python launchers; returns the first that runs.
@@ -164,6 +167,20 @@ impl SttEngineConfig {
             PathBuf::from("/usr/lib/quickstt/tools/nemotron/transcribe-cli"),
         ];
 
+        // llama.cpp `llama-cli` (LFM3-Audio-2B GGUF). The shipped build is a
+        // self-contained CPU binary/dispatch DLL set: the deb/AppImage keeps
+        // it under /usr/lib/quickstt/tools/lfm3_audio, the portable tree and
+        // Windows installer keep it next to the exe under tools/lfm3_audio.
+        // LFM3-Audio requires llama.cpp b11960 (v0.8.0) or newer.
+        let lfm3_audio_candidates = [
+            bundled_tools.join(format!("lfm3_audio/llama-cli{}", exe_ext)),
+            exe_dir.join(format!("tools/lfm3_audio/llama-cli{}", exe_ext)),
+            models_root.join(format!("runtimes/lfm3_audio/llama-cli{}", exe_ext)),
+            PathBuf::from(format!("/usr/lib/quickstt/tools/lfm3_audio/llama-cli{}", exe_ext)),
+            // Last resort: user-installed llama.cpp on PATH (brew/winget).
+            PathBuf::from("llama-cli"),
+        ];
+
         // Photon worker script (Moondream Parakeet). Deployed layout keeps it
         // next to the exe (tools/photon/); dev runs fall back to the
         // workspace tree (target/{debug,release} -> quickstt-rust).
@@ -217,6 +234,20 @@ impl SttEngineConfig {
         let whisper_existing = existing(&whisper_candidates);
         let nemotron_existing = existing(&nemotron_candidates);
         let whistle_existing = existing(&whistle_candidates);
+        // A bare "llama-cli" resolves via PATH at spawn time even though
+        // `exists()` is false for it — keep it as an intentional fallback.
+        let mut lfm3_existing = existing(&lfm3_audio_candidates);
+        if lfm3_existing.is_empty()
+            && Command::new("llama-cli")
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        {
+            lfm3_existing.push(PathBuf::from("llama-cli"));
+        }
 
         Self {
             whisper_cli_path: whisper_existing.first().cloned(),
@@ -225,6 +256,7 @@ impl SttEngineConfig {
             vosk_path: vosk_candidates.iter().find(|p| p.exists()).cloned(),
             nemotron_path: nemotron_existing.first().cloned(),
             whistle_path: whistle_existing.first().cloned(),
+            lfm3_audio_path: lfm3_existing.first().cloned(),
             photon_worker_path: photon_worker_candidates
                 .iter()
                 .find(|p| p.exists())
@@ -237,6 +269,7 @@ impl SttEngineConfig {
             whisper_cli_fallbacks: whisper_existing.into_iter().skip(1).collect(),
             nemotron_fallbacks: nemotron_existing.into_iter().skip(1).collect(),
             whistle_fallbacks: whistle_existing.into_iter().skip(1).collect(),
+            lfm3_audio_fallbacks: lfm3_existing.into_iter().skip(1).collect(),
         }
     }
 }
@@ -345,6 +378,7 @@ pub fn transcribe_with_language(
         EngineFamily::Vosk => transcribe_vosk(config, &model_dir, wav_path),
         EngineFamily::Nemotron => transcribe_nemotron(config, &model_dir, wav_path, language),
         EngineFamily::Qwen3Asr => transcribe_qwen3_asr(config, &model_dir, wav_path),
+        EngineFamily::Lfm3Audio => transcribe_lfm3_audio(config, &model_dir, wav_path, language),
         EngineFamily::Whistle => transcribe_whistle(config, &model_dir, wav_path, language),
         EngineFamily::Canary => transcribe_canary(config, &model_dir, wav_path, language),
         EngineFamily::Photon => transcribe_photon(config, descriptor, wav_path),
@@ -476,6 +510,7 @@ fn should_run_deepfilter_for_model(descriptor: &ModelDescriptor) -> bool {
             | EngineFamily::Vosk
             | EngineFamily::Photon
             | EngineFamily::CanaryQwen
+            | EngineFamily::Lfm3Audio
     )
 }
 
@@ -2053,6 +2088,189 @@ fn find_qwen3_gguf(model_dir: &Path) -> Result<PathBuf> {
         }
     }
     anyhow::bail!("No Qwen3-ASR *.gguf model file found in {:?}", model_dir)
+}
+
+/// Liquid AI LFM3-Audio-2B via llama.cpp's `llama cli` (one-shot, offline).
+/// `llama cli` runs an in-process llama-server and exits after one turn
+/// (`-st`), so no RAM stays resident between turns; the price is a model
+/// load per turn (like whisper-cli). The ASR contract is the system prompt
+/// ("Perform ASR in <language>." / "Perform ASR."); the GGUF stores greedy
+/// sampling. Requires llama.cpp b11960 (v0.8.0) or newer.
+fn transcribe_lfm3_audio(
+    config: &SttEngineConfig,
+    model_dir: &Path,
+    wav_path: &Path,
+    language: &str,
+) -> Result<String> {
+    let candidates =
+        engine_candidates(config.lfm3_audio_path.clone(), &config.lfm3_audio_fallbacks);
+    if candidates.is_empty() {
+        anyhow::bail!(
+            "LFM3-Audio engine not found — llama-cli (b11960 / v0.8.0+) ships with the \
+             app under tools/lfm3_audio; the Linux deb/AppImage carries it under \
+             /usr/lib/quickstt/tools/lfm3_audio"
+        );
+    }
+
+    // Two halves are required and each dir holds exactly one quant pair, so
+    // pick them by role: the speech LLM GGUF and its mmproj (audio encoder).
+    let mut model_gguf: Option<PathBuf> = None;
+    let mut mmproj_gguf: Option<PathBuf> = None;
+    if let Ok(entries) = std::fs::read_dir(model_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.to_lowercase().ends_with(".gguf") {
+                continue;
+            }
+            if name.to_lowercase().starts_with("mmproj") {
+                mmproj_gguf = Some(entry.path());
+            } else if name.starts_with("LFM3-Audio-2B") {
+                model_gguf = Some(entry.path());
+            }
+        }
+    }
+    let model_file = model_gguf
+        .with_context(|| format!("No LFM3-Audio-2B *.gguf model file found in {:?}", model_dir))?;
+    let mmproj_file = mmproj_gguf
+        .with_context(|| format!("No mmproj-*.gguf projector file found in {:?}", model_dir))?;
+
+    // The ASR contract: "Perform ASR in <language>." forces a language;
+    // plain "Perform ASR." lets the model detect it. The GGUF chat template
+    // picks this up via the system prompt — never bake it into -p.
+    let trimmed = language.trim();
+    let sys_prompt = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("Auto") {
+        "Perform ASR.".to_string()
+    } else {
+        format!("Perform ASR in {}.", trimmed)
+    };
+
+    // `llama-cli` runs an in-process llama-server and (with -st) exits after
+    // one turn. Its stdout is a banner + echo, so instead capture the
+    // deterministic "User:/Assistant:" artifact via -o: the transcript is the
+    // text after the LAST "Assistant:" marker, minus any reasoning block.
+    let out_path = std::env::temp_dir().join(format!(
+        "quickstt_lfm3_asr_{}_{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+
+    let mut last: Option<anyhow::Error> = None;
+    for cli in &candidates {
+        let result = transcribe_lfm3_audio_with(
+            cli,
+            &model_file,
+            &mmproj_file,
+            wav_path,
+            &sys_prompt,
+            &out_path,
+        );
+        let _ = std::fs::remove_file(&out_path);
+        match result {
+            Ok(text) => return Ok(text),
+            Err(e) => {
+                warn!("LFM3-Audio engine {:?} failed: {:#}", cli, e);
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.expect("candidate list is not empty"))
+}
+
+fn transcribe_lfm3_audio_with(
+    cli: &Path,
+    model_file: &Path,
+    mmproj_file: &Path,
+    wav_path: &Path,
+    sys_prompt: &str,
+    out_path: &Path,
+) -> Result<String> {
+    info!(
+        "LFM3-Audio via llama-cli {:?} model: {:?} wav: {:?} sys: {:?}",
+        cli, model_file, wav_path, sys_prompt,
+    );
+
+    let mut cmd = Command::new(cli);
+    no_window(&mut cmd);
+    let output = cmd
+        .arg("--simple-io")
+        .arg("--log-disable")
+        .arg("--no-display-prompt")
+        .arg("--no-show-timings")
+        .arg("--no-warmup")
+        .arg("-st")
+        // Keep the per-turn context small: utterances are seconds long and
+        // the model supports 32K, but a 32K KV cache for every dictation
+        // turn is wasteful. 4096 tokens covers minutes of audio.
+        .arg("-c")
+        .arg("4096")
+        .arg("-p")
+        .arg("<__media__>")
+        .arg("-sys")
+        .arg(sys_prompt)
+        .arg("--audio")
+        .arg(wav_path)
+        .arg("-m")
+        .arg(model_file)
+        .arg("-mm")
+        .arg(mmproj_file)
+        // The GGUF stores greedy sampling; pin it explicitly.
+        .arg("--temp")
+        .arg("0")
+        .arg("-o")
+        .arg(out_path)
+        // stdout is the banner/echo; the artifact file is the source of
+        // truth. stderr carries any llama.cpp/ggml diagnostics for the log.
+        .stdout(Stdio::null())
+        .output()
+        .context("Failed to run llama-cli")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!("llama-cli error: {}", stderr);
+        anyhow::bail!(
+            "llama-cli failed ({}): {}",
+            describe_exit(&output.status),
+            stderr.trim()
+        );
+    }
+
+    let artifact = std::fs::read_to_string(out_path)
+        .with_context(|| format!("llama-cli produced no output file {:?}", out_path))?;
+    let text = parse_lfm3_asr_artifact(&artifact);
+    Ok(text)
+}
+
+/// Parse the `llama-cli -o` artifact produced for an ASR turn. Layout:
+///   User:\n<__media__>\n\nAssistant:\n[Start thinking]\n...\n[End thinking]\n\n<text>\n\n
+/// (the reasoning block only appears if the model decides to think — ASR with
+/// greedy sampling does not, but stripping it defensively costs nothing).
+fn parse_lfm3_asr_artifact(artifact: &str) -> String {
+    // The transcript is whatever follows the LAST "Assistant:" marker.
+    let marker = "Assistant:";
+    let Some(idx) = artifact.rfind(marker) else {
+        warn!("LFM3-Audio output file had no 'Assistant:' marker; returning whole artifact");
+        return artifact.trim().to_string();
+    };
+    let mut body = artifact[idx + marker.len()..].trim();
+
+    // Drop a reasoning wrapper if present.
+    if let Some(end) = body.find("[End thinking]") {
+        body = body[end + "[End thinking]".len()..].trim();
+    }
+
+    // A stray "[Start thinking]" without its end marker would be a truncated
+    // turn — keep the raw body rather than emit a prompt fragment.
+    let cleaned = body
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    cleaned
 }
 
 /// Cactus Whistle via the `needle` CLI (one-shot, offline). The CLI returns

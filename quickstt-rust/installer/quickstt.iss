@@ -91,7 +91,7 @@ Name: "custom"; Description: "Custom installation"; Flags: iscustom
 
 [Components]
 Name: "core"; Description: "QuickSTT (required)"; Types: full compact custom; Flags: fixed
-Name: "engines"; Description: "Speech engine runtimes (Parakeet, Nemotron, whisper, Cactus)"; Types: full compact custom
+Name: "engines"; Description: "Speech engine runtimes (Parakeet, Nemotron, whisper, Cactus, LFM3-Audio)"; Types: full compact custom
 Name: "gpuacc"; Description: "GPU acceleration libraries (adds ~90 MB; CPU-only works without them)"; Types: full; Flags: dontinheritcheck
 Name: "wakeword"; Description: "Wake-word heads (hey jarvis, alexa)"; Types: full custom
 
@@ -112,6 +112,10 @@ Source: "..\..\tools\nemotron\*"; Excludes: "ggml-vulkan.dll,*.a,*.bak,*.def,*.p
 Source: "..\..\tools\parakeet\*"; Excludes: "DirectML.dll"; DestDir: "{app}\tools\parakeet"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: engines
 Source: "..\..\tools\whistle\*"; DestDir: "{app}\tools\whistle"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: engines
 Source: "..\..\tools\canary\*"; DestDir: "{app}\tools\canary"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: engines
+; LFM3-Audio: llama.cpp b11960 (v0.8.0) CPU binary + its ggml dispatch DLLs.
+; Both llama-cli.exe and llama-mtmd*.dll / ggml-cpu-*.dll kernels ship together —
+; llama-cli loads the encoder and kernels at startup from this folder.
+Source: "..\..\tools\lfm3_audio\*"; DestDir: "{app}\tools\lfm3_audio"; Excludes: "*.a,*.bak,*.def,*.py"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: engines
 
 ; ── GPU backends (optional): Vulkan (llama.cpp) + DirectML (ONNX Runtime) ──
 ; Same destination paths as the core tools, so selecting the component puts

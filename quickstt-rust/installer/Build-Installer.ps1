@@ -53,6 +53,36 @@ if ($BuildRelease) {
     }
 }
 
+# ── stage the LFM3-Audio runtime (llama.cpp b11960, CPU) ──
+# The app shells out to llama-cli for LFM3-Audio GGUF models. If the staged
+# folder is missing we fetch the official Windows CPU binary and keep only
+# what the engine needs (llama-cli.exe + the ggml/mtmd/llama DLLs it loads).
+$lfm3Dir = Join-Path (Join-Path $repoRoot 'tools') 'lfm3_audio'
+$lfm3Cli = Join-Path $lfm3Dir 'llama-cli.exe'
+if (-not (Test-Path $lfm3Cli)) {
+    "==> staging LFM3-Audio runtime (llama.cpp b11960, win-cpu-x64)..."
+    $url = 'https://github.com/ggml-org/llama.cpp/releases/download/b11960/llama-b11960-bin-win-cpu-x64.zip'
+    $zip = Join-Path $env:TEMP 'llama-b11960-bin-win-cpu-x64.zip'
+    $extract = Join-Path $env:TEMP 'llama-b11960-lfm3-stage'
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $zip -TimeoutSec 600 -ErrorAction Stop
+        if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+        Expand-Archive $zip -DestinationPath $extract -Force
+        New-Item -ItemType Directory -Force -Path $lfm3Dir | Out-Null
+        $copied = Get-ChildItem $extract -Recurse -File | Where-Object {
+            $_.Extension -eq '.dll' -or $_.Name -ieq 'llama-cli.exe'
+        }
+        foreach ($f in $copied) { Copy-Item $f.FullName (Join-Path $lfm3Dir $f.Name) -Force }
+        "    staged $($copied.Count) files into tools\lfm3_audio"
+    } catch {
+        "WARNING: could not stage LFM3-Audio runtime: $_"
+        "The installer will ship without it; LFM3-Audio models will report"
+        "'LFM3-Audio engine not found' until tools\lfm3_audio is populated."
+    }
+} else {
+    "==> LFM3-Audio runtime already staged: $lfm3Cli"
+}
+
 # ── sanity: the payloads the .iss references ──
 # wakeword_models must come from the REPO ROOT (the flat <phrase>_v0.1.onnx
 # heads the loader actually discovers); the quickstt-rust copy only holds
@@ -71,6 +101,9 @@ foreach ($head in @('hey_jarvis_v0.1.onnx', 'alexa_v0.1.onnx')) {
     $hp = Join-Path (Join-Path $repoRoot 'wakeword_models') $head
     if (-not (Test-Path $hp)) { $missing += $hp }
 }
+# The LFM3-Audio engine runtime (optional but expected for the shipped installer).
+$lfm3CliPath = Join-Path (Join-Path (Join-Path $repoRoot 'tools') 'lfm3_audio') 'llama-cli.exe'
+if (-not (Test-Path $lfm3CliPath)) { $missing += $lfm3CliPath }
 if ($missing.Count -gt 0) {
     "WARNING: these expected files are missing (the installer will skip or fail):"
     $missing | ForEach-Object { "  - $_" }

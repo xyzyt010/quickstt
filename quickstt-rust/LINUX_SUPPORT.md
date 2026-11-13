@@ -15,6 +15,7 @@ downloaders in `models/downloader.rs`, and the Desktop Release CI pipeline
 | `nemotron` | Nemotron 3.5 ASR Streaming | `transcribe-cli`/`nemotron_engine` (transcribe.cpp) | built from source by CI | ✅ works |
 | `canary` | Canary 180M Flash | the same transcribe.cpp worker | CI | ✅ works |
 | `qwen3-asr` | Qwen3-ASR 0.6B | the same transcribe.cpp worker | CI | ✅ works |
+| `lfm3-audio` | LFM3-Audio 2B (Q4_0, Q4_K_M) | `llama-cli` (llama.cpp b11960 / v0.8.0+, static) | **built from source by CI** (`-DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -march=x86-64`), shipped as `tools/lfm3_audio/llama-cli` | ✅ works |
 | `vosk` | Vosk Small EN (50M) | `libvosk.so` | downloaded on demand | ✅ works |
 | `cactus-whistle` | Cactus Whistle 16M | `needle` CLI | per-OS release download (linux-x86_64 / linux-arm64) | ✅ works |
 | `photon` | Parakeet Ultra / Redux | `photon_worker.py` + **Python 3 + `pip install moondream`** | script ships, deps are the user's | ⚠️ needs Python |

@@ -92,6 +92,24 @@ jobs:
           cp -f /tmp/tcpp/build/bin/transcribe-cli quickstt-rust/target/release/tools/nemotron/
           file quickstt-rust/target/release/tools/nemotron/transcribe-cli
           ldd quickstt-rust/target/release/tools/nemotron/transcribe-cli | head -20
+      - name: Build llama.cpp (LFM3-Audio engine, llama-cli)
+        run: |
+          # Pinned release tag b11960 (v0.8.0) — the minimum version that
+          # supports LFM3-Audio. GGML_NATIVE=OFF keeps the binary portable
+          # (no -march flags leak across hosts), GGML_OPENMP=OFF avoids a
+          # libgomp1 dependency the deb doesn't otherwise need.
+          git clone --depth 1 --branch b11960 https://github.com/ggml-org/llama.cpp /tmp/llamacpp
+          cmake -S /tmp/llamacpp -B /tmp/llamacpp/build -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF \
+            -DCMAKE_C_FLAGS="-march=x86-64 -mtune=generic" \
+            -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
+          cmake --build /tmp/llamacpp/build -j"$(nproc)" --target llama-cli
+          mkdir -p quickstt-rust/target/release/tools/lfm3_audio
+          BIN_LLM="$(find /tmp/llamacpp/build -maxdepth 3 -type f -name llama-cli | head -1)"
+          [ -n "$BIN_LLM" ] || { echo "llama-cli binary not found"; find /tmp/llamacpp/build -maxdepth 3 -type f | head -20; exit 1; }
+          cp -f "$BIN_LLM" quickstt-rust/target/release/tools/lfm3_audio/llama-cli
+          file quickstt-rust/target/release/tools/lfm3_audio/llama-cli
+          ldd quickstt-rust/target/release/tools/lfm3_audio/llama-cli | head -20
       - name: CMake native backend + Qt widget GUI (stt_service + quickstt-app)
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
@@ -130,6 +148,8 @@ jobs:
           cp -f target/release/tools/disfluency/disfluency_worker.py dist/AppDir/usr/bin/tools/disfluency/ 2>/dev/null || true
           mkdir -p dist/AppDir/usr/bin/tools/whisper_cpp
           cp -f target/release/tools/whisper_cpp/whisper-cli dist/AppDir/usr/bin/tools/whisper_cpp/ 2>/dev/null || true
+          mkdir -p dist/AppDir/usr/bin/tools/lfm3_audio
+          cp -f target/release/tools/lfm3_audio/llama-cli dist/AppDir/usr/bin/tools/lfm3_audio/ 2>/dev/null || true
           if ! ls dist/*.AppImage 1>/dev/null 2>&1; then
             echo "AppImage failed — building plain tarball payload"
             rm -rf dist/payload && mkdir -p dist/payload
@@ -175,6 +195,24 @@ jobs:
           target: desktop
           arch: win64_msvc2019_64
           modules: 'qtmultimedia'
+      - name: Stage LFM3-Audio runtime (llama.cpp b11960 win-cpu-x64)
+        shell: pwsh
+        # The portable exe bundles the official llama.cpp CPU binary: the app
+        # shells out to llama-cli for LFM3-Audio GGUF models. Not built from
+        # source here (the Qt/MinGW toolchain in this job is wrong for ggml);
+        # the pinned official zip ships llama-cli.exe + every ggml/mtmd DLL it
+        # loads, dispatched to any x64 CPU at runtime.
+        run: |
+          $url = 'https://github.com/ggml-org/llama.cpp/releases/download/b11960/llama-b11960-bin-win-cpu-x64.zip'
+          $zip = Join-Path $env:RUNNER_TEMP 'llama-b11960-bin-win-cpu-x64.zip'
+          & curl.exe -L --fail --retry 3 -o $zip $url
+          if ($LASTEXITCODE -ne 0) { throw "llama.cpp runtime download failed" }
+          New-Item -ItemType Directory -Force -Path 'tools\lfm3_audio' | Out-Null
+          $extract = Join-Path $env:RUNNER_TEMP 'lfm3_stage'
+          Expand-Archive $zip -DestinationPath $extract -Force
+          $copied = Get-ChildItem $extract -Recurse -File | Where-Object { $_.Extension -eq '.dll' -or $_.Name -ieq 'llama-cli.exe' }
+          foreach ($f in $copied) { Copy-Item $f.FullName (Join-Path 'tools\lfm3_audio' $f.Name) -Force }
+          Write-Host "staged $($copied.Count) files into tools\lfm3_audio"
       - name: Cargo build (Rust GUI)
         working-directory: quickstt-rust
         run: cargo build -p quickstt-slint --release
@@ -194,6 +232,14 @@ jobs:
           if (Test-Path .\BuildApp.bat) { .\BuildApp.bat } else { echo "BuildApp.bat not found" }
           if (Test-Path QuickSTT_Portable.exe) { dir QuickSTT_Portable.exe }
           if (Test-Path QuickSTT_DirectDownload\SHA256SUMS.txt) { Get-Content QuickSTT_DirectDownload\SHA256SUMS.txt | Select-Object -First 10 }
+      - name: Upload LFM3-Audio runtime artifact
+        if: always()
+        # The 24 MB staged runtime, for the maintainer's local installer build
+        # (the portable exe already carries it via BuildApp.bat).
+        uses: actions/upload-artifact@v4
+        with:
+          name: lfm3-audio-runtime
+          path: tools/lfm3_audio
       - name: Upload Windows artifacts
         if: always()
         uses: actions/upload-artifact@v4
