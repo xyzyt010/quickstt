@@ -1345,6 +1345,12 @@ pub fn quit_app() {
     kill_image("whisper-cli.exe");
     kill_image("vosk_transcriber.exe");
     kill_image("deep-filter.exe");
+    // LFM3-Audio one-shot runtime: llama-cli is a single process (llama-server
+    // runs in-process), but the LFM3 local test shim goes through a python
+    // wrapper — both get swept here so a quit never strands a 1.1 GB model
+    // busy-decoding in the background with nobody watching it.
+    kill_image("llama-cli.exe");
+    kill_image("llama-server.exe");
 }
 
 /// One app quit: stop any strays, then caller exits.

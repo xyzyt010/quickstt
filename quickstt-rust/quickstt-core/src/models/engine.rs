@@ -2096,12 +2096,23 @@ fn find_qwen3_gguf(model_dir: &Path) -> Result<PathBuf> {
 /// load per turn (like whisper-cli). The ASR contract is the system prompt
 /// ("Perform ASR in <language>." / "Perform ASR."); the GGUF stores greedy
 /// sampling. Requires llama.cpp b11960 (v0.8.0) or newer.
+/// Serializes LFM3-Audio turns. Each segment is a one-shot llama-cli run
+/// holding a ~1.1 GB model resident; per-segment stt-transcribe threads used
+/// to overlap them into memory exhaustion (four concurrent loads = the
+/// machine ground to a halt the moment the user spoke). One at a time: the
+/// queue drains oldest-first, RAM stays bounded, and the turn lands when
+/// the last segment does.
+static LFM3_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn transcribe_lfm3_audio(
     config: &SttEngineConfig,
     model_dir: &Path,
     wav_path: &Path,
     language: &str,
 ) -> Result<String> {
+    let _serial = LFM3_SERIAL
+        .lock()
+        .map_err(|_| anyhow::anyhow!("LFM3-Audio engine lock poisoned"))?;
     let candidates =
         engine_candidates(config.lfm3_audio_path.clone(), &config.lfm3_audio_fallbacks);
     if candidates.is_empty() {
