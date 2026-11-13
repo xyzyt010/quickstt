@@ -889,32 +889,41 @@ fn mic_menu_items(state: &Arc<Mutex<AppState>>) -> (Vec<String>, i32) {
     (names, idx)
 }
 
-/// Model submenu rows: widget model names (capped), with selected index.
-fn model_menu_items(state: &Arc<Mutex<AppState>>) -> (Vec<String>, i32) {
+/// Model submenu rows: ONLY the models downloaded on this device, with the
+/// selected index and the row→entries mapping (callers need it to turn a
+/// clicked row into the global selected_model index).
+fn model_menu_items(state: &Arc<Mutex<AppState>>) -> (Vec<String>, i32, Vec<usize>) {
     if let Ok(s) = state.lock() {
-        let names: Vec<String> =
-            s.model_entries.iter().take(10).map(|e| e.name.clone()).collect();
-        let sel = if (s.selected_model as usize) < names.len() {
-            s.selected_model as i32
-        } else {
-            -1
-        };
-        (names, sel)
+        let mut names = Vec::new();
+        let mut idx_map = Vec::new();
+        for (i, e) in s.model_entries.iter().enumerate() {
+            if e.installed {
+                names.push(e.name.clone());
+                idx_map.push(i);
+            }
+        }
+        let sel = idx_map
+            .iter()
+            .position(|&m| m == s.selected_model)
+            .map(|p| p as i32)
+            .unwrap_or(-1);
+        (names, sel, idx_map)
     } else {
-        (Vec::new(), -1)
+        (Vec::new(), -1, Vec::new())
     }
 }
 
 /// Populate + place + show the shared flyout for `mode` next to the open
 /// dark menu (right side, or left when the screen forces it). Returns the
-/// rows + physical rect so the poll loop can track hover + dismissal.
+/// rows + physical rect + row→entry map so the poll loop can track hover +
+/// dismissal and clicks can map back to the global model index.
 fn open_submenu(
     fly_w: &slint::Weak<MenuFlyout>,
     menu_w: &slint::Weak<PillMenu>,
     pill_w: &slint::Weak<PillWidget>,
     state: &Arc<Mutex<AppState>>,
     mode: SubMode,
-) -> Option<(Vec<String>, (i32, i32, i32, i32))> {
+) -> Option<(Vec<String>, (i32, i32, i32, i32), Vec<usize>)> {
     let (Some(_f), Some(m), Some(p)) =
         (fly_w.upgrade(), menu_w.upgrade(), pill_w.upgrade())
     else {
@@ -923,8 +932,11 @@ fn open_submenu(
     if !m.window().is_visible() {
         return None;
     }
-    let (items, sel) = match mode {
-        SubMode::Mic => mic_menu_items(state),
+    let (items, sel, idx_map) = match mode {
+        SubMode::Mic => {
+            let (names, sel) = mic_menu_items(state);
+            (names, sel, Vec::new())
+        }
         SubMode::Model => model_menu_items(state),
         SubMode::None => return None,
     };
@@ -961,7 +973,7 @@ fn open_submenu(
         fx,
         fy,
     );
-    Some((items, (fx, fy, fw, fh)))
+    Some((items, (fx, fy, fw, fh), idx_map))
 }
 
 fn forward_to_running(cmd: &str) -> bool {
@@ -3875,12 +3887,14 @@ fn dock_hop(
     struct FlyoutUi {
         mode: SubMode,
         items: Vec<String>,
+        idx_map: Vec<usize>,
         rect: Option<(i32, i32, i32, i32)>,
     }
     let menu_pin: Arc<Mutex<Option<SubMode>>> = Arc::new(Mutex::new(None));
     let flyout_ui: Arc<Mutex<FlyoutUi>> = Arc::new(Mutex::new(FlyoutUi {
         mode: SubMode::None,
         items: Vec::new(),
+        idx_map: Vec::new(),
         rect: None,
     }));
     let menu2_open_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
@@ -3902,6 +3916,7 @@ fn dock_hop(
             if let Ok(mut u) = ui.lock() {
                 u.mode = SubMode::None;
                 u.items.clear();
+                u.idx_map.clear();
                 u.rect = None;
             }
             let scale = widget_platform::window_scale(p.window()).max(0.5);
@@ -4008,12 +4023,13 @@ fn dock_hop(
             } else {
                 *pinned = Some(SubMode::Mic);
                 drop(pinned);
-                if let Some((items, rect)) =
+                if let Some((items, rect, idx_map)) =
                     open_submenu(&fly, &pm, &pw, &state, SubMode::Mic)
                 {
                     if let Ok(mut u) = ui.lock() {
                         u.mode = SubMode::Mic;
                         u.items = items;
+                        u.idx_map = idx_map;
                         u.rect = Some(rect);
                     }
                 }
@@ -4043,12 +4059,13 @@ fn dock_hop(
             } else {
                 *pinned = Some(SubMode::Model);
                 drop(pinned);
-                if let Some((items, rect)) =
+                if let Some((items, rect, idx_map)) =
                     open_submenu(&fly, &pm, &pw, &state, SubMode::Model)
                 {
                     if let Ok(mut u) = ui.lock() {
                         u.mode = SubMode::Model;
                         u.items = items;
+                        u.idx_map = idx_map;
                         u.rect = Some(rect);
                     }
                 }
@@ -4150,13 +4167,24 @@ fn dock_hop(
                 }
                 SubMode::Model => {
                     if i >= 0 {
-                        if tx_cmd
-                            .try_send(OrchestratorCommand::SelectModel(i as usize))
-                            .is_err()
-                        {
-                            log_line("menu: model select FAILED (command loop dead?)");
-                        } else {
-                            log_line(&format!("menu: model -> row {i}"));
+                        // Row index in the flyout is NOT the global entries
+                        // index (only installed models are listed here).
+                        let real = ui
+                            .lock()
+                            .ok()
+                            .and_then(|u| u.idx_map.get(i as usize).copied());
+                        match real {
+                            Some(real) => {
+                                if tx_cmd
+                                    .try_send(OrchestratorCommand::SelectModel(real))
+                                    .is_err()
+                                {
+                                    log_line("menu: model select FAILED (command loop dead?)");
+                                } else {
+                                    log_line(&format!("menu: model -> entries[{real}]"));
+                                }
+                            }
+                            None => log_line(&format!("menu: model row {i} has no entries mapping")),
                         }
                     }
                 }
@@ -5439,7 +5467,7 @@ fn dock_hop(
                         };
                         match (want, active) {
                             (Some(wm), am) if wm != am => {
-                                if let Some((items, rect)) = open_submenu(
+                                if let Some((items, rect, idx_map)) = open_submenu(
                                     &flyout_w,
                                     &pillmenu_w,
                                     &pill_w,
@@ -5449,6 +5477,7 @@ fn dock_hop(
                                     if let Ok(mut u) = flyout_ui_timer.lock() {
                                         u.mode = wm;
                                         u.items = items;
+                                        u.idx_map = idx_map;
                                         u.rect = Some(rect);
                                     }
                                 }
