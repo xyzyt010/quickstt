@@ -2,7 +2,7 @@
 
 ## [2.0.0-alpha.27] — 2026-11-14
 
-Widget render fix.
+Two shipped fixes: the blank pill on fresh launch, and the dead wakeword.
 
 ### Fixed
 - **Windows: the mini pill rendered as a see-through outline on every fresh
@@ -15,6 +15,16 @@ Widget render fix.
   root rectangle now re-emits a full-scene damage on every footprint change,
   painting the entire window each resize. Verified on a fresh launch: opaque
   capsule on a dark background.
+- **The wakeword was dead on every inference — 511,000+ identical failures,
+  zero wake detections.** Two defects combined: the model-dir resolver
+  preferred the legacy custom heads (`[batch, 40, time]` LSTM) over the
+  community openWakeWord heads the app is built to run, feeding the wrong
+  tensor contract into tract; and `OwwHead::load` never checked the input
+  shape, so the mismatch failed silently forever. The resolver now prefers
+  the repo-root community layout (the installed Windows layout was
+  always correct); heads with a non-[1, 16, 96] input shape are refused at
+  load with one clear error. Verified: live scores flow from the community
+  heads on both Windows and Linux.
 
 ## [2.0.0-alpha.26] — 2026-11-14
 
