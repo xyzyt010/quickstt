@@ -243,13 +243,24 @@ static NEEDS_FULL_REDRAW: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 
 /// Hide an app window.
 ///
-/// Slint's winit backend destroys the HWND on hide when
-/// SLINT_DESTROY_WINDOW_ON_HIDE=1 (set in main), which is what makes the
-/// next show a full repaint instead of a blank white client. This function
-/// stays as the single choke point for app-window hides so every close path
-/// also demotes topmost.
+/// Windows: SW_HIDE keeps the HWND (and its DWM redirection bitmap + Slint
+/// backbuffer) alive — the re-created window came back at the wrong size
+/// with the client DPI-virtualized and clipped, so destruction is not an
+/// option. The cost of skipping winit's hide is that Slint's damage
+/// tracker sees nothing dirty; show_app_window compensates by replaying a
+/// 1-DIP grow/shrink which re-damages the whole scene.
+///
+/// Other platforms: plain slint hide() (X11 unmap + re-expose works fine).
 pub fn hide_app_window(window: &slint::Window) {
     NEEDS_FULL_REDRAW.store(true, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(target_os = "windows")]
+    if let Some(raw) = hwnd_of(window) {
+        let hwnd = HWND(raw as _);
+        unsafe {
+            let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_HIDE);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
     let _ = window.hide();
     demote_app_window(window);
 }
