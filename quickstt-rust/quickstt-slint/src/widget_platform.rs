@@ -1471,8 +1471,9 @@ mod x11q {
 
     /// Run `f` on the shared connection; on failure drop it and retry once
     /// with a freshly opened one. All callers live on the UI thread, which
-    /// is what makes the thread_local correct.
-    fn with_conn<R>(f: impl FnOnce(&RustConnection, u32) -> Option<R>) -> Option<R> {
+    /// is what makes the thread_local correct. `f: Fn` (not FnOnce) because
+    /// the retry invokes it up to two times.
+    fn with_conn<F: Fn(&RustConnection, u32) -> Option<R>, R>(f: F) -> Option<R> {
         CONN.with(|cell| {
             for attempt in 0..2 {
                 let mut slot = cell.borrow_mut();
