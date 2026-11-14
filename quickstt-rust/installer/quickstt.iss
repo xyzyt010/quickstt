@@ -1,4 +1,4 @@
-; ═══════════════════════════════════════════════════════════════════════════
+﻿; ═══════════════════════════════════════════════════════════════════════════
 ;  QuickSTT — Windows installer (Inno Setup 6)
 ;
 ;  Build it with the sibling Build-Installer.ps1 (it reads the version from
@@ -17,13 +17,13 @@
 
 #define MyAppName "QuickSTT"
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.0-alpha.26"
+  #define MyAppVersion "2.0.0-alpha.27"
 #endif
 ; The Windows file-version resource needs four numeric fields; the app's own
-; version carries a pre-release label ("2.0.0-alpha.26"). Build-Installer.ps1
-; derives the numeric form and passes it in (/DMyAppVersionNumeric=2.0.0.26).
+; version carries a pre-release label ("2.0.0-alpha.27"). Build-Installer.ps1
+; derives the numeric form and passes it in (/DMyAppVersionNumeric=2.0.0.27).
 #ifndef MyAppVersionNumeric
-  #define MyAppVersionNumeric "2.0.0.26"
+  #define MyAppVersionNumeric "2.0.0.27"
 #endif
 #define MyAppNameVersion MyAppName + " " + MyAppVersion
 #define MyAppPublisher "QuickSTT"

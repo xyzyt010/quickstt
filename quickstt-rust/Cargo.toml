@@ -1,4 +1,4 @@
-[workspace]
+﻿[workspace]
 # quickstt-gui (original egui widget) is intentionally NOT a member: its code
 # stays in the repo for reference, but the Slint widget is the product GUI.
 # Build it explicitly if ever needed: cargo build -p quickstt-gui --manifest-path quickstt-gui/Cargo.toml
@@ -15,7 +15,7 @@ resolver = "2"
 i-slint-renderer-software = { path = "tools/slint-software" }
 
 [workspace.package]
-version = "2.0.0-alpha.26"
+version = "2.0.0-alpha.27"
 edition = "2021"
 authors = ["QuickSTT Team <support@quickstt.com>"]
 license = "MIT"

@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.0.0-alpha.27] — 2026-11-14
+
+Widget render fix.
+
+### Fixed
+- **Windows: the mini pill rendered as a see-through outline on every fresh
+  launch.** The pill spawns expanded, then collapses via a native resize; the
+  software renderer rebuilt the window surface blank and Slint's damage
+  tracker marked only the changed item (the collapsed bar) dirty — everything
+  else stayed invisible and whatever was behind (browser, editor, Obsidian's
+  Vault/Graph menu) showed straight through it. Dragging the pill forced a
+  repaint, which is why "move it in any direction" normalized it. The pill's
+  root rectangle now re-emits a full-scene damage on every footprint change,
+  painting the entire window each resize. Verified on a fresh launch: opaque
+  capsule on a dark background.
+
 ## [2.0.0-alpha.26] — 2026-11-14
 
 Desktop pass on top of alpha.25 (Windows + Linux), plus the first release
@@ -196,4 +212,3 @@ where text is grid-fitted by the rasterizer itself.
 - Added cloud model/provider management groundwork
 - Added GPU-aware model catalog scaffolding
 - Added Smart Life / Tuya integration groundwork
-
