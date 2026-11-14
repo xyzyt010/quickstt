@@ -269,9 +269,11 @@ pub fn show_app_window(window: &slint::Window) {
         let hwnd = HWND(raw as _);
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging::{
-                SetForegroundWindow, ShowWindow, SW_SHOWNORMAL,
+                SetForegroundWindow, ShowWindow, SW_RESTORE,
             };
-            let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+            // SW_RESTORE undoes the "window minimized to -25600" state that
+            // Slint's hide leaves behind on the next show.
+            let _ = ShowWindow(hwnd, SW_RESTORE);
             SetForegroundWindow(hwnd);
         }
     }

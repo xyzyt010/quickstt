@@ -6,6 +6,14 @@ members = ["quickstt-core", "quickstt-ipc", "quickstt-slint"]
 exclude = ["quickstt-gui"]
 resolver = "2"
 
+# Vendored i-slint-renderer-software with TrueType stem hinting enabled
+# (`swash::hint(true)`). The 1.17.0 crate ships un-hinted outlines which
+# render thinning stems and darker AA than native Windows text; the local
+# copy is the upstream crate plus that one-line change. `.hint(true)` is the
+# same mechanism ClearType renderers use.
+[patch.crates-io]
+i-slint-renderer-software = { path = "tools/slint-software" }
+
 [workspace.package]
 version = "2.0.0-alpha.25"
 edition = "2021"

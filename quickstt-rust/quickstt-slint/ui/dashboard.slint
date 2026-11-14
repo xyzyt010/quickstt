@@ -411,8 +411,8 @@ export component DashboardWidget inherits Window {
 
                         Image {
                             source: @image-url("../../assets/app_icon.svg");
-                            width: root.rail-active ? 28px : 34px;
-                            height: root.rail-active ? 28px : 34px;
+                            width: root.rail-active ? 24px : 32px;
+                            height: root.rail-active ? 32px : 43px;
                             y: (parent.height - self.height) / 2;
                         }
                         VerticalLayout {
@@ -717,6 +717,10 @@ export component DashboardWidget inherits Window {
 
             // ── Right Main Content Area ──
             Rectangle {
+                // Fill the row next to the sidebar (otherwise the layout just
+                // sizes to the ScrollView's longest child and clips at the
+                // window edge — the "everything cut off on the right" report.
+                horizontal-stretch: 1;
                 background: #000000;
 
                 ScrollView {
@@ -725,6 +729,7 @@ export component DashboardWidget inherits Window {
                     mouse-drag-pan-enabled: true;
                     VerticalLayout {
                         alignment: start;
+                        width: parent.width;
 
                         // ══════════════════════════════════════════════════════════════════
                         // TAB 0: GENERAL SETTINGS
@@ -743,6 +748,7 @@ export component DashboardWidget inherits Window {
                             text: "Configure Windows integration, silence auto-commit, memory auto-offload, and recording output.";
                             font-size: 12px;
                             color: #9A9A9A;
+                            wrap: word-wrap;
                         }
 
                         // ── History moved to its own section ──
@@ -1030,6 +1036,7 @@ export component DashboardWidget inherits Window {
                             text: "Select your active transcription engine or download additional neural acoustic models.";
                             font-size: 12px;
                             color: #9A9A9A;
+                            wrap: word-wrap;
                         }
 
                         // Dynamic Download Progress Bar Card (Shows whenever downloading)
@@ -1431,6 +1438,7 @@ export component DashboardWidget inherits Window {
                             text: "Customize the appearance of the floating mini pill widget. Sliders apply immediately with live preview.";
                             font-size: 12px;
                             color: #9A9A9A;
+                            wrap: word-wrap;
                         }
 
                         // Interactive Live Preview Box
@@ -1596,6 +1604,7 @@ export component DashboardWidget inherits Window {
                             text: "Hands-free voice triggers. Calibrated sensitivity and strict noise gates prevent false activations from room noise and TV audio.";
                             font-size: 12px;
                             color: #9A9A9A;
+                            wrap: word-wrap;
                         }
 
                         // Master Activation Switch
@@ -2256,6 +2265,7 @@ export component DashboardWidget inherits Window {
                             text: "Inspect active ML inference runtimes, build versions, and software update status.";
                             font-size: 12px;
                             color: #9A9A9A;
+                            wrap: word-wrap;
                         }
 
                         // System Runtime Status Card
@@ -2319,8 +2329,8 @@ export component DashboardWidget inherits Window {
                                     padding-bottom: 2px;
                                     Image {
                                         source: @image-url("../../assets/app_icon.svg");
-                                        width: 44px;
-                                        height: 56px;
+                                        width: 40px;
+                                        height: 54px;
                                     }
                                     VerticalLayout {
                                         spacing: 0px;
