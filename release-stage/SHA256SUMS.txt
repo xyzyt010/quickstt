@@ -1,4 +1,0 @@
-82b211fd31feaf1e7b97bd95f61d57964799d0f25d4077e64978baf1da822b55  quickstt-desktop-v2.0.0-alpha.25-x86_64.tar.gz
-ec21dbecef73bc4127a6b3c637171b5feb33ba6a29d2e53800c3eea6736bca8d  quickstt_2.0.0~alpha.25-1_amd64.deb
-2c5f02236022bac4dacd11e1c1c0bc1a5fb7df627f3262784ef1f474414eeba9 *QuickSTT-Setup-2.0.0-alpha.25.exe
-dbf38f7e19ccdd44a7a5dbb1db0e79e149ec40648d2606b1dfa33122ec54e23d *quickstt-slint-2.0.0-alpha.25-win64.exe
