@@ -234,12 +234,15 @@ pub fn demote_app_window(window: &slint::Window) {
 }
 
 /// App-window full repaint marker: set on every hide, consumed on show.
-/// Slint's software renderer only paints damaged regions; a window
-/// re-shown after hide carries zero damage (the scene never changed), so
-/// the re-created HWND composites as an empty (white) surface even though
-/// the window itself exists. A 1-DIP grow/shrink makes winit emit Resized,
-/// rebuild the surface, and re-damage the whole scene.
 static NEEDS_FULL_REDRAW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The good placement captured at first show (physical outer rect). The
+/// window is re-created by slint on re-show and comes back at the wrong
+/// size / maximized-ish state; SetWindowPlacement re-imposes the captured
+/// geometry deterministically on every re-show.
+#[cfg(target_os = "windows")]
+static FIRST_PLACEMENT: std::sync::Mutex<Option<(i32, i32, i32, i32)>> =
+    std::sync::Mutex::new(None);
 
 /// Hide an app window.
 ///
@@ -294,6 +297,20 @@ pub fn show_app_window(window: &slint::Window) {
                 window.set_size(slint::LogicalSize::new(nw, nh));
             }
             center_on_work_area(window);
+            // Capture the good placement (physical outer rect) — the exact
+            // state a re-shown window must return to.
+            if let Some(raw) = hwnd_of(window) {
+                let hwnd = HWND(raw as _);
+                unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+                    let mut rc = windows::Win32::Foundation::RECT::default();
+                    if GetWindowRect(hwnd, &mut rc).is_ok() {
+                        if let Ok(mut slot) = FIRST_PLACEMENT.lock() {
+                            *slot = Some((rc.left, rc.top, rc.right, rc.bottom));
+                        }
+                    }
+                }
+            }
         }
     }
     #[cfg(target_os = "windows")]
@@ -311,19 +328,40 @@ pub fn show_app_window(window: &slint::Window) {
             SetForegroundWindow(hwnd);
         }
     }
-    // Force a full re-present AFTER show: the re-created HWND's surface is
-    // untouched until something dirties the scene, so replay a 1-DIP
-    // grow/shrink when this window was hidden. The pair of Resized events
-    // rebuilds the surface and repaints everything — visually invisible.
+    // Re-apply the captured good placement on re-show. The re-created HWND
+    // comes back at the wrong size with the client DPI-virtualized; slint's
+    // winit adapter cannot fix it (set_size is a silent no-op post-show), so
+    // pin the exact outer rect with SetWindowPlacement.
+    #[cfg(target_os = "windows")]
     if NEEDS_FULL_REDRAW.swap(false, std::sync::atomic::Ordering::Relaxed) {
-        let scale = window_scale(window).max(0.5);
-        let cur = window.size();
-        let (w, h) = (cur.width as f32 / scale, cur.height as f32 / scale);
-        if w > 1.0 && h > 1.0 {
-            window.set_size(slint::LogicalSize::new(w + 1.0, h + 1.0));
-            window.set_size(slint::LogicalSize::new(w, h));
+        let placement = FIRST_PLACEMENT.lock().ok().and_then(|slot| *slot);
+        if let (Some((l, t, r, b)), Some(raw)) = (placement, hwnd_of(window)) {
+            let hwnd = HWND(raw as _);
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    SetWindowPlacement, WINDOWPLACEMENT, SW_SHOWNORMAL,
+                };
+                let wp = WINDOWPLACEMENT {
+                    length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                    showCmd: SW_SHOWNORMAL.0 as u32,
+                    rcNormalPosition: windows::Win32::Foundation::RECT {
+                        left: l,
+                        top: t,
+                        right: r,
+                        bottom: b,
+                    },
+                    ptMinPosition: windows::Win32::Foundation::POINT { x: 0, y: 0 },
+                    ptMaxPosition: windows::Win32::Foundation::POINT { x: 0, y: 0 },
+                };
+                let _ = SetWindowPlacement(hwnd, &wp);
+                crate::log_line(&format!(
+                    "show: SetWindowPlacement -> ({l},{t})-({r},{b}) sw_shownnormal"
+                ));
+            }
         }
     }
+    // Force a full re-present AFTER show: the re-created HWND's surface is
+    // untouched until something dirties the scene, so request a redraw.
     window.request_redraw();
     // Resurrect topmost: winit resets z-order a hair after show (same race the
     // pill survives with restack_topmost). Re-assert for ~2s so the window

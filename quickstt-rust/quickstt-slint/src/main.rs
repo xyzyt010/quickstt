@@ -2327,6 +2327,16 @@ fn load_tray_icon() -> Option<(Vec<u8>, u32, u32)> {
 }
 
 fn main() -> QuickSttResult<()> {
+    // Slint's winit backend on Windows hides a window with
+    // winit's set_visible(false), which leaves the HWND parked at -25600 as
+    // a minimized stub. DWM discards redirection bitmaps of minimized
+    // windows and Slint never re-presents on re-show (no damage accumulates),
+    // so the client composites as WHITE. SLINT_DESTROY_WINDOW_ON_HIDE makes
+    // hide() destroy the HWND; show() re-creates it with a fresh, fully
+    // painted surface (the only path that reliably repaints software-rendered
+    // content). The re-created HWND comes back at the wrong size, so
+    // show_app_window re-imposes the captured good placement afterwards.
+    std::env::set_var("SLINT_DESTROY_WINDOW_ON_HIDE", "1");
     #[cfg(target_os = "windows")]
     {
         // The dashboard (and pill) are CPU software-rendered, so when the
