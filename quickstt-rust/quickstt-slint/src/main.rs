@@ -3729,12 +3729,15 @@ fn dock_hop(
         let dash_w = dashboard.as_weak();
         dashboard.window().on_close_requested(move || {
             if let Some(d) = dash_w.upgrade() {
-                widget_platform::demote_app_window(d.window());
+                // SW_HIDE ourselves; KeepWindowShown tells winit NOT to do its
+                // minimize-stub park, which loses the redirection bitmap and
+                // composites a white client on the next show.
+                widget_platform::hide_app_window(d.window());
             }
             if let Ok(mut v) = dash_vis.lock() {
                 *v = false;
             }
-            slint::CloseRequestResponse::HideWindow
+            slint::CloseRequestResponse::KeepWindowShown
         });
     }
     dashboard.on_drag_start(|| {});
@@ -7249,8 +7252,7 @@ fn dock_hop(
         let dash_w = dashboard.as_weak();
         dashboard.on_close_dashboard(move || {
             if let Some(d) = dash_w.upgrade() {
-                widget_platform::demote_app_window(d.window());
-                let _ = d.hide();
+                widget_platform::hide_app_window(d.window());
             }
             if let Ok(mut v) = dash_visible.lock() {
                 *v = false;
@@ -7328,7 +7330,7 @@ fn dock_hop(
                     let _ = s.settings.save_all();
                 }
                 if let Some(w) = ob_weak.upgrade() {
-                    let _ = w.hide();
+                    widget_platform::hide_app_window(w.window());
                 }
                 log_line("onboarding completed (preferences saved)");
             }
@@ -7464,6 +7466,23 @@ fn dock_hop(
         // tour looked "totally inaccurate" next to the actual app.
         widget_platform::show_app_window(ob.window());
         ob.set_step(0);
+        // The tour is a real app window (caption + X). Route the X through the
+        // same SW_HIDE path and mark the tour completed (dismissed = done,
+        // same as Skip) so it doesn't auto-open again on next launch.
+        {
+            let state2 = state.clone();
+            let ob_weak2 = ob.as_weak();
+            ob.window().on_close_requested(move || {
+                if let Ok(mut s) = state2.lock() {
+                    s.settings.onboarding_completed = true;
+                    let _ = s.settings.save_all();
+                }
+                if let Some(w) = ob_weak2.upgrade() {
+                    widget_platform::hide_app_window(w.window());
+                }
+                slint::CloseRequestResponse::KeepWindowShown
+            });
+        }
         log_line("onboarding shown (first run)");
     }
 

@@ -233,12 +233,32 @@ pub fn demote_app_window(window: &slint::Window) {
     }
 }
 
+/// Hide an app window correctly for the software renderer.
+///
+/// winit's `hide()` on Windows parks the HWND at −25600 as a 159x27
+/// minimized stub (the "single-app tray" pattern). DWM does not preserve
+/// the redirection bitmap across that round trip: on the next show the
+/// caption redraws (chrome is re-rendered) but the client area composites
+/// as uninitialized WHITE — the app looks dead. Hiding with SW_HIDE keeps
+/// the HWND's redirection bitmap intact, so hide→show is just a visibility
+/// toggle and slint's backbuffer survives untouched.
+pub fn hide_app_window(window: &slint::Window) {
+    #[cfg(target_os = "windows")]
+    if let Some(raw) = hwnd_of(window) {
+        let hwnd = HWND(raw as _);
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::ShowWindow;
+            let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_HIDE);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window.hide();
+    }
+    demote_app_window(window);
+}
+
 pub fn show_app_window(window: &slint::Window) {
-    // Queue a full-frame redraw BEFORE show so Slint does not emit its first
-    // paint against the pre-restore geometry (windows minimized to -25600 by
-    // hide carry stale damage tracking). The transparent left-edge sliver we
-    // saw was exactly this: partial-paint damage that never covered the strip.
-    window.request_redraw();
     if let Err(e) = window.show() {
         crate::log_line(&format!("show_app_window FAILED: {e:?}"));
     }
@@ -274,14 +294,19 @@ pub fn show_app_window(window: &slint::Window) {
         let hwnd = HWND(raw as _);
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging::{
-                SetForegroundWindow, ShowWindow, SW_RESTORE,
+                SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
             };
-            // SW_RESTORE undoes the "window minimized to -25600" state that
-            // Slint's hide leaves behind on the next show.
+            // SW_RESTORE undoes the "window minimized to -25600" state if a
+            // legacy hide path left it minimized; SW_SHOW covers the SW_HIDE
+            // path (cheap, idempotent either way).
             let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
         }
     }
+    // Force a full re-present AFTER show — SW_SHOW/SW_RESTORE can surface a
+    // stale/zeroed redirection bitmap (DWM shows uninitialized redirection
+    // surfaces as a white client), so request the whole scene again.
     window.request_redraw();
     // Resurrect topmost: winit resets z-order a hair after show (same race the
     // pill survives with restack_topmost). Re-assert for ~2s so the window
