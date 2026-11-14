@@ -73,10 +73,24 @@ const EXP_GAP: i32 = 6;
 /// Resize the pill footprint: native window + Slint layout together (see
 /// pill.slint win_w/win_h — the layout must track or the TouchArea keeps the
 /// old size and clicks on the bigger painted area die silently).
+///
+/// The software renderer loses the whole surface on a native resize (the
+/// window paints only the outline; everything else reads as desktop through
+/// the transparent buffer), so we toggle the full-window background alpha by
+/// one LSB on EVERY resize — forcing Slint's damage tracker to repaint the
+/// entire scene. Without it the pill renders blank-notched on fresh launch.
 fn set_footprint(p: &PillWidget, w: i32, h: i32) {
     p.window().set_size(slint::LogicalSize {
         width: w as f32,
         height: h as f32,
+    });
+    static FRAME_PARITY: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let flip = !FRAME_PARITY.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+    p.set_root_bg(if flip {
+        slint::Color::from_argb_u8(1, 0, 0, 0)
+    } else {
+        slint::Color::from_argb_u8(2, 0, 0, 0)
     });
     p.set_win_w(w as f32);
     p.set_win_h(h as f32);

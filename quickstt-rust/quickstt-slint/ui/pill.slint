@@ -189,6 +189,12 @@ export component PillWidget inherits Window {
     height: win_h;
     background: transparent;
     no-frame: true;
+    /// Full-scene repaint lever: Slint's software renderer loses the whole
+    /// window's damaged region after a native resize (blank buffer ⇒ the
+    /// pill renders as a see-through outline), so this property is nudged by
+    /// a single LSB on every set_footprint call — forcing slint to
+    /// repaint every pixel of the scene after each resize.
+    in-out property <color> root-bg: #01000000;
 
     // ── state (driven from Rust) ──
     in property <bool> expanded: false;
@@ -242,7 +248,7 @@ export component PillWidget inherits Window {
         y: 0;
         width: parent.width;
         height: parent.height;
-        background: #01000000;
+        background: root.root-bg;
     }
     drag_touch := TouchArea {
         // Bound to the VISIBLE content rect, not the window: the native
