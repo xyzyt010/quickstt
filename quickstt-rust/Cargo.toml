@@ -15,7 +15,7 @@ resolver = "2"
 i-slint-renderer-software = { path = "tools/slint-software" }
 
 [workspace.package]
-version = "2.0.0-alpha.25"
+version = "2.0.0-alpha.26"
 edition = "2021"
 authors = ["QuickSTT Team <support@quickstt.com>"]
 license = "MIT"

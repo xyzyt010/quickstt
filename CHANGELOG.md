@@ -1,5 +1,39 @@
 # Changelog
 
+## [2.0.0-alpha.26] — 2026-11-14
+
+Desktop pass on top of alpha.25 (Windows + Linux), plus the first release
+where text is grid-fitted by the rasterizer itself.
+
+### Fixed
+- **Linux + Windows: native app windows could paint before their final
+  geometry applied** (windows re-shown after hide are parked at −25600 and
+  re-shown via SW_RESTORE), leaving an unpainted strip at the left edge with
+  wallpaper showing through an opaque APPWINDOW surface. A full-frame repaint
+  is now queued before the window is shown, in addition to the existing
+  post-restore redraw.
+- **Dashboard tabs were clipped at the right window edge.** The content
+  column sized to its longest single-line child instead of the window;
+  `horizontal-stretch: 1` fills the row properly.
+- **"System & Info" showed a hard-coded stale version** ("2.0.0-alpha.18").
+  It now reports `CARGO_PKG_VERSION` at runtime — it cannot drift again.
+- **Linux: release-stage dist artifacts accidentally tracked in git**
+  (installers at 40+ MB) — removed and git-ignored.
+
+### Added
+- **Native-level text crispness via TrueType stem hinting.** The software
+  rasterizer shipped by Slint (`i-slint-renderer-software` 1.17.0) draws
+  un-hinted outlines: stems thin and AA darkens at UI text sizes — the
+  "soft" look versus Windows ClearType. The crate is now vendored under
+  `tools/slint-software` identical except `swash`'s `hint(true)`, and
+  `[patch.crates-io]` binds the build to it. Inter already ships TrueType
+  hinting, so stems now snap to the pixel grid. (LCD sub-pixel rendering
+  remains future work — see `docs/` notes.)
+
+### Changed
+- Nothing user-visible beyond the fixes above; the pill/widget and Android
+  behavior are unchanged.
+
 ## [2.0.0-alpha.18] — 2026-10-20
 
 ### Fixed

@@ -1,4 +1,4 @@
-# QuickSTT — Offline Voice Typing for Windows & Linux
+﻿# QuickSTT — Offline Voice Typing for Windows & Linux
 
 <p align="center">
   <img src="quickstt-rust/assets/icon_app.png" width="96" alt="QuickSTT logo"/>
@@ -26,15 +26,16 @@ Everything is published on the [GitHub release page](https://github.com/xyzyt010
 
 | What | Platform | Link |
 |---|---|---|
-| **`quickstt-android-release.apk`** (10.5 MB) | Android 8.0+ (arm64-v8a) | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt-android-release.apk) |
-| `quickstt-v2.0.0-alpha.18-x86_64.tar.gz` (29 MB) | Ubuntu 22.04+ / Debian 12 / Mint 21+ | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt-v2.0.0-alpha.18-x86_64.tar.gz) |
-| `quickstt_2.0.0.alpha.18-1_amd64.deb` (20 MB) | Debian / Ubuntu / Mint | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt_2.0.0.alpha.18-1_amd64.deb) |
-| `SHA256SUMS` | — | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/SHA256SUMS) |
+| **`quickstt-android-release.apk`** (10.5 MB) | Android 8.0+ (arm64-v8a) | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.28/quickstt-android-release.apk) |
+| `QuickSTT-Setup-2.0.0-alpha.26.exe` | Windows 10/11 (installer) | [download](https://github.com/xyzyt010/quickstt/releases/download/desktop-v2.0.0-alpha.26/QuickSTT-Setup-2.0.0-alpha.26.exe) |
+| `quickstt-desktop-v2.0.0-alpha.26-x86_64.tar.gz` | Ubuntu 22.04+ / Debian 12 / Mint 21+ | [download](https://github.com/xyzyt010/quickstt/releases/download/desktop-v2.0.0-alpha.26/quickstt-desktop-v2.0.0-alpha.26-x86_64.tar.gz) |
+| `quickstt_2.0.0.alpha.26-1_amd64.deb` | Debian / Ubuntu / Mint | [download](https://github.com/xyzyt010/quickstt/releases/download/desktop-v2.0.0-alpha.26/quickstt_2.0.0.alpha.26-1_amd64.deb) |
+| `SHA256SUMS` | — | [download](https://github.com/xyzyt010/quickstt/releases/latest/download/SHA256SUMS.txt) |
 
 Install the phone app:
 
 ```bash
-wget -O quickstt.apk https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt-android-release.apk
+wget -O quickstt.apk https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.28/quickstt-android-release.apk
 adb install -r quickstt.apk
 ```
 
@@ -107,7 +108,7 @@ sudo apt install -y wget ca-certificates
 
 # 2. Download the latest amd64 .deb (Ubuntu 22.04 glibc 2.35 build — runs on Mint 21/22)
 wget -O /tmp/quickstt.deb \
-  https://github.com/quickstt/quickstt/releases/latest/download/quickstt_2.0.0-alpha.1_amd64.deb
+  https://github.com/xyzyt010/quickstt/releases/latest/download/quickstt_2.0.0.alpha.26-1_amd64.deb
 
 # 3. Install + auto-fix deps (gtk, appindicator, pulse, etc.)
 sudo apt install -y /tmp/quickstt.deb
@@ -120,23 +121,20 @@ quickstt &
 
 You should see the dark pill (360×50) at the top-center of your screen. Right-click tray icon → **Models** to download a model. Press the mic or say **“hey jarvis”** (default wakeword).
 
-### Alternative: AppImage (no `sudo`, no install)
+### Alternative: portable tarball (no `sudo`, no install)
 
 ```bash
-wget -O /tmp/QuickSTT.AppImage \
-  https://github.com/quickstt/quickstt/releases/latest/download/QuickSTT-2.0.0-alpha.1-x86_64.AppImage
-chmod +x /tmp/QuickSTT.AppImage
-/tmp/QuickSTT.AppImage &
-# Optional: integrate into Mint menu
-/tmp/QuickSTT.AppImage --appimage-extract  # inspect if needed
+wget -O /tmp/quickstt.tar.gz \
+  https://github.com/xyzyt010/quickstt/releases/download/desktop-v2.0.0-alpha.26/quickstt-desktop-v2.0.0-alpha.26-x86_64.tar.gz
+mkdir -p ~/quickstt && tar xzf /tmp/quickstt.tar.gz -C ~/quickstt && ~/quickstt/QuickSTT &
 ```
 
-### Alternative: `install.sh` (auto-detects distro, picks deb vs AppImage)
+### Alternative: `install.sh` (auto-detects distro, picks deb vs tarball)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/quickstt/quickstt/main/scripts/install.sh | bash
-# Explicit:  curl -fsSL https://raw.githubusercontent.com/quickstt/quickstt/main/scripts/install.sh | bash -s -- --deb
-# AppImage:  curl -fsSL https://raw.githubusercontent.com/quickstt/quickstt/main/scripts/install.sh | bash -s -- --appimage
+curl -fsSL https://raw.githubusercontent.com/xyzyt010/quickstt/main/scripts/install.sh | bash
+# Explicit:  curl -fsSL https://raw.githubusercontent.com/xyzyt010/quickstt/main/scripts/install.sh | bash -s -- --deb
+# Tarball:  curl -fsSL https://raw.githubusercontent.com/xyzyt010/quickstt/main/scripts/install.sh | bash -s -- --tarball
 ```
 
 ### Mint Cinnamon quirks
@@ -164,7 +162,7 @@ Same artifact as Mint (Mint is Ubuntu-based). On **Ubuntu 22.04 / 24.04** or **D
 ```bash
 # Ubuntu 22.04/24.04 amd64
 sudo apt update && sudo apt install -y wget ca-certificates
-wget -O /tmp/quickstt.deb https://github.com/quickstt/quickstt/releases/latest/download/quickstt_2.0.0-alpha.1_amd64.deb
+wget -O /tmp/quickstt.deb https://github.com/xyzyt010/quickstt/releases/latest/download/quickstt_2.0.0.alpha.26-1_amd64.deb
 sudo apt install -y /tmp/quickstt.deb
 quickstt
 
@@ -188,27 +186,29 @@ ls ~/.local/share/QuickSTT/models/     # models root
 
 ## Quick Start — Windows
 
+### Installer (recommended)
+
+1. Download **QuickSTT-Setup-2.0.0-alpha.26.exe** from the latest Desktop release:  
+   `https://github.com/xyzyt010/quickstt/releases/latest/download/QuickSTT-Setup-2.0.0-alpha.26.exe`
+2. Double-click it. The installer carries the offline model catalog, wakeword head, UI fonts and icons; the tray app starts on login.
+
 ### Portable (no installer, no admin)
 
-1. Download **QuickSTT_Portable.exe** from the latest Release:  
-   `https://github.com/quickstt/quickstt/releases/latest/download/QuickSTT_Portable.exe`
-2. Double-click it. It bootstraps `QuickSTT_App.exe` + `stt_service.exe` + models on first run.
+1. Download **`quickstt-slint-2.0.0-alpha.26-win64.exe`** from the same release — no admin, no system changes; place it anywhere and run it. (The LFM3-Audio GGUF engine additionally needs `llama-cli.exe` reachable — either the CI-built portable bundle or `winget install llama.cpp`.)
 
 ### Direct download artifacts
 
-- `QuickSTT_Portable.exe` — bootstrap installer/updater (recommended)
-- `QuickSTT_DirectDownload/QuickSTT_Full/` — full folder for manual copy / USB
-- `QuickSTT_DirectDownload/SHA256SUMS.txt` — checksums
-- `QuickSTT_Server/QuickSTT_LAN_Package.tar` — LAN distribution
+- `QuickSTT-Setup-2.0.0-alpha.26.exe` — Inno Setup installer (fonts, wakewords, app icon; no admin required)
+- `quickstt-slint-2.0.0-alpha.26-win64.exe` — portable single binary
+- `SHA256SUMS.txt` — checksums for every asset
 
-Windows is still the primary target for the **C++/Qt** stack (`BuildApp.bat`).
+Windows is the primary target for the **Rust & Slint** stack (`quickstt-slint`).
+The legacy C++/Qt portable is still built by CI for reference.
 
 ```powershell
-# From source on Windows (MSVC or MinGW + Qt 6.6+ + Rust)
-.\BuildApp.bat        # produces QuickSTT_App/ + QuickSTT_Portable.exe
-# Or pure Rust (no Qt)
-cargo build -p quickstt-gui --release
-.\target\release\QuickSTT.exe
+# From source on Windows (MSVC + Rust)
+cargo build -p quickstt-slint --release
+.\target\release\quickstt-slint.exe
 ```
 
 ---
@@ -232,7 +232,7 @@ where it stopped, and only a complete model file is put in place.
 The fastest way to get it is the release APK (10.5 MB, signed):
 
 ```bash
-wget -O quickstt.apk https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.18/quickstt-android-release.apk
+wget -O quickstt.apk https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.28/quickstt-android-release.apk
 adb install -r quickstt.apk
 ```
 
@@ -374,7 +374,7 @@ source $HOME/.cargo/env
 cargo install cargo-deb --locked   # for .deb
 
 # Build (native arch)
-git clone https://github.com/quickstt/quickstt.git && cd quickstt
+git clone https://github.com/xyzyt010/quickstt.git && cd quickstt
 ./quickstt-rust/scripts/build-linux.sh
 # Outputs: quickstt-rust/target/release/QuickSTT  build/stt_service  quickstt-rust/dist/*.deb  quickstt-rust/dist/*.AppImage
 ./quickstt-rust/target/release/QuickSTT  # run pill
@@ -390,7 +390,7 @@ git clone https://github.com/quickstt/quickstt.git && cd quickstt
 
 ```powershell
 # Prerequisites: Qt 6.6+, CMake 3.19+, Rust stable, MSVC or MinGW
-git clone https://github.com/quickstt/quickstt.git; cd quickstt
+git clone https://github.com/xyzyt010/quickstt.git; cd quickstt
 .\BuildApp.bat                      # Qt C++ stack → QuickSTT_App\QuickSTT_App.exe
 cargo build -p quickstt-gui --release  # Rust stack → target\release\QuickSTT.exe
 ```
@@ -403,10 +403,9 @@ See `docs/BUILDING.md`.
 
 | Platform | Artifact | How | Install |
 |---|---|---|---|
-| **Linux Mint / Ubuntu / Debian** | `quickstt_2.0.0-alpha.1_amd64.deb` | `cargo deb -p quickstt-gui` or `quickstt-rust/scripts/build-linux.sh` | `sudo apt install ./quickstt_*.deb` |
-| **Portable Linux** | `QuickSTT-2.0.0-alpha.1-x86_64.AppImage` | `linuxdeploy --appdir dist/AppDir -e QuickSTT -d assets/quickstt.desktop -i assets/icon_app.png --plugin gtk --output appimage` | `chmod +x *.AppImage && ./QuickSTT*.AppImage` |
-| **Fallback** | `quickstt-20260826-x86_64.tar.gz` | `build-linux.sh` when FUSE unavailable | `tar xzf && ./QuickSTT` |
-| **Windows** | `QuickSTT_Portable.exe` + `QuickSTT_Basic/Full` + `SHA256SUMS.txt` | `BuildApp.bat` | `QuickSTT_Portable.exe` bootstrap |
+| **Linux Mint / Ubuntu / Debian** | `quickstt_2.0.0.alpha.26-1_amd64.deb` | `cargo deb -p quickstt-slint` (CI) | `sudo apt install ./quickstt_*.deb` |
+| **Portable Linux** | `quickstt-desktop-v2.0.0-alpha.26-x86_64.tar.gz` | CI `release-desktop.yml` | `tar xzf` into `~/quickstt`, run `./QuickSTT` |
+| **Windows** | `QuickSTT-Setup-2.0.0-alpha.26.exe` (installer) + `quickstt-slint-2.0.0-alpha.26-win64.exe` (portable) | `quickstt-rust/installer/Build-Installer.ps1` | run the installer, or the single exe anywhere |
 
 Checksums: `cat quickstt-rust/dist/SHA256SUMS; sha256sum -c dist/SHA256SUMS`.
 

@@ -2596,6 +2596,11 @@ fn main() -> QuickSttResult<()> {
 
     let pill = PillWidget::new().unwrap();
     let dashboard = DashboardWidget::new().unwrap();
+    // "System & Info" shows the running version — keep it in sync with the
+    // crate version (Cargo.toml) instead of the hardcoded stale default.
+    dashboard.set_app_version(
+        format!("{} (Rust & Slint Edition)", env!("CARGO_PKG_VERSION")).into(),
+    );
     // ── First-run onboarding ──
     // Shown while `onboarding_completed` is false: how the app works, the
     // live demo, the language / model / preference picks. Skip and "Start
