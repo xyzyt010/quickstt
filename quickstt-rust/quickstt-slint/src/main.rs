@@ -2327,6 +2327,18 @@ fn load_tray_icon() -> Option<(Vec<u8>, u32, u32)> {
 }
 
 fn main() -> QuickSttResult<()> {
+    // Slint's winit backend on Windows hides a window with
+    // winit's set_visible(false), which leaves the HWND parked at -25600 as a
+    // minimized stub. DWM discards the redirection bitmap for minimized
+    // windows and Slint never re-presents on re-show (its damage tracker
+    // sees nothing dirty), so the client area composites as WHITE — the app
+    // looks dead after every hide -> show. SLINT_DESTROY_WINDOW_ON_HIDE (a
+    // supported Slint knob) makes hide() destroy the HWND instead; on show
+    // it re-creates the window from the saved placement with a fresh
+    // surface that gets a full repaint — the same path as first launch.
+    // This is per-window: it affects APPWINDOWS and the pill alike, and
+    // every show is indistinguishable from the first paint.
+    std::env::set_var("SLINT_DESTROY_WINDOW_ON_HIDE", "1");
     #[cfg(target_os = "windows")]
     {
         // The dashboard (and pill) are CPU software-rendered, so when the
@@ -3729,15 +3741,14 @@ fn dock_hop(
         let dash_w = dashboard.as_weak();
         dashboard.window().on_close_requested(move || {
             if let Some(d) = dash_w.upgrade() {
-                // SW_HIDE ourselves; KeepWindowShown tells winit NOT to do its
-                // minimize-stub park, which loses the redirection bitmap and
-                // composites a white client on the next show.
                 widget_platform::hide_app_window(d.window());
             }
             if let Ok(mut v) = dash_vis.lock() {
                 *v = false;
             }
-            slint::CloseRequestResponse::KeepWindowShown
+            // Let winit/slint do its default: hide() → HWND destroyed and
+            // re-created with a full repaint on the next show (destroy-on-hide).
+            slint::CloseRequestResponse::HideWindow
         });
     }
     dashboard.on_drag_start(|| {});
@@ -7466,9 +7477,10 @@ fn dock_hop(
         // tour looked "totally inaccurate" next to the actual app.
         widget_platform::show_app_window(ob.window());
         ob.set_step(0);
-        // The tour is a real app window (caption + X). Route the X through the
-        // same SW_HIDE path and mark the tour completed (dismissed = done,
-        // same as Skip) so it doesn't auto-open again on next launch.
+        // The tour is a real app window (caption + X). Dismissing it marks
+        // onboarding completed, like Skip does, so it doesn't auto-open on
+        // the next launch; the default HideWindow response then destroys and
+        // re-creates the HWND with a full repaint on the next show.
         {
             let state2 = state.clone();
             let ob_weak2 = ob.as_weak();
@@ -7480,7 +7492,7 @@ fn dock_hop(
                 if let Some(w) = ob_weak2.upgrade() {
                     widget_platform::hide_app_window(w.window());
                 }
-                slint::CloseRequestResponse::KeepWindowShown
+                slint::CloseRequestResponse::HideWindow
             });
         }
         log_line("onboarding shown (first run)");

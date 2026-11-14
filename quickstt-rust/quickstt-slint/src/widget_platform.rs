@@ -233,28 +233,15 @@ pub fn demote_app_window(window: &slint::Window) {
     }
 }
 
-/// Hide an app window correctly for the software renderer.
+/// Hide an app window.
 ///
-/// winit's `hide()` on Windows parks the HWND at −25600 as a 159x27
-/// minimized stub (the "single-app tray" pattern). DWM does not preserve
-/// the redirection bitmap across that round trip: on the next show the
-/// caption redraws (chrome is re-rendered) but the client area composites
-/// as uninitialized WHITE — the app looks dead. Hiding with SW_HIDE keeps
-/// the HWND's redirection bitmap intact, so hide→show is just a visibility
-/// toggle and slint's backbuffer survives untouched.
+/// Slint's winit backend destroys the HWND on hide when
+/// SLINT_DESTROY_WINDOW_ON_HIDE=1 (set in main), which is what makes the
+/// next show a full repaint instead of a blank white client. This function
+/// stays as the single choke point for app-window hides so every close path
+/// also demotes topmost.
 pub fn hide_app_window(window: &slint::Window) {
-    #[cfg(target_os = "windows")]
-    if let Some(raw) = hwnd_of(window) {
-        let hwnd = HWND(raw as _);
-        unsafe {
-            use windows::Win32::UI::WindowsAndMessaging::ShowWindow;
-            let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_HIDE);
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = window.hide();
-    }
+    let _ = window.hide();
     demote_app_window(window);
 }
 
