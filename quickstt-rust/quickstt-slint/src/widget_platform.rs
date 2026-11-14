@@ -234,6 +234,11 @@ pub fn demote_app_window(window: &slint::Window) {
 }
 
 pub fn show_app_window(window: &slint::Window) {
+    // Queue a full-frame redraw BEFORE show so Slint does not emit its first
+    // paint against the pre-restore geometry (windows minimized to -25600 by
+    // hide carry stale damage tracking). The transparent left-edge sliver we
+    // saw was exactly this: partial-paint damage that never covered the strip.
+    window.request_redraw();
     if let Err(e) = window.show() {
         crate::log_line(&format!("show_app_window FAILED: {e:?}"));
     }
