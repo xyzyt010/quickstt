@@ -1405,9 +1405,9 @@ pub fn strip_chrome(window: &slint::Window) {
 }
 
 /// Pure-Rust X11 queries backing the Linux widget math (cursor, screens,
-/// work area, DPI). Every query connects fresh and degrades to None when no
-/// X server is reachable (pure-Wayland session, headless CI) — callers fall
-/// back to safe constants, never panic.
+/// work area, DPI). One shared connection per thread (reconnecting once on
+/// failure) — callers never block on repeated X11 handshakes and never
+/// panic; failures degrade to None so callers fall back to safe constants.
 #[cfg(not(target_os = "windows"))]
 mod x11q {
     use x11rb::connection::Connection;
@@ -1418,14 +1418,54 @@ mod x11q {
     // traits above.
     use x11rb::wrapper::ConnectionExt as _;
 
-    fn connect() -> Option<(RustConnection, u32)> {
+    thread_local! {
+        /// One X11 connection per process, reused for every query.
+        ///
+        /// Opening a fresh connection per call (an MIT-MAGIC-COOKIE
+        /// handshake + protocol setup) used to happen for EVERY probe —
+        /// cursor position is polled every 50 ms, and a right-click does
+        /// half a dozen of these in a row. When the X server stalled (fd
+        /// table full, or just slow) connect() blocked the whole UI thread
+        /// and the app froze. One cached connection (reconnecting once on
+        /// failure) keeps the event loop responsive and is cheaper for the
+        /// server too.
+        static CONN: std::cell::RefCell<Option<(RustConnection, u32)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    fn make_connection() -> Option<(RustConnection, u32)> {
         let (conn, screen) = RustConnection::connect(None).ok()?;
         let root = conn.setup().roots.get(screen)?.root;
         Some((conn, root))
     }
 
+    /// Run `f` on the shared connection; on failure drop it and retry once
+    /// with a freshly opened one. All callers live on the UI thread, which
+    /// is what makes the thread_local correct.
+    fn with_conn<R>(f: impl FnOnce(&RustConnection, u32) -> Option<R>) -> Option<R> {
+        CONN.with(|cell| {
+            for attempt in 0..2 {
+                let mut slot = cell.borrow_mut();
+                if slot.is_none() {
+                    *slot = make_connection();
+                }
+                let Some((conn, root)) = slot.as_ref() else {
+                    return None;
+                };
+                if let Some(r) = f(conn, *root) {
+                    return Some(r);
+                }
+                // Query failed — the server may have dropped us; reconnect once.
+                if attempt == 0 {
+                    *slot = None;
+                }
+            }
+            None
+        })
+    }
+
     pub fn can_connect() -> bool {
-        connect().is_some()
+        with_conn(|_conn, _root| Some(())).is_some()
     }
 
     /// Map an already-created X11 window if the server says it is not
@@ -1433,65 +1473,55 @@ mod x11q {
     /// while the window stays IsUnMapped on Xfwm4, which makes the pill
     /// invisible even though Slint's `is_visible()` is true.
     pub fn ensure_mapped(xid: u32) {
-        let Some((conn, _root)) = connect() else {
-            return;
-        };
-        let viewable = conn
-            .get_window_attributes(xid)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .map(|a| a.map_state == MapState::VIEWABLE)
-            .unwrap_or(false);
-        if viewable {
-            return;
-        }
-        if conn
-            .map_window(xid)
-            .ok()
-            .and_then(|c| c.check().ok())
-            .is_none()
-        {
-            return;
-        }
-        let _ = conn
-            .configure_window(xid, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))
-            .ok()
-            .and_then(|c| c.check().ok());
-        let _ = conn.flush();
+        with_conn(|conn, _root| {
+            let viewable = conn
+                .get_window_attributes(xid)
+                .ok()?
+                .reply()
+                .ok()
+                .map(|a| a.map_state == MapState::VIEWABLE)
+                .unwrap_or(false);
+            if viewable {
+                return Some(());
+            }
+            conn.map_window(xid).ok()?.check().ok()?;
+            let _ = conn
+                .configure_window(xid, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))
+                .ok()
+                .and_then(|c| c.check().ok());
+            let _ = conn.flush();
+            Some(())
+        });
     }
 
     pub fn cursor_pos() -> Option<(i32, i32)> {
-        let (conn, root) = connect()?;
-        let r = x11rb::protocol::xproto::query_pointer(&conn, root)
-            .ok()?
-            .reply()
-            .ok()?;
-        Some((r.root_x as i32, r.root_y as i32))
+        with_conn(|conn, root| {
+            let r = conn.query_pointer(root).ok()?.reply().ok()?;
+            Some((r.root_x as i32, r.root_y as i32))
+        })
     }
 
     /// Union of all enabled CRTCs (multi-display); root geometry fallback.
     pub fn screen_size() -> Option<(i32, i32)> {
-        let (conn, root) = connect()?;
-        if let Ok(res) = randr_get_resources(&conn, root) {
-            let (mut x1, mut y1) = (i32::MAX, i32::MAX);
-            let (mut x2, mut y2) = (i32::MIN, i32::MIN);
-            let mut any = false;
-            for info in res {
-                any = true;
-                x1 = x1.min(info.0);
-                y1 = y1.min(info.1);
-                x2 = x2.max(info.0 + info.2);
-                y2 = y2.max(info.1 + info.3);
+        with_conn(|conn, root| {
+            if let Ok(res) = randr_get_resources(conn, root) {
+                let (mut x1, mut y1) = (i32::MAX, i32::MAX);
+                let (mut x2, mut y2) = (i32::MIN, i32::MIN);
+                let mut any = false;
+                for info in res {
+                    any = true;
+                    x1 = x1.min(info.0);
+                    y1 = y1.min(info.1);
+                    x2 = x2.max(info.0 + info.2);
+                    y2 = y2.max(info.1 + info.3);
+                }
+                if any {
+                    return Some((x2 - x1, y2 - y1));
+                }
             }
-            if any {
-                return Some((x2 - x1, y2 - y1));
-            }
-        }
-        let g = x11rb::protocol::xproto::get_geometry(&conn, root)
-            .ok()?
-            .reply()
-            .ok()?;
-        Some((g.width as i32, g.height as i32))
+            let g = conn.get_geometry(root).ok()?.reply().ok()?;
+            Some((g.width as i32, g.height as i32))
+        })
     }
 
     /// Enabled CRTC rects as (x, y, w, h).
@@ -1526,30 +1556,26 @@ mod x11q {
     /// First _NET_WORKAREA rect as (left, top, right, bottom).
     /// Property format is [x, y, width, height] CARDINALs per desktop.
     pub fn work_area() -> Option<(i32, i32, i32, i32)> {
-        let (conn, root) = connect()?;
-        let atom = conn
-            .intern_atom(false, b"_NET_WORKAREA")
-            .ok()?
-            .reply()
-            .ok()?
-            .atom;
-        let prop = conn
-            .get_property(false, root, atom, AtomEnum::CARDINAL, 0, 4)
-            .ok()?
-            .reply()
-            .ok()?;
-        if prop.format != 32 || prop.value.len() < 16 {
-            return None;
-        }
-        let mut v = [0u32; 4];
-        for (i, chunk) in prop.value.chunks_exact(4).take(4).enumerate() {
-            v[i] = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        }
-        let (x, y, w, h) = (v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32);
-        if w <= 0 || h <= 0 {
-            return None;
-        }
-        Some((x, y, x + w, y + h))
+        with_conn(|conn, root| {
+            let atom = conn.intern_atom(false, b"_NET_WORKAREA").ok()?.reply().ok()?.atom;
+            let prop = conn
+                .get_property(false, root, atom, AtomEnum::CARDINAL, 0, 4)
+                .ok()?
+                .reply()
+                .ok()?;
+            if prop.format != 32 || prop.value.len() < 16 {
+                return None;
+            }
+            let mut v = [0u32; 4];
+            for (i, chunk) in prop.value.chunks_exact(4).take(4).enumerate() {
+                v[i] = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            }
+            let (x, y, w, h) = (v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32);
+            if w <= 0 || h <= 0 {
+                return None;
+            }
+            Some((x, y, x + w, y + h))
+        })
     }
 
     /// Desktop UI scale: Xft.dpi first (what winit honors on X11/XFCE —
@@ -1563,70 +1589,63 @@ mod x11q {
     /// Xft.dpi from the RESOURCE_MANAGER root property (set by
     /// xfce4-settings / cinnamon-settings-daemons from the UI scale).
     fn xft_scale() -> Option<f32> {
-        let (conn, root) = connect()?;
-        let rm = conn
-            .intern_atom(false, b"RESOURCE_MANAGER")
-            .ok()?
-            .reply()
-            .ok()?
-            .atom;
-        let prop = conn
-            .get_property(
-                false,
-                root,
-                rm,
-                x11rb::protocol::xproto::AtomEnum::STRING,
-                0,
-                8192,
-            )
-            .ok()?
-            .reply()
-            .ok()?;
-        if prop.format != 8 {
-            return None;
-        }
-        let s = std::str::from_utf8(&prop.value).ok()?;
-        for line in s.lines() {
-            if let Some(rest) = line.trim_start().strip_prefix("Xft.dpi:") {
-                if let Ok(dpi) = rest.trim().parse::<f32>() {
-                    if (48.0..=576.0).contains(&dpi) {
-                        return Some((dpi / 96.0).clamp(1.0, 3.0));
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn edid_scale() -> Option<f32> {
-        let (conn, root) = connect()?;
-        let res = conn
-            .randr_get_screen_resources_current(root)
-            .ok()?
-            .reply()
-            .ok()?;
-        for output in &res.outputs {
-            let info = conn
-                .randr_get_output_info(*output, res.config_timestamp)
+        with_conn(|conn, root| {
+            let rm = conn.intern_atom(false, b"RESOURCE_MANAGER").ok()?.reply().ok()?.atom;
+            let prop = conn
+                .get_property(
+                    false,
+                    root,
+                    rm,
+                    x11rb::protocol::xproto::AtomEnum::STRING,
+                    0,
+                    8192,
+                )
                 .ok()?
                 .reply()
                 .ok()?;
-            // Lit CRTC + known physical size => trustworthy DPI.
-            if info.crtc != 0 && info.mm_width > 0 {
-                let crtc = conn
-                    .randr_get_crtc_info(info.crtc, res.config_timestamp)
+            if prop.format != 8 {
+                return None;
+            }
+            let s = std::str::from_utf8(&prop.value).ok()?;
+            for line in s.lines() {
+                if let Some(rest) = line.trim_start().strip_prefix("Xft.dpi:") {
+                    if let Ok(dpi) = rest.trim().parse::<f32>() {
+                        if (48.0..=576.0).contains(&dpi) {
+                            return Some((dpi / 96.0).clamp(1.0, 3.0));
+                        }
+                    }
+                }
+            }
+            None
+        })
+    }
+
+    fn edid_scale() -> Option<f32> {
+        with_conn(|conn, root| {
+            let res = conn.randr_get_screen_resources_current(root).ok()?.reply().ok()?;
+            for output in &res.outputs {
+                let info = conn
+                    .randr_get_output_info(*output, res.config_timestamp)
                     .ok()?
                     .reply()
                     .ok()?;
-                if crtc.width == 0 {
-                    continue;
+                // Lit CRTC + known physical size => trustworthy DPI.
+                if info.crtc != 0 && info.mm_width > 0 {
+                    let crtc = conn
+                        .randr_get_crtc_info(info.crtc, res.config_timestamp)
+                        .ok()?
+                        .reply()
+                        .ok()?;
+                    if crtc.width == 0 {
+                        continue;
+                    }
+                    let dpi = crtc.width as f32 * 25.4 / info.mm_width as f32;
+                    let s = ((dpi / 96.0) * 4.0).round() / 4.0;
+                    return Some(s.clamp(1.0, 3.0));
                 }
-                let dpi = crtc.width as f32 * 25.4 / info.mm_width as f32;
-                let s = ((dpi / 96.0) * 4.0).round() / 4.0;
-                return Some(s.clamp(1.0, 3.0));
             }
-        }
-        None
+            None
+        })
     }
 
     /// True-widget layering via override-redirect + raise. EWMH ABOVE keeps
@@ -1647,48 +1666,48 @@ mod x11q {
         use std::sync::{Mutex, OnceLock};
         static OR_APPLIED: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
         let or_applied = OR_APPLIED.get_or_init(|| Mutex::new(HashSet::new()));
-        let (conn, _root) = match connect() {
-            Some(c) => c,
-            None => return,
-        };
         let first = or_applied
             .lock()
             .map(|mut s| s.insert(xid))
             .unwrap_or(false);
-        if first {
-            let aux = ChangeWindowAttributesAux::new().override_redirect(1);
-            let ok = conn
-                .change_window_attributes(xid, &aux)
-                .ok()
-                .and_then(|c| c.check().ok())
-                .is_some();
-            // Remap: the redirect only takes effect on map.
-            let remapped = ok
-                && conn
-                    .unmap_window(xid)
-                    .ok()
-                    .and_then(|c| c.check().ok())
-                    .is_some()
-                && conn
-                    .map_window(xid)
+        let ok_raise = with_conn(|conn, _root| {
+            if first {
+                let aux = ChangeWindowAttributesAux::new().override_redirect(1);
+                let ok = conn
+                    .change_window_attributes(xid, &aux)
                     .ok()
                     .and_then(|c| c.check().ok())
                     .is_some();
-            if remapped {
-                crate::log_line(&format!(
-                    "x11 override-redirect applied xid={xid} (true-widget layer)"
-                ));
-            } else if let Ok(mut s) = or_applied.lock() {
-                s.remove(&xid);
+                // Remap: the redirect only takes effect on map.
+                let remapped = ok
+                    && conn
+                        .unmap_window(xid)
+                        .ok()
+                        .and_then(|c| c.check().ok())
+                        .is_some()
+                    && conn
+                        .map_window(xid)
+                        .ok()
+                        .and_then(|c| c.check().ok())
+                        .is_some();
+                if remapped {
+                    crate::log_line(&format!(
+                        "x11 override-redirect applied xid={xid} (true-widget layer)"
+                    ));
+                } else if let Ok(mut s) = or_applied.lock() {
+                    s.remove(&xid);
+                }
             }
-        }
-        // Heartbeat raise: stacking above everything, including fullscreen
-        // managed windows (the WM never touches us, so nothing re-lowers).
-        let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
-        let _ = conn
-            .configure_window(xid, &aux)
-            .ok()
-            .and_then(|c| c.check().ok());
+            // Heartbeat raise: stacking above everything, including fullscreen
+            // managed windows (the WM never touches us, so nothing re-lowers).
+            let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+            let _ = conn
+                .configure_window(xid, &aux)
+                .ok()
+                .and_then(|c| c.check().ok());
+            Some(())
+        });
+        let _ = ok_raise;
     }
 
     /// Frameless widget chrome via EWMH/Motif hints. Best-effort one-shot:
@@ -1696,18 +1715,15 @@ mod x11q {
     /// Logs what stuck (read back from the server) so a silent no-op shows
     /// in the log instead of on the screen.
     pub fn strip_chrome(xid: u32) {
-        let (conn, _root) = match connect() {
-            Some(c) => c,
-            None => return,
-        };
-        use x11rb::protocol::xproto::{AtomEnum, PropMode};
-        let intern = |name: &[u8]| -> Option<u32> {
-            conn.intern_atom(false, name)
-                .ok()?
-                .reply()
-                .ok()
-                .map(|r| r.atom)
-        };
+        with_conn(|conn, _root| {
+            use x11rb::protocol::xproto::{AtomEnum, PropMode};
+            let intern = |name: &[u8]| -> Option<u32> {
+                conn.intern_atom(false, name)
+                    .ok()?
+                    .reply()
+                    .ok()
+                    .map(|r| r.atom)
+            };
         let motif = intern(b"_MOTIF_WM_HINTS");
         let wt = intern(b"_NET_WM_WINDOW_TYPE");
         let wt_util = intern(b"_NET_WM_WINDOW_TYPE_UTILITY");
@@ -1802,5 +1818,7 @@ mod x11q {
                 "x11 strip xid={xid}: applied=[{}]{readback}",
                 applied.join(",")
             ));
-        }    }
-}
+        }
+            Some(())
+        });
+    }
