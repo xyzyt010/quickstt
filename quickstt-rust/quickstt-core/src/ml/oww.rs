@@ -141,6 +141,22 @@ impl OwwHead {
                 session.outputs().len()
             );
         }
+        // The OWW pipeline feeds (1, 16, 96) — batch 1, sixteen 96-dim
+        // embeddings. A head with any other input contract (e.g. the legacy
+        // [batch, 40, time] LSTM heads) makes tract crash on EVERY inference
+        // and the wakeword silently never fires. Refuse it at load with one
+        // clear error instead of half a million warnings.
+        {
+            let input = &session.inputs()[0];
+            let shape: Option<Vec<i64>> = input.dtype().tensor_shape().map(|s| s.to_vec());
+            if shape.as_deref() != Some([1, 16, 96].as_slice()) {
+                anyhow::bail!(
+                    "head '{}' has unexpected input shape {:?} (expected [1, 16, 96]) — refusing to load",
+                    name,
+                    shape
+                );
+            }
+        }
         let output_name = session.outputs()[0].name().to_string();
         tracing::info!(
             "OwwHead '{}': in='{}' out='{}' ({})",

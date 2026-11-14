@@ -112,18 +112,22 @@ pub fn default_models_dir() -> PathBuf {
             }
             if exe_dir.ends_with("debug") || exe_dir.ends_with("release") {
                 if let Some(ws_root) = exe_dir.parent().and_then(|p| p.parent()) {
-                    let fallback = ws_root.join("wakeword_models");
-                    if fallback.exists() {
-                        return fallback;
-                    }
-                    // Workspace-root fallback: dev/resource trees keep the
-                    // community OWW heads at the repo root (quickstt-rust is
-                    // one level below it), not under quickstt-rust/.
+                    // Dev/release trees keep TWO wakeword dirs:
+                    //   <repo>/wakeword_models               — community OWW heads (hey_jarvis_v0.1.onnx, …)
+                    //   <repo>/quickstt-rust/wakeword_models — legacy custom heads ONLY
+                    // Prefer the repo root (community layout) FIRST, or a
+                    // dev build silently loads the legacy (batch, 40, time)
+                    // heads into the (1, 16, 96) OWW pipeline and every
+                    // inference dies with a tract shape error.
                     if let Some(repo_root) = ws_root.parent() {
                         let root_fallback = repo_root.join("wakeword_models");
                         if root_fallback.exists() {
                             return root_fallback;
                         }
+                    }
+                    let fallback = ws_root.join("wakeword_models");
+                    if fallback.exists() {
+                        return fallback;
                     }
                 }
             }
