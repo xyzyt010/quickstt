@@ -343,6 +343,7 @@ pub fn show_app_window(window: &slint::Window) {
                 };
                 let wp = WINDOWPLACEMENT {
                     length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                    flags: windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT_FLAGS::default(),
                     showCmd: SW_SHOWNORMAL.0 as u32,
                     rcNormalPosition: windows::Win32::Foundation::RECT {
                         left: l,
