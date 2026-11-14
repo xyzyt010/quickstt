@@ -233,6 +233,14 @@ pub fn demote_app_window(window: &slint::Window) {
     }
 }
 
+/// App-window full repaint marker: set on every hide, consumed on show.
+/// Slint's software renderer only paints damaged regions; a window
+/// re-shown after hide carries zero damage (the scene never changed), so
+/// the re-created HWND composites as an empty (white) surface even though
+/// the window itself exists. A 1-DIP grow/shrink makes winit emit Resized,
+/// rebuild the surface, and re-damage the whole scene.
+static NEEDS_FULL_REDRAW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Hide an app window.
 ///
 /// Slint's winit backend destroys the HWND on hide when
@@ -241,6 +249,7 @@ pub fn demote_app_window(window: &slint::Window) {
 /// stays as the single choke point for app-window hides so every close path
 /// also demotes topmost.
 pub fn hide_app_window(window: &slint::Window) {
+    NEEDS_FULL_REDRAW.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = window.hide();
     demote_app_window(window);
 }
@@ -291,9 +300,19 @@ pub fn show_app_window(window: &slint::Window) {
             SetForegroundWindow(hwnd);
         }
     }
-    // Force a full re-present AFTER show — SW_SHOW/SW_RESTORE can surface a
-    // stale/zeroed redirection bitmap (DWM shows uninitialized redirection
-    // surfaces as a white client), so request the whole scene again.
+    // Force a full re-present AFTER show: the re-created HWND's surface is
+    // untouched until something dirties the scene, so replay a 1-DIP
+    // grow/shrink when this window was hidden. The pair of Resized events
+    // rebuilds the surface and repaints everything — visually invisible.
+    if NEEDS_FULL_REDRAW.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        let scale = window_scale(window).max(0.5);
+        let cur = window.size();
+        let (w, h) = (cur.width as f32 / scale, cur.height as f32 / scale);
+        if w > 1.0 && h > 1.0 {
+            window.set_size(slint::LogicalSize::new(w + 1.0, h + 1.0));
+            window.set_size(slint::LogicalSize::new(w, h));
+        }
+    }
     window.request_redraw();
     // Resurrect topmost: winit resets z-order a hair after show (same race the
     // pill survives with restack_topmost). Re-assert for ~2s so the window
