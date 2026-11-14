@@ -426,12 +426,6 @@ export component DashboardWidget inherits Window {
                                 color: #FFFFFF;
                                 vertical-alignment: center;
                             }
-                            Text {
-                                text: "Offline voice typing";
-                                font-size: 10.5px;
-                                color: #6A6A6A;
-                                vertical-alignment: center;
-                            }
                         }
                         Rectangle { horizontal-stretch: 1; }
                         // Collapse / expand — minimal Material Symbols menu glyph
@@ -663,32 +657,6 @@ export component DashboardWidget inherits Window {
 
                     // Spacer
                     Rectangle { }
-
-                    // Status Pill at Bottom of Sidebar
-                    Rectangle {
-                        height: 36px;
-                        border-radius: 6px;
-                        background: #0E0E0E;
-                        border-width: 1px;
-                        border-color: #262626;
-                        visible: !root.rail-active;
-                        HorizontalLayout {
-                            alignment: center;
-                            spacing: 6px;
-                            IconSym {
-                                glyph: "\u{E932}";
-                                tint: #34D399;
-                                size: 15px;
-                                y: (parent.height - self.height) / 2;
-                            }
-                            Text {
-                                text: "Offline Ready";
-                                font-size: 11px;
-                                color: #9A9A9A;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
                 }
 
                 // Drag-to-resize handle on the right edge: 6px grab strip,
@@ -2342,12 +2310,6 @@ export component DashboardWidget inherits Window {
                                             color: #FFFFFF;
                                             vertical-alignment: center;
                                         }
-                                        Text {
-                                            text: "Offline voice typing";
-                                            font-size: 10.5px;
-                                            color: #6A6A6A;
-                                            vertical-alignment: center;
-                                        }
                                     }
                                 }
 
@@ -2400,12 +2362,6 @@ export component DashboardWidget inherits Window {
                                             vertical-alignment: center;
                                         }
                                         Rectangle { horizontal-stretch: 1; }
-                                        Text {
-                                            text: "language · model · how to dictate";
-                                            font-size: 11px;
-                                            color: #6A6A6A;
-                                            vertical-alignment: center;
-                                        }
                                         Rectangle { width: 12px; }
                                     }
                                     tour_touch := TouchArea {
@@ -2525,18 +2481,6 @@ export component DashboardWidget inherits Window {
                 spacing: 3px;
 
                 // Which turn this menu belongs to.
-                HorizontalLayout {
-                    padding-left: 9px;
-                    padding-right: 9px;
-                    Text {
-                        height: 24px;
-                        text: root.history-items[root.history-menu-idx].when + "   ·   " + root.history-items[root.history-menu-idx].dur;
-                        font-size: 10.5px;
-                        color: #7A7A7A;
-                        vertical-alignment: center;
-                    }
-                }
-
                 HorizontalLayout {
                     padding-left: 8px;
                     padding-right: 8px;

@@ -136,11 +136,6 @@ export component OnboardingWidget inherits Window {
                     font-weight: 700;
                     color: #FFFFFF;
                 }
-                Text {
-                    text: root.version;
-                    font-size: 11px;
-                    color: #7A7A7A;
-                }
             }
             Rectangle { horizontal-stretch: 1; }
             PillButton {
@@ -271,7 +266,6 @@ export component OnboardingWidget inherits Window {
                                 Rectangle { width: 9px; height: 9px; border-radius: 5px; background: #3A3A3A; }
                                 Rectangle { width: 9px; height: 9px; border-radius: 5px; background: #3A3A3A; }
                                 Rectangle { width: 9px; height: 9px; border-radius: 5px; background: #3A3A3A; }
-                                Text { text: "notes.txt"; font-size: 10.5px; color: #6A6A6A; vertical-alignment: center; }
                             }
                             HorizontalLayout {
                                 spacing: 2px;
@@ -536,12 +530,6 @@ export component OnboardingWidget inherits Window {
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
-                            Text {
-                                text: "hold both";
-                                font-size: 10.5px;
-                                color: #6A6A6A;
-                                vertical-alignment: center;
-                            }
                         }
                     }
 
@@ -605,11 +593,6 @@ export component OnboardingWidget inherits Window {
                                 color: #9A9A9A;
                                 wrap: word-wrap;
                             }
-                            Text {
-                                text: root.hardware-info;
-                                font-size: 11px;
-                                color: #6A6A6A;
-                            }
                         }
                     }
                     Text { text: "Choose a model:"; font-size: 13px; color: #E6E6E6; }
@@ -657,12 +640,6 @@ export component OnboardingWidget inherits Window {
                         text: "Listen for wake words in the background";
                         checked: root.wakeword-enabled;
                         toggled => { root.set-wakeword(self.checked); }
-                    }
-                    Text {
-                        text: "Wake words load only while enabled, so keeping them off costs nothing — and turning them on later needs no restart.";
-                        font-size: 11.5px;
-                        color: #6A6A6A;
-                        wrap: word-wrap;
                     }
                 }
             }
