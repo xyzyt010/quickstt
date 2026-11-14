@@ -5037,7 +5037,7 @@ dependencies = [
 
 [[package]]
 name = "quickstt-core"
-version = "2.0.0-alpha.26"
+version = "2.0.0-alpha.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5069,7 +5069,7 @@ dependencies = [
 
 [[package]]
 name = "quickstt-ipc"
-version = "2.0.0-alpha.26"
+version = "2.0.0-alpha.27"
 dependencies = [
  "serde",
  "serde_json",
@@ -5078,7 +5078,7 @@ dependencies = [
 
 [[package]]
 name = "quickstt-slint"
-version = "2.0.0-alpha.26"
+version = "2.0.0-alpha.27"
 dependencies = [
  "anyhow",
  "cpal",
