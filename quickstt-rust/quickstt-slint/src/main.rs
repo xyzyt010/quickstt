@@ -871,6 +871,9 @@ fn show_flyout(
         f.set_fly_op(0.0);
         f.window().set_position(slint::PhysicalPosition { x, y });
         widget_platform::show_widget(f.window());
+        // Re-present: Slint menus shown after creation sometimes never land
+        // in the DWM redirect bitmap (symptom: invisible until a hover).
+        widget_platform::hide_show_cycle(f.window(), 120);
         log_line(&format!("flyout '{title}' @ {x},{y} n={}", items.len()));
     }
 }
@@ -3960,6 +3963,7 @@ fn dock_hop(
             widget_platform::show_widget(t.window());
             widget_platform::restack_topmost(t.window());
             widget_platform::raise_above_all(t.window());
+            widget_platform::hide_show_cycle(t.window(), 120);
             t.window().request_redraw();
             *mlock(&menu_open_at) = Some(std::time::Instant::now());
             log_line(&format!("menu shown @ {nx},{ny} size {ww}x{hh}"));
@@ -4032,6 +4036,7 @@ fn dock_hop(
             // its own — raise the menu ABOVE it immediately (the heartbeat
             // re-asserts this while visible).
             widget_platform::raise_above_all(m.window());
+            widget_platform::hide_show_cycle(m.window(), 120);
             m.window().request_redraw();
             *mlock(&opened) = Some(std::time::Instant::now());
             log_line(&format!("pill menu shown @ {nx},{ny}"));
@@ -4496,12 +4501,6 @@ fn dock_hop(
     let mut last_toppin = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
-    // Dashboard throttle for the forced redraw (not a topmost re-pin any more
-    // — the dashboard used to be re-raised every 2s forever, which kept it
-    // always-foreground and fed DWM into rendering it ghosted until hover).
-    let mut last_dash_redraw = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(10))
-        .unwrap_or_else(std::time::Instant::now);
     let mut last_onb_toppin = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
@@ -4832,20 +4831,9 @@ fn dock_hop(
             // white box if unpainted-opaque. Re-requesting while visible
             // closes that hole within a tick. Small windows: every tick
             // (cheap); the fullscreen overlay has its own 150ms throttle.
-            // Dashboard: force a re-present at a low rate — an opaque window
-            // needs no per-tick redraw, and forcing one every tick forced
-            // DWM to constantly re-composite a bitmap the user perceives as
-            // "transparent until hovered" (repaint storm fed the glitch).
-            if d.window().is_visible()
-                && last_dash_redraw.elapsed() > std::time::Duration::from_millis(500)
-            {
-                last_dash_redraw = std::time::Instant::now();
+            if d.window().is_visible() {
                 d.window().request_redraw();
             }
-            // NOTE: no topmost re-pin for the dashboard. It must be an
-            // ordinary window: click another app and QuickSTT goes behind,
-            // like any normal window. (It used to be re-pinned TOPMOST every
-            // 2s forever, which is why it never faded into the background.)
             if let Some(ob) = onboarding_poll.as_ref().and_then(|w| w.upgrade()) {
                 if ob.window().is_visible()
                     && last_onb_toppin.elapsed() > std::time::Duration::from_secs(2)
@@ -6890,6 +6878,7 @@ fn dock_hop(
                     if want_tb && !tb.window().is_visible() {
                         *mlock(&tb_follow_timer) = true;
                         widget_platform::show_widget(tb.window());
+                        widget_platform::hide_show_cycle(tb.window(), 120);
                         log_line("textboard shown");
                         log_line(&widget_platform::window_state_debug("textboard", tb.window()));
                     }

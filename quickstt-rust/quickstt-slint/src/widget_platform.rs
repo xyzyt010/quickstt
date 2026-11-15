@@ -309,6 +309,22 @@ pub fn show_app_window(window: &slint::Window) {
                     }
                 }
             }
+            // The show/hide ordering here: Slint's winit backend renders the
+            // FIRST presentation into its redirect surface, but on some
+            // Windows builds DWM never composites those pixels — the visible
+            // symptom is a ghost window until the user cycles it. The proven
+            // cure (verified in-session): a short SW_HIDE + SW_SHOW cycle,
+            // which forces DWM through a fresh placement + re-present. It
+            // shares the 150 ms window the user experiences as an instant.
+            if let Some(raw2) = hwnd_of(window) {
+                let hwnd2 = HWND(raw2 as _);
+                unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW};
+                    let _ = ShowWindow(hwnd2, SW_HIDE);
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    let _ = ShowWindow(hwnd2, SW_SHOW);
+                }
+            }
         }
     }
     #[cfg(target_os = "windows")]
@@ -1478,6 +1494,31 @@ pub fn ensure_widget_top(window: &slint::Window) {
 /// this the pill carries an OS caption, its reported position includes the
 /// frame offset, and every anchor computation (menu, flyout, dock) drifts —
 /// the "nothing like Windows" gap. No-op when no X window exists yet.
+/// Hide and immediately re-show the window, forcing DWM through a full
+/// hide/show cycle with a fresh placement + re-present. A persistent bug on
+/// some Windows builds never composites a Slint window that was created
+/// hidden once but shown unchanged — the visible effect is an invisible-or-
+/// stale window until some other event forces the paint. The manual cycle
+/// (verified to cure the symptom) replays as three proven steps. Use ONLY
+/// for windows that are re-shown after creation when a visible flicker can
+/// be absorbed (menus, flyouts, textboard) — never on windows that stay
+/// mapped all the time (the pill), so their old (smooth) 50 ms timings hold.
+#[cfg(target_os = "windows")]
+pub fn hide_show_cycle(window: &slint::Window, hold_ms: u64) {
+    let Some(raw) = hwnd_of(window) else {
+        return;
+    };
+    let hwnd = HWND(raw as _);
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW};
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        std::thread::sleep(std::time::Duration::from_millis(hold_ms));
+        let _ = ShowWindow(hwnd, SW_SHOW);
+    }
+}
+#[cfg(not(target_os = "windows"))]
+pub fn hide_show_cycle(_window: &slint::Window, _hold_ms: u64) {}
+
 /// Raise the window above managed X11 siblings. Override-redirect (the pill)
 /// siblings always win on their own — menus must therefore be raised ABOVE
 /// after the pill's raise to sit above it (last raise wins). Leaves

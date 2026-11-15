@@ -1,5 +1,34 @@
 # Changelog
 
+## [2.0.0-alpha.32] — 2026-11-15
+
+Rendering + polish fixes for the dashboard and floating overlays.
+
+### Fixed
+- **First-show ghost on the dashboard/overlay windows** (Settings, menu, pill,
+  textboard): Slint's winit backend never composites a first-shown window on
+  this Windows build class — the visible bug is a fully transparent window that
+  passes clicks through and shows nothing until some unrelated interaction.
+  Workaround: a short SW_HIDE→SW_SHOW cycle inside `show_app_window`/`show_widget`
+  right after show re-seats the redirect bitmap (verified in-session — the
+  dashboard now renders perfectly on its first show).
+- **Menu windows with `background: transparent` rendered as ghost rectangles on
+  this Windows build** (menu rows, toast arrows, outline shapes can be invisible
+  against black backgrounds). All menu/toast/textboard root backgrounds now use
+  an opaque near-black instead — the rows, outlines and caret all render, and
+  the pill menu paints fully every time.
+- **Dashboard no longer stays pinned above everything forever.** The topmost
+  hint is disarmed ~2s after show; clicking another app puts QuickSTT behind it
+  like any normal window.
+- **Frequent forced redraw during visible dashboard** reinstated (dropped the
+  500ms throttle introduced in alpha.31 after investigation clarified the issue
+  is interception-related, not repaint-related).
+- **Menus hidden on creation never cleanly re-appeared** (`hide_show_cycle`)
+  — flyout/tray/pill/textboard re-present on show.
+
+### Changed
+- Bump version to 2.0.0-alpha.32 (which includes alpha.32's installer checksum bump).
+
 ## [2.0.0-alpha.31] — 2026-11-15
 
 UI/windowing fixes for the pill, the menus and the dashboard.
