@@ -22,7 +22,7 @@ use crate::ml::wakeword::{WakeWordEngine, WakeWordEvent};
 use crate::orchestration::OrchestratorCommand;
 use crate::wakeword_loader;
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -36,6 +36,10 @@ use tracing::{info, warn};
 pub enum WakewordServiceCommand {
     Start,
     Stop,
+    /// Enable or disable wakeword inference + triggers independently of
+    /// whether the background mic is open (claps/level meter can keep the
+    /// thread alive while wakewords are OFF).
+    SetWakewordsEnabled(bool),
     SetSensitivity(u32),
     /// Dashboard "VAD Speech Gate" slider (0..100). Drives ONLY the
     /// background voice gate — independent of wakeword sensitivity.
@@ -68,6 +72,11 @@ impl WakewordHandle {
     }
     pub fn stop(&self) {
         let _ = self.cmd_tx.send(WakewordServiceCommand::Stop);
+    }
+    pub fn set_wakewords_enabled(&self, enabled: bool) {
+        let _ = self
+            .cmd_tx
+            .send(WakewordServiceCommand::SetWakewordsEnabled(enabled));
     }
     pub fn set_sensitivity(&self, sensitivity: u32) {
         let _ = self.cmd_tx.send(WakewordServiceCommand::SetSensitivity(sensitivity));
@@ -178,6 +187,7 @@ fn run_service_thread(
     let mut transient = TransientDetector::new();
     let mut arbiter = TransientArbiter::new();
     let mut transient_action: u32 = TRANSIENT_DISABLED;
+    let mut wakewords_enabled: bool = false;
 
     loop {
         // 1. Drain queued commands (non-blocking).
@@ -209,6 +219,17 @@ fn run_service_thread(
                         arbiter.reset();
                         engine.reset();
                         info!("Wakeword background stopped");
+                    }
+                }
+                WakewordServiceCommand::SetWakewordsEnabled(enabled) => {
+                    if wakewords_enabled != enabled {
+                        wakewords_enabled = enabled;
+                        engine.reset();
+                        vad.reset();
+                        info!(
+                            "Wakeword detection → {}",
+                            if enabled { "ON" } else { "OFF" }
+                        );
                     }
                 }
                 WakewordServiceCommand::SetSensitivity(sens) => {
@@ -270,6 +291,7 @@ fn run_service_thread(
                         &mut transient,
                         &mut arbiter,
                         &mut transient_action,
+                        wakewords_enabled,
                         &chunk,
                         health.load(Ordering::Relaxed),
                         &orchestrator_tx,
@@ -304,6 +326,17 @@ fn run_service_thread(
                     }
                 },
                 Ok(WakewordServiceCommand::Stop) => {}
+                Ok(WakewordServiceCommand::SetWakewordsEnabled(enabled)) => {
+                    if wakewords_enabled != enabled {
+                        wakewords_enabled = enabled;
+                        engine.reset();
+                        vad.reset();
+                        info!(
+                            "Wakeword detection → {}",
+                            if enabled { "ON" } else { "OFF" }
+                        );
+                    }
+                }
                 Ok(WakewordServiceCommand::SetSensitivity(sens)) => {
                     engine.set_sensitivity(sens);
                 }
@@ -367,6 +400,7 @@ fn process_audio_chunk(
     transient: &mut TransientDetector,
     arbiter: &mut TransientArbiter,
     transient_action: &mut u32,
+    wakewords_enabled: bool,
     chunk: &[i16],
     health: u8,
     orchestrator_tx: &tmpsc::Sender<OrchestratorCommand>,
@@ -396,7 +430,7 @@ fn process_audio_chunk(
     // The level meter below always runs regardless of the clap action.
     if *transient_action != TRANSIENT_DISABLED {
         let detected = transient.process(chunk);
-        if detected.is_some() {
+        if detected.is_some() && wakewords_enabled {
             engine.suppress(0.4);
         }
         // Raw detections log at info (pre-arbiter): separates "clap never
@@ -470,8 +504,6 @@ fn process_audio_chunk(
         }
     }
 
-    let vad_speech = vad.process(chunk).speech_likely;
-
     // Dashboard level meter: the background mic is the only open mic while
     // idle, so it must report levels too (previously foreground-only, which
     // is why the meter sat flat during background listening and made audio
@@ -484,6 +516,16 @@ fn process_audio_chunk(
             let _ = orchestrator_tx.try_send(OrchestratorCommand::AudioLevel(level));
         }
     }
+
+    // Honor the master Wakewords ON/OFF setting strictly: when wakewords are
+    // OFF (e.g. thread kept open solely for clap detection or audio meter),
+    // skip all VAD/mel/embedding/head inference and never emit WakewordTriggered
+    // or ShowWidget.
+    if !wakewords_enabled {
+        return false;
+    }
+
+    let vad_speech = vad.process(chunk).speech_likely;
 
     let events = engine.process_chunk(chunk, vad_speech);
     // Heartbeat every ~5s of streaming: mic level, gate verdict, cache

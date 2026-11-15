@@ -468,6 +468,7 @@ impl Settings {
             .or_else(|| read_dword(key, "model_priority"))
             .unwrap_or(0)
             .min(2);
+        settings.show_widget = read_bool(key, "showWidget").unwrap_or(true);
 
         // Migrate legacy extra keys if Registry had them as strings
         Self::migrate_extra(&mut settings);
@@ -699,6 +700,9 @@ impl Settings {
             "modelPriority" | "model_priority" => {
                 self.model_priority = value.parse::<u32>().unwrap_or(0).min(2)
             }
+            "showWidget" | "show_widget" => {
+                self.show_widget = value.eq_ignore_ascii_case("true") || value == "1"
+            }
             _ => { self.extra.insert(key.to_string(), value.to_string()); }
         }
     }
@@ -913,6 +917,7 @@ impl Settings {
             let _ = write_dword("transientAction", self.transient_action);
             let _ = write_str("selectedMicrophone", &self.selected_microphone);
             let _ = write_str("modelPriority", &self.model_priority.to_string());
+            let _ = write_str("showWidget", if self.show_widget { "true" } else { "false" });
             unsafe { let _ = RegCloseKey(key); }
             let _ = self.save_to_toml();
             return Ok(());

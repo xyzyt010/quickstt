@@ -30,6 +30,12 @@ const MIN_WAKE_RMS: f32 = 0.002;
 // the phantom-trigger fix. (Lowered so normal-volume speech opens
 // the gate without shouting; loud non-phrase still scores ~0.00.)
 const VAD_GATE_RMS: f32 = 0.005;
+// Post-speech gate hangover (in 80ms chunks): openWakeWord's 76-frame mel
+// window + 16-embedding head has ~200–700ms of causal latency, so the peak
+// probability (~0.99+) routinely lands AFTER the user stops speaking the
+// wakeword. Without hangover the gate snaps shut on the first quiet chunk
+// after the word, drops hit counts, and never sees the peak. 12 chunks ≈ 960ms.
+const GATE_HANGOVER_CHUNKS: u32 = 12;
 // Software input gain applied to every mic chunk before RMS/gates/heads.
 // The community heads score this laptop mic's normal-volume speech <0.15
 // at 1x (shouts reach 0.9+) — same heads, same mic, proven by the
@@ -64,25 +70,33 @@ fn chunk_rms(pcm: &[i16]) -> f32 {
 /// down into the heads' window. Memoryless (no AGC state to poison, no
 /// silence pumping — the failure of the previous adaptive attempt).
 fn apply_input_gain(pcm_chunk: &[i16]) -> Vec<i16> {
-    let boosted: Vec<i16> = if (INPUT_GAIN - 1.0).abs() < f32::EPSILON {
-        pcm_chunk.to_vec()
-    } else {
-        pcm_chunk
-            .iter()
-            .map(|&s| ((s as f32 * INPUT_GAIN).clamp(-32768.0, 32767.0)) as i16)
-            .collect()
-    };
     const LEVEL_TARGET_RMS: f32 = 0.08;
-    let rms = chunk_rms(&boosted);
-    let g = (LEVEL_TARGET_RMS / rms.max(1e-4)).min(1.0);
-    if g >= 1.0 {
-        boosted
-    } else {
-        boosted
-            .iter()
-            .map(|&s| ((s as f32 * g).clamp(-32768.0, 32767.0)) as i16)
-            .collect()
+    let raw_rms = chunk_rms(pcm_chunk);
+    if raw_rms < 1e-6 {
+        return pcm_chunk.to_vec();
     }
+    // Compute gain in f32 BEFORE clamping to i16: the previous implementation
+    // multiplied by 3x and clamped to [-32768, 32767] first, turning any
+    // normal/loud mic input (peak > 10,922) into a hard-clipped square wave
+    // before scaling it down to 0.08 RMS.
+    // Also cap gain by headroom so sudden consonants stay under ±30,000.
+    let raw_peak = pcm_chunk
+        .iter()
+        .map(|&s| (s as f32).abs())
+        .fold(0.0f32, f32::max);
+    let peak_cap = if raw_peak > 1.0 {
+        30_000.0 / raw_peak
+    } else {
+        INPUT_GAIN
+    };
+    let g = (LEVEL_TARGET_RMS / raw_rms).min(INPUT_GAIN).min(peak_cap);
+    if (g - 1.0).abs() < 1e-4 {
+        return pcm_chunk.to_vec();
+    }
+    pcm_chunk
+        .iter()
+        .map(|&s| ((s as f32 * g).clamp(-32768.0, 32767.0)) as i16)
+        .collect()
 }
 
 fn norm_key(s: &str) -> String {
@@ -102,14 +116,16 @@ pub struct WakeWordEngine {
     active_phrases: Vec<String>,
     user_sensitivity: u32,
     chunks_since_infer: u32,
-    /// Consecutive dead-silence ticks (adaptive cadence below).
-    quiet_ticks: u32,
+    /// Remaining post-speech chunks (80ms each) to keep scoring heads after
+    /// VAD/energy drops, catching causal end-of-phrase peaks.
+    gate_hangover: u32,
     /// Throttled diagnostics: épocas since last top-score log line.
     infers_since_log: u32,
     /// Last marginal-score log (rate-limits the below-threshold line).
     last_marginal_log: Option<Instant>,
     /// Lifetime inference count (diagnostics + tests).
     infers_run: u32,
+    last_scores_pair: Option<(f32, f32)>,
 }
 
 pub enum WakeWordEvent {
@@ -159,10 +175,11 @@ impl WakeWordEngine {
             active_phrases,
             user_sensitivity: 50,
             chunks_since_infer: 0,
-            quiet_ticks: 0,
+            gate_hangover: 0,
             infers_since_log: 0,
             last_marginal_log: None,
             infers_run: 0,
+            last_scores_pair: None,
         };
         engine.recalculate_thresholds();
         Ok(engine)
@@ -223,6 +240,7 @@ impl WakeWordEngine {
     /// verdict for this chunk (the service runs `EnergyVad` on the same
     /// audio) — quiet non-speech never reaches the ONNX heads.
     pub fn process_chunk(&mut self, pcm_chunk: &[i16], vad_speech: bool) -> Vec<WakeWordEvent> {
+        self.last_scores_pair = None;
         if let Some(until) = self.suppress_until {
             if Instant::now() < until {
                 return vec![WakeWordEvent::None];
@@ -237,26 +255,10 @@ impl WakeWordEngine {
         let boosted = apply_input_gain(pcm_chunk);
         let pcm_chunk = &boosted;
 
-        // Buffer EVERY chunk into the mel frontend (the old code only pushed
-        // on inference ticks, dropping 3/4 of the audio and stretching the
-        // detection window 4× — the main "wakewords are slow" cause).
-        // Adaptive cadence: deep silence (below 2× the energy gate, VAD
-        // closed) advances the caches only every 4th tick. Silence carries
-        // no phrase content, and the onset chunk itself is always loud, so
-        // detection latency is untouched — but the ~32ms-per-tick embedding
-        // cost drops 4× through the quiet hours (measured 56% of an older
-        // Mint core at full rate). Stale hits can never accumulate: the
-        // gate below clears them on every skipped tick too.
         let rms_boosted = chunk_rms(pcm_chunk);
-        if rms_boosted < MIN_WAKE_RMS * 2.0 && !vad_speech {
-            self.quiet_ticks += 1;
-            if self.quiet_ticks % 4 != 0 {
-                self.hit_counts.clear();
-                return vec![WakeWordEvent::None];
-            }
-        } else {
-            self.quiet_ticks = 0;
-        }
+        // Push EVERY chunk into the mel frontend so the 16kHz audio stream and
+        // MEL_CTX overlap stay strictly contiguous (skipping quiet chunks
+        // time-warped silence/pauses and starved the 16-embedding window).
         self.backend.push_audio(pcm_chunk);
 
         // ~160ms inference cadence once the window is hot.
@@ -264,23 +266,8 @@ impl WakeWordEngine {
         if (self.chunks_since_infer % WAKE_INFER_EVERY_CHUNKS) != 0 {
             return vec![WakeWordEvent::None];
         }
-        // Caches advance on EVERY tick, gated or not: mel + embeddings fill
-        // through silence and room noise, so a phrase arriving after quiet
-        // scores from its first tick. Only the head runs are gated below.
-        self.backend.update();
-        // Energy + VAD gates: quiet audio never reaches the ONNX heads. Saves
-        // the head runs per tick in silence and kills phantom triggers from
-        // scoring room hiss / non-speech. Loud audio always scores even when
-        // the VAD hasn't opened yet (soft onsets, VAD hangover gaps).
-        if rms_boosted < MIN_WAKE_RMS || (!vad_speech && rms_boosted < VAD_GATE_RMS) {
-            // Gate closed: drop stale hit counts so two far-apart blips can
-            // never add up to a phantom wake (mirrors the C++ reference).
-            self.hit_counts.clear();
-            return vec![WakeWordEvent::None];
-        }
-        // Score only user-enabled phrases — each disabled head skipped is a
-        // full LSTM run saved. Match by classifier (config) name, the same
-        // key the backend scores under.
+        // Score only user-enabled phrases — check before update if everything
+        // was disabled so zero ONNX work runs when no phrase is active.
         let enabled: Vec<String> = self
             .backend
             .heads
@@ -289,10 +276,37 @@ impl WakeWordEngine {
             .filter(|n| self.enabled_phrases.get(&norm_key(n)).copied().unwrap_or(true))
             .collect();
         if enabled.is_empty() {
+            self.hit_counts.clear();
+            self.gate_hangover = 0;
+            return vec![WakeWordEvent::None];
+        }
+        // Caches advance on EVERY inference tick, gated or not: mel +
+        // embeddings fill through silence and room noise, so a phrase arriving
+        // after quiet scores from its first tick. Only head runs are gated.
+        self.backend.update();
+        // Energy + VAD gate with post-speech hangover: quiet room hiss never
+        // wakes the heads, while speech keeps the gate open for ~960ms after
+        // the last spoken syllable so the causal 76-frame/16-emb peak lands.
+        let active_audio =
+            rms_boosted >= MIN_WAKE_RMS && (vad_speech || rms_boosted >= VAD_GATE_RMS);
+        if active_audio {
+            self.gate_hangover = GATE_HANGOVER_CHUNKS;
+        } else if self.gate_hangover > 0 {
+            self.gate_hangover = self.gate_hangover.saturating_sub(WAKE_INFER_EVERY_CHUNKS);
+        }
+        if self.gate_hangover == 0 {
+            // Gate closed: drop stale hit counts so two far-apart blips can
+            // never add up to a phantom wake (mirrors the C++ reference).
+            self.hit_counts.clear();
             return vec![WakeWordEvent::None];
         }
         let scores = self.backend.score_heads(&enabled);
         self.infers_run += 1;
+        {
+            let hj = scores.iter().find(|s| s.0 == "hey_jarvis").map(|s| s.1).unwrap_or(0.0);
+            let al = scores.iter().find(|s| s.0 == "alexa").map(|s| s.1).unwrap_or(0.0);
+            self.last_scores_pair = Some((hj, al));
+        }
 
         // Throttled diagnostics: top score every ~10s so the log proves the
         // mic path is live and shows whether speech nears the threshold.
@@ -317,26 +331,15 @@ impl WakeWordEngine {
             // Community heads are trained far-field robust (reverberated
             // training data), so one bar fits all levels — no tier hacks.
             let threshold = self.thresholds.get(&key).copied().unwrap_or(WAKE_BASE_THRESHOLD);
-            // Fast lane vs sustained lane: a clear phrase spikes high and
-            // confirms in 2 hits (~320ms); marginal scores must sustain
-            // across 3 consecutive checks (~480ms). Brief fluctuations can
-            // never hold 3 in a row; any miss resets to zero.
-            let strong = threshold + 0.12;
-
+            // Sustained-confirmation rule: require 2 consecutive checks (~320ms)
+            // above threshold. Community heads score ~0.00 on non-phrase speech
+            // and spike cleanly across 4–10 frames on real wakewords; requiring 3
+            // frames at 160ms cadence (480ms) rejected briskly spoken "Alexa".
             if *score >= threshold {
                 let count = self.hit_counts.entry(key.clone()).or_insert(0);
                 *count += 1;
                 let hit_count = *count;
-                // "hey jarvis" confirms on 2 hits at its (eased) bar: the
-                // two-word phrase's peak spans fewer inference ticks, so a
-                // 3-in-a-row rule structurally misses conversational volume.
-                let required = if key == "hey jarvis" {
-                    2
-                } else if *score >= strong {
-                    2
-                } else {
-                    3
-                };
+                let required = 2;
                 if hit_count >= required {
                     if self.can_activate() {
                         info!(
@@ -392,6 +395,11 @@ impl WakeWordEngine {
         self.infers_run
     }
 
+    #[cfg(test)]
+    pub fn last_scores(&self) -> Option<(f32, f32)> {
+        self.last_scores_pair
+    }
+
     /// Cache diagnostics: (mel rows, embedding windows, head-scoring runs).
     pub fn cache_stats(&self) -> (usize, usize, u32) {
         (
@@ -414,6 +422,7 @@ impl WakeWordEngine {
         // speech that must not score against the fresh stream.
         self.backend.reset();
         self.chunks_since_infer = 0;
+        self.gate_hangover = 0;
         self.infers_since_log = 0;
         self.last_marginal_log = None;
     }
@@ -496,6 +505,51 @@ mod tests {
             (rms - 0.08).abs() < 0.02,
             "loud must land near 0.08 RMS (got {rms:.3})"
         );
+        // Verify loud signal stays sinusoidal (not clipped to a square wave before attenuation):
+        // crest factor of a sine wave is sqrt(2) ≈ 1.414; a clipped square wave drops toward 1.0.
+        let crest = (peak as f32 / 32768.0) / rms;
+        assert!(
+            crest > 1.30,
+            "loud speech must attenuate cleanly without square-wave clipping (crest {crest:.3})"
+        );
+    }
+
+    #[test]
+    fn wakeword_gate_hangover_stays_open_after_speech_stops() {
+        let heads = oww_heads();
+        let mut eng = WakeWordEngine::from_oww_heads(&heads).expect("engine loads");
+        // Warm up with 2s silence (0 infers).
+        let silence = vec![0i16; 1280];
+        for _ in 0..25 {
+            eng.process_chunk(&silence, false);
+        }
+        assert_eq!(eng.infer_count(), 0);
+        // Speech burst (2 chunks = 160ms, 1 infer).
+        let tone: Vec<i16> = (0..1280)
+            .map(|i| ((2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin() * 3000.0) as i16)
+            .collect();
+        eng.process_chunk(&tone, true);
+        eng.process_chunk(&tone, true);
+        let infers_at_speech_end = eng.infer_count();
+        assert_eq!(infers_at_speech_end, 1);
+        // Following trailing silence: hangover must keep scoring heads for ~800ms+
+        // so openWakeWord's causal peak (which lands after the word ends) is caught,
+        // and then close again cleanly.
+        for _ in 0..20 {
+            eng.process_chunk(&silence, false);
+        }
+        let infers_after_hangover = eng.infer_count();
+        assert!(
+            infers_after_hangover >= infers_at_speech_end + 4,
+            "expected hangover to keep scoring after speech ends (got {} vs {})",
+            infers_after_hangover,
+            infers_at_speech_end
+        );
+        // Further silence after hangover expired must stop scoring heads.
+        for _ in 0..10 {
+            eng.process_chunk(&silence, false);
+        }
+        assert_eq!(eng.infer_count(), infers_after_hangover);
     }
 
     #[test]

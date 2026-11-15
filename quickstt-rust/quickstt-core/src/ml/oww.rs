@@ -693,4 +693,63 @@ mod tests {
             println!("{}", line);
         }
     }
+
+    #[test]
+    fn probe_tts_positive_phrases() {
+        let dir = models_dir();
+        let tmp = std::path::PathBuf::from(r"C:\Users\hemsh_sfya5gq\AppData\Local\Temp\opencode");
+        if !tmp.join("tts_jarvis.wav").exists() {
+            println!("TTS-PROBE: no tts wavs in {:?}, skipping", tmp);
+            return;
+        }
+        for (fname, label) in [
+            ("tts_jarvis.wav", "hey_jarvis"),
+            ("tts_alexa.wav", "alexa"),
+            ("tts_neg.wav", "neg"),
+        ] {
+            let wav = read_wav_mono16(&tmp.join(fname));
+            // 2.5s quiet room noise before, 2.0s after (also tests cold-ish 2.5s start!)
+            let pre: Vec<i16> = (0..40000).map(|i| if i % 2 == 0 { 10 } else { -10 }).collect();
+            for mult in [1.0f32, 0.30f32, 0.15f32, 0.05f32, 0.03f32] {
+                let mut buf = pre.clone();
+                for &s in &wav {
+                    buf.push((s as f32 * mult).clamp(-32768.0, 32767.0) as i16);
+                }
+                buf.extend(vec![0i16; 32000]);
+
+                let ww_heads = crate::wakeword_loader::discover_oww_heads(&dir);
+                let mut eng = super::super::wakeword::WakeWordEngine::from_oww_heads(&ww_heads).unwrap();
+                let mut vad = crate::audio::vad::EnergyVad::with_default_threshold();
+                let mut fired = Vec::new();
+                let mut trace = Vec::new();
+                for (ci, ch) in buf.chunks(1280).enumerate() {
+                    let speech = vad.process(ch).speech_likely;
+                    let evs = eng.process_chunk(ch, speech);
+                    if let Some((hj, al)) = eng.last_scores() {
+                        if hj > 0.05 || al > 0.05 {
+                            trace.push(format!("c{ci}:hj={hj:.3}/al={al:.3}"));
+                        }
+                    }
+                    for ev in evs {
+                        if let super::super::wakeword::WakeWordEvent::Triggered(n, c) = ev {
+                            fired.push((ci, n, c));
+                        }
+                    }
+                }
+                println!(
+                    "FIXED-ENG {:14} x{:.2} ({:10}) | fired={:?} trace={:?}",
+                    fname, mult, label, fired, trace
+                );
+                if label == "neg" {
+                    assert!(fired.is_empty(), "false trigger on neg: {:?}", fired);
+                } else if mult >= 0.05 {
+                    assert!(
+                        fired.iter().any(|(_, n, _)| n == label),
+                        "{} x{:.2} did not trigger {} (fired={:?}, trace={:?})",
+                        fname, mult, label, fired, trace
+                    );
+                }
+            }
+        }
+    }
 }

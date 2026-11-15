@@ -959,8 +959,13 @@ fn apply_recognized_text(s: &mut AppState, text: String) -> bool {
 
 impl AppOrchestrator {
     pub fn new() -> QuickSttResult<(Self, mpsc::Receiver<OrchestratorCommand>)> {
-        let settings = Settings::load()?;
+        let mut settings = Settings::load()?;
+        if settings.wake_word_mode.trim().is_empty() {
+            settings.wake_word_mode = crate::config::DEFAULT_WAKE_WORD_MODE.to_string();
+        }
+        let ww_enabled_at_load = !settings.wake_word_mode.eq_ignore_ascii_case("Off");
         let mut app_state = AppState::new(settings);
+        app_state.wakeword_active = ww_enabled_at_load;
         // Restore the persisted dictation history. Without this the app
         // started empty every session and the first new turn overwrote the
         // whole index with just the new row set (all previous turns lost,

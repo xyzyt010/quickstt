@@ -2536,18 +2536,17 @@ fn main() -> QuickSttResult<()> {
         .lock()
         .map(|s| s.settings.selected_microphone.clone())
         .unwrap_or_default();
-    // Wakewords on? The live flag, or a persisted non-off mode. (Claps stay
-    // armed regardless: `transient_action != 2`.)
-    let ww_wanted_at_start = {
+    // Wakewords on? The persisted preference (synced into s.wakeword_active).
+    // Background mic also stays armed if claps are enabled (`transient_action != 2`),
+    // while wakeword inference itself stays strictly gated on `ww_on`.
+    let (ww_on_at_start, transient_armed_at_start) = {
         match state.lock() {
-            Ok(s) => {
-                s.wakeword_active
-                    || (!s.settings.wake_word_mode.eq_ignore_ascii_case("Off")
-                        && !s.settings.wake_word_mode.trim().is_empty())
-            }
-            Err(_) => false,
+            Ok(s) => (s.wakeword_active, s.settings.transient_action != 2),
+            Err(_) => (true, true),
         }
     };
+    let ww_wanted_at_start = ww_on_at_start || transient_armed_at_start;
+    let ww_prefs_dirty: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let wakeword_handle: Arc<Mutex<Option<quickstt_core::wakeword_service::WakewordHandle>>> = {
         let slot: Arc<Mutex<Option<quickstt_core::wakeword_service::WakewordHandle>>> =
             Arc::new(Mutex::new(None));
@@ -2557,10 +2556,12 @@ fn main() -> QuickSttResult<()> {
                 tx_cmd.clone(),
                 &ww_preferred_mic,
             );
-            if spawned.is_some() {
+            if let Some(ref wh) = spawned {
+                wh.set_wakewords_enabled(ww_on_at_start);
+                ww_prefs_dirty.store(true, Ordering::Release);
                 log_line(&format!(
-                    "wakeword service spawned from {:?}",
-                    ww_models_dir
+                    "wakeword service spawned from {:?} (wakewords={}, clap_armed={})",
+                    ww_models_dir, ww_on_at_start, transient_armed_at_start
                 ));
             } else {
                 log_line(&format!(
@@ -2570,7 +2571,7 @@ fn main() -> QuickSttResult<()> {
             }
             *mlock(&slot) = spawned;
         } else {
-            log_line("wakeword disabled at startup — listener not loaded (RAM saved)");
+            log_line("wakeword & clap disabled at startup — listener not loaded (RAM saved)");
         }
         slot
     };
@@ -2581,6 +2582,7 @@ fn main() -> QuickSttResult<()> {
         let models_dir = ww_models_dir.clone();
         let mic = ww_preferred_mic.clone();
         let tx = tx_cmd.clone();
+        let dirty = ww_prefs_dirty.clone();
         Arc::new(move |want: bool| {
             let mut cur = mlock(&slot);
             if !want {
@@ -2597,6 +2599,7 @@ fn main() -> QuickSttResult<()> {
                     &mic,
                 );
                 if cur.is_some() {
+                    dirty.store(true, Ordering::Release);
                     log_line(&format!("wakeword listener loaded from {:?}", models_dir));
                 } else {
                     log_line("wakeword listener unavailable (no models on disk)");
@@ -2668,29 +2671,34 @@ fn main() -> QuickSttResult<()> {
         log_line(&format!("screen {sw}x{sh}"));
     }
 
-    widget_platform::show_widget(pill.window());
-    widget_platform::restack_topmost(pill.window());
-
-    // Start collapsed, bottom-center (matches C++/egui default)
-    // Restore the persisted dock station when present so updates and
-    // restarts keep the pill where the user put it (never silently reset).
+    // Restore the persisted dock station BEFORE showing the pill so winit
+    // receives the exact initial orientation, footprint, and collapsed props
+    // before the native HWND is constructed.
+    let start_dock = state
+        .lock()
+        .map(|s| s.settings.pill_dock.min(2) as usize)
+        .unwrap_or(0);
+    let start_vert = start_dock != 0;
     {
-        let dock = state
-            .lock()
-            .map(|s| s.settings.pill_dock.min(2) as usize)
-            .unwrap_or(0);
-        let scale = widget_platform::window_scale(pill.window()).max(0.5);
-        let vert = dock != 0;
-        let (cw, ch) = if vert {
+        let scale = widget_platform::system_scale().max(0.5);
+        let (cw, ch) = if start_vert {
             (SIDE_MINI_W, SIDE_MINI_H)
         } else {
             (MINI_W, MINI_H)
         };
-        let (x, y) = widget_platform::dock_position(dock, cw, ch, EDGE_GAP, scale);
+        let (x, y) = widget_platform::dock_position(start_dock, cw, ch, EDGE_GAP, scale);
+        pill.set_live_text("".into());
+        pill.set_alert_text("".into());
+        pill.set_expanded(false);
+        pill.set_phase(0);
+        pill.set_upper_w(184);
+        pill.set_upper_op(0.0);
+        pill.set_slide_px(0);
+        pill.set_mic_grow(0.0);
+        pill.set_vertical(start_vert);
+        pill.set_mirror(start_dock == 2);
         place_pill(&pill, x, y);
         set_footprint(&pill, cw, ch);
-        pill.set_vertical(vert);
-        pill.set_mirror(dock == 2);
         // Restored visibility (default shown): a hidden pill stays hidden —
         // the app, tray, hotkeys and wakewords keep running either way, and
         // any trigger re-shows within a tick.
@@ -2704,10 +2712,13 @@ fn main() -> QuickSttResult<()> {
         if start_hidden {
             let _ = pill.hide();
             log_line("widget starts hidden (restored preference)");
+        } else {
+            widget_platform::show_widget(pill.window());
+            widget_platform::restack_topmost(pill.window());
         }
         if let Ok(s) = state.lock() {
             log_line(&format!(
-                "settings restored: model='{}' wake='{}' sens={}/{} clap={} offload={}/{}s dock={dock} pos=({x},{y})",
+                "settings restored: model='{}' wake='{}' sens={}/{} clap={} offload={}/{}s dock={start_dock} pos=({x},{y})",
                 s.settings.selected_model,
                 s.settings.wake_word_mode,
                 s.settings.wakeword_sensitivity,
@@ -2718,12 +2729,7 @@ fn main() -> QuickSttResult<()> {
             ));
         }
     }
-    let corner_idx = Arc::new(Mutex::new(
-        state
-            .lock()
-            .map(|s| s.settings.pill_dock.min(2) as usize)
-            .unwrap_or(0),
-    ));
+    let corner_idx = Arc::new(Mutex::new(start_dock));
     let dash_visible = Arc::new(Mutex::new(false));
     // Hover-expand state: cursor-driven in the 50ms poll (robust against
     // Slint hover-event quirks); session activity forces expanded. No pin:
@@ -2831,7 +2837,7 @@ fn main() -> QuickSttResult<()> {
         dur_ms: u64,
         expanding: bool,
         mg0: f32,
-        uo0: f32,
+        _uo0: f32,
     }
     let foot_anim: Arc<Mutex<Option<FootAnim>>> = Arc::new(Mutex::new(None));
     // Overlay watchdog: when the docking overlay was last shown for a real
@@ -2842,8 +2848,10 @@ fn main() -> QuickSttResult<()> {
     let overlay_shown_at: Arc<Mutex<Option<std::time::Instant>>> =
         Arc::new(Mutex::new(None));
     // Orientation: false = bottom dock (horizontal), true = side docks
-    // (vertical bar / card). Follows corner_idx (0 = bottom).
-    let vertical = Arc::new(Mutex::new(false));
+    // (vertical bar / card). Must match start_vert from millisecond 0 —
+    // leaving this hardcoded to `false` resized side-docked pills to the
+    // bottom-horizontal footprint (45x10) after their very first expand/collapse.
+    let vertical = Arc::new(Mutex::new(start_vert));
 
 /// Field black-box recorder: on real drags (and hop commits) capture two
 /// timestamped screenshots + full window censuses with zero coordination —
@@ -3313,14 +3321,6 @@ fn dock_hop(
             .ok();
     }
 
-    pill.set_live_text("".into());
-    pill.set_alert_text("".into());
-    pill.set_expanded(false);
-    pill.set_phase(0);
-    pill.set_upper_w(184);
-    pill.set_upper_op(1.0);
-    pill.set_slide_px(0);
-    pill.set_mic_grow(1.0);
     let levels: Vec<f32> = vec![0.0; 24];
     pill.set_levels(ModelRc::new(VecModel::from_slice(&levels)));
 
@@ -4062,7 +4062,7 @@ fn dock_hop(
                     dur_ms: 200,
                     expanding: false,
                     mg0,
-                    uo0,
+                    _uo0: uo0,
                 });
             }
             snooze_pill_1h(&pw, &hide_until, &snooze_ptt_row);
@@ -4087,7 +4087,7 @@ fn dock_hop(
                     dur_ms: 200,
                     expanding: false,
                     mg0,
-                    uo0,
+                    _uo0: uo0,
                 });
             }
             menu_action(0, &dash_menu, &pill_menu_w, &dash_visible_menu, &state_menu, &onboarding_menu);
@@ -4189,7 +4189,7 @@ fn dock_hop(
                         dur_ms: 200,
                         expanding: false,
                         mg0,
-                        uo0,
+                        _uo0: uo0,
                     });
                 }
                 log_line("menu: transcript history");
@@ -4218,7 +4218,7 @@ fn dock_hop(
                         dur_ms: 200,
                         expanding: false,
                         mg0,
-                        uo0,
+                        _uo0: uo0,
                     });
                 }
                 log_line(&format!("menu: paste last turn ({} chars)", t.len()));
@@ -4295,7 +4295,7 @@ fn dock_hop(
                     dur_ms: 200,
                     expanding: false,
                     mg0,
-                    uo0,
+                    _uo0: uo0,
                 });
             }
         });
@@ -4431,6 +4431,8 @@ fn dock_hop(
     // False until the (possibly lazily spawned) wakeword listener has been
     // handed the user's saved preferences once.
     let mut ww_prefs_applied = false;
+    let mut last_ww_enabled: Option<bool> = None;
+    let mut pill_hwnd_synced = false;
     let mut done_until = std::time::Instant::now();
     let mut last_hover = std::time::Instant::now();
     // Overlay paint insurance throttle (see watchdog block below).
@@ -4581,6 +4583,7 @@ fn dock_hop(
     let last_external_fg_timer = last_external_fg.clone();
     let wakeword_handle_timer = wakeword_handle.clone();
     let wakeword_reconcile_timer = wakeword_reconcile.clone();
+    let ww_prefs_dirty_timer = ww_prefs_dirty.clone();
     // 60fps morph ticker: drives the mic-capsule grow only (the window
     // never resizes mid-morph — native resizes flash white frames). The 50ms
     // poll only STARTS glides; this consumes them. 460ms expand / 300ms
@@ -4703,6 +4706,23 @@ fn dock_hop(
             if widget_platform::ensure_frameless(p.window(), false) {
                 let st = widget_platform::window_state_debug("pill", p.window());
                 note(&format!("pill frame stripped {st}"));
+            }
+            if !pill_hwnd_synced && widget_platform::has_hwnd(p.window()) {
+                pill_hwnd_synced = true;
+                let idx = *mlock(&corner_idx_timer);
+                let vert = *mlock(&vertical_timer);
+                let (cw, ch) = cur_size(&expanded_timer, &vertical_timer);
+                let scale = widget_platform::window_scale(p.window()).max(0.5);
+                let (dx, dy) =
+                    widget_platform::dock_position(idx, cw, ch, dock_gap(&expanded_timer), scale);
+                p.set_vertical(vert);
+                p.set_mirror(idx == 2);
+                place_pill(&p, dx, dy);
+                set_footprint(&p, cw, ch);
+                widget_platform::restack_topmost(p.window());
+                log_line(&format!(
+                    "pill hwnd ready: dock={idx} vert={vert} {cw}x{ch} @ ({dx},{dy}) scale={scale:.3}"
+                ));
             }
             // TOPMOST re-pin heartbeat (~2s while visible): competing
             // always-on-top windows, display changes and DWM quirks can
@@ -5670,7 +5690,7 @@ fn dock_hop(
                                     dur_ms: 200,
                                     expanding: false,
                                     mg0,
-                                    uo0,
+                                    _uo0: uo0,
                                 });
                                 log_line("ui: menu+pill cluster left -> collapse glide start");
                             }
@@ -5751,9 +5771,7 @@ fn dock_hop(
                 // transient are armed (claps work with wakewords fully off)
                 // and parks while a session is live — the foreground thread
                 // owns STOP claps mid-session.
-                let ww_on = s.wakeword_active
-                    || (!s.settings.wake_word_mode.eq_ignore_ascii_case("Off")
-                        && !s.settings.wake_word_mode.trim().is_empty());
+                let ww_on = s.wakeword_active;
                 let transient_armed = s.settings.transient_action != 2;
                 // While the PTT is held the foreground owns the mic — the
                 // background must stay off, or it re-opens the device and
@@ -5769,12 +5787,21 @@ fn dock_hop(
                 let had_listener = mlock(&wakeword_handle_timer).is_some();
                 (wakeword_reconcile_timer)(ww_armed);
                 let have_listener = mlock(&wakeword_handle_timer).is_some();
+                if !have_listener {
+                    ww_prefs_applied = false;
+                    last_ww_enabled = None;
+                }
                 // A freshly (re)spawned listener knows nothing about the
                 // user's choices — push every saved preference once, so a lazy
                 // start behaves exactly like the always-loaded one. This lives
                 // in the tick that runs even while the dashboard is closed.
-                if have_listener && (!had_listener || !ww_prefs_applied) {
+                let needs_prefs = have_listener
+                    && (!had_listener
+                        || ww_prefs_dirty_timer.swap(false, Ordering::AcqRel)
+                        || !ww_prefs_applied);
+                if needs_prefs {
                     if let Some(ref wh) = *mlock(&wakeword_handle_timer) {
+                        wh.set_wakewords_enabled(ww_on);
                         wh.set_sensitivity(s.settings.wakeword_sensitivity);
                         wh.set_vad_sensitivity(s.settings.vad_sensitivity);
                         wh.set_phrase_enabled(
@@ -5784,10 +5811,15 @@ fn dock_hop(
                         wh.set_phrase_enabled("alexa".to_string(), s.settings.ww_alexa);
                         wh.set_transient_action(s.settings.transient_action);
                         ww_prefs_applied = true;
+                        last_ww_enabled = Some(ww_on);
                         log_line("wakeword listener: saved preferences re-applied");
                     }
                 }
                 if let Some(ref wh) = *mlock(&wakeword_handle_timer) {
+                    if last_ww_enabled != Some(ww_on) {
+                        wh.set_wakewords_enabled(ww_on);
+                        last_ww_enabled = Some(ww_on);
+                    }
                     if bg_wanted {
                         if !wh.is_active() {
                             wh.start();
@@ -7203,7 +7235,7 @@ fn dock_hop(
                             dur_ms: 460,
                             expanding: true,
                             mg0,
-                            uo0,
+                            _uo0: uo0,
                         });
                         p.set_expanded(true);
                         // Dictate pill appears instantly (no fade/slide): the
@@ -7232,7 +7264,7 @@ fn dock_hop(
                             dur_ms: 300,
                             expanding: false,
                             mg0,
-                            uo0,
+                            _uo0: uo0,
                         });
                         p.set_upper_op(0.0);
                         p.set_slide_px(0);
@@ -7446,14 +7478,32 @@ fn dock_hop(
         }
         {
             let tx = tx_cmd.clone();
+            let state = state.clone();
             let wh = wakeword_handle.clone();
             let ww_reconcile = wakeword_reconcile.clone();
+            let ob_w = ob_weak.clone();
             ob.on_set_wakeword(move |on: bool| {
-                // Same lazy path as the dashboard toggle: OFF releases the
-                // engine + mic, ON respawns it with the saved preferences.
-                (ww_reconcile)(on);
+                // Same lazy path as the dashboard toggle: adhere strictly to
+                // ON/OFF, keep claps armed if configured, and persist right away.
+                let transient_armed = if let Ok(mut s) = state.lock() {
+                    s.wakeword_active = on;
+                    s.settings.wake_word_mode = if on {
+                        "Always On".to_string()
+                    } else {
+                        "Off".to_string()
+                    };
+                    let _ = s.settings.save_all();
+                    s.settings.transient_action != 2
+                } else {
+                    false
+                };
+                if let Some(o) = ob_w.upgrade() {
+                    o.set_wakeword_enabled(on);
+                }
+                (ww_reconcile)(on || transient_armed);
                 if let Some(ref w) = *mlock(&wh) {
-                    if on {
+                    w.set_wakewords_enabled(on);
+                    if on || transient_armed {
                         w.start();
                     } else {
                         w.stop();
@@ -7533,15 +7583,38 @@ fn dock_hop(
     }
     {
         let tx = tx_cmd.clone();
+        let state = state.clone();
+        let dash_w = dashboard.as_weak();
         let wh = wakeword_handle.clone();
         let ww_reconcile = wakeword_reconcile.clone();
         dashboard.on_set_wakeword_enabled(move |on| {
-            // Turning it OFF releases the engine + mic (that is the RAM win);
-            // turning it back ON respawns the service with every saved
-            // preference re-applied by the state sync.
-            (ww_reconcile)(on);
+            // Turning it OFF shuts down wakeword detection strictly (and
+            // releases the engine + mic whenever claps are also Disabled).
+            // Turning it ON respawns/arms the service with all saved preferences.
+            let transient_armed = if let Ok(mut s) = state.lock() {
+                s.wakeword_active = on;
+                s.settings.wake_word_mode = if on {
+                    "Always On".to_string()
+                } else {
+                    "Off".to_string()
+                };
+                let _ = s.settings.save_all();
+                s.settings.transient_action != 2
+            } else {
+                false
+            };
+            log_line(&format!(
+                "dashboard: wakeword toggled -> {} (clap_armed={})",
+                if on { "ON" } else { "OFF" },
+                transient_armed
+            ));
+            if let Some(d) = dash_w.upgrade() {
+                d.set_wakeword_enabled(on);
+            }
+            (ww_reconcile)(on || transient_armed);
             if let Some(ref w) = *mlock(&wh) {
-                if on {
+                w.set_wakewords_enabled(on);
+                if on || transient_armed {
                     w.start();
                 } else {
                     w.stop();
@@ -8398,41 +8471,27 @@ fn dock_hop(
             s.settings.transient_action = transient_action;
             s.settings.clap_action = transient_action;
             s.settings.snap_action = transient_action;
-            // Cement wakewords ON by default for every future update:
-            // fresh installs already default to Always On + both phrases;
-            // existing installs that drifted Off (e.g. during the broken-head
-            // era) self-heal once here, then the user's own toggles persist.
-            if s.settings.wake_word_mode.eq_ignore_ascii_case("Off")
-                || s.settings.wake_word_mode.trim().is_empty()
-            {
+            // Only repair an empty/corrupt wake_word_mode string — NEVER
+            // overwrite an explicit "Off" choice back to "Always On".
+            if s.settings.wake_word_mode.trim().is_empty() {
                 s.settings.wake_word_mode = "Always On".to_string();
                 s.wakeword_active = true;
+                let _ = s.settings.save_all();
+            } else {
+                s.wakeword_active = !s.settings.wake_word_mode.eq_ignore_ascii_case("Off");
             }
-            if !s.settings.ww_hey_jarvis && !s.settings.ww_alexa {
-                s.settings.ww_hey_jarvis = true;
-                s.settings.ww_alexa = true;
-            }
-            let _ = s.settings.save_all();
-            let ww_enabled = s.wakeword_active
-                || (!s.settings.wake_word_mode.eq_ignore_ascii_case("Off")
-                    && !s.settings.wake_word_mode.trim().is_empty());
+            let ww_enabled = s.wakeword_active;
             let transient_armed = s.settings.transient_action != 2;
             // Re-apply EVERY saved preference to the listener whenever it
-            // (re)appears, so a lazy respawn behaves exactly like the
-            // always-loaded one: sensitivity, VAD gate, phrases, clap action.
-            // When nothing is armed the listener stays released (see the
-            // reconcile path above).
+            // (re)appears: wakeword ON/OFF gate, sensitivity, VAD gate,
+            // phrases, clap action.
             if let Some(ref wh) = *mlock(&wakeword_handle) {
+                wh.set_wakewords_enabled(ww_enabled);
                 wh.set_sensitivity(s.settings.wakeword_sensitivity);
                 wh.set_vad_sensitivity(s.settings.vad_sensitivity);
-                // Precise community heads only (legacy customs quarantined:
-                // proven non-discriminating, never enter the pipeline).
-                // Respect the persisted per-phrase toggles.
                 wh.set_phrase_enabled("hey jarvis".to_string(), s.settings.ww_hey_jarvis);
                 wh.set_phrase_enabled("alexa".to_string(), s.settings.ww_alexa);
                 wh.set_transient_action(s.settings.transient_action);
-                // Background mic runs whenever wakewords OR the clap are
-                // armed (claps work with wakewords fully off).
                 if ww_enabled || transient_armed {
                     wh.start();
                 }
@@ -8495,11 +8554,7 @@ fn dock_hop(
             }
             dashboard.set_ui_opacity(s.settings.active_opacity.clamp(20, 100) as i32);
             dashboard.set_ui_pill_radius(s.settings.pill_radius.clamp(0, 25) as i32);
-            // Recomputed per tick — the wakeword toggles can flip it live.
-            let ww_enabled = s.wakeword_active
-                || (!s.settings.wake_word_mode.eq_ignore_ascii_case("Off")
-                    && !s.settings.wake_word_mode.trim().is_empty());
-            dashboard.set_wakeword_enabled(ww_enabled);
+            dashboard.set_wakeword_enabled(s.wakeword_active);
             dashboard.set_wakeword_sensitivity(s.settings.wakeword_sensitivity.clamp(0, 100) as i32);
             dashboard.set_vad_sensitivity(s.settings.vad_sensitivity.clamp(0, 100) as i32);
             dashboard.set_start_minimized(s.settings.startup_background);

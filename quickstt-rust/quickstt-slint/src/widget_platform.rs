@@ -71,9 +71,10 @@ pub fn hwnd_of(window: &slint::Window) -> Option<isize> {
     }
 }
 
-/// Force WS_EX_LAYERED on a HIDDEN window (the only time it can be set).
-/// Call immediately after new() + hide() — the window is hidden at that
-/// point so the flag sticks. Returns true on success.
+/// Configure tool/no-activate flags on a HIDDEN window before first show.
+/// Note: winit's `with_transparent(true)` uses `DwmEnableBlurBehindWindow` +
+/// `softbuffer::BitBlt` rather than `WS_EX_LAYERED`; forcing `WS_EX_LAYERED`
+/// on a BitBlt window without `SetLayeredWindowAttributes` makes it invisible.
 #[cfg(target_os = "windows")]
 pub fn force_layered(window: &slint::Window) -> bool {
     let Some(raw) = hwnd_of(window) else {
@@ -82,17 +83,12 @@ pub fn force_layered(window: &slint::Window) -> bool {
     let hwnd = HWND(raw as _);
     unsafe {
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        if ex & WS_EX_LAYERED.0 as i32 != 0 {
-            return true; // already set
+        let want = (ex | WS_EX_TOOLWINDOW.0 as i32 | WS_EX_NOACTIVATE.0 as i32)
+            & !(WS_EX_APPWINDOW.0 as i32);
+        if want != ex {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, want);
         }
-        SetWindowLongW(
-            hwnd,
-            GWL_EXSTYLE,
-            ex | WS_EX_LAYERED.0 as i32 | WS_EX_TOOLWINDOW.0 as i32 | WS_EX_NOACTIVATE.0 as i32,
-        );
-        // Verify it stuck.
-        let ex2 = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        ex2 & WS_EX_LAYERED.0 as i32 != 0
+        true
     }
 }
 #[cfg(not(target_os = "windows"))]
@@ -129,9 +125,11 @@ pub fn configure_widget_window(window: &slint::Window) {
             let mut ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
             // TOOLWINDOW keeps it off the taskbar; the backend sets
             // APPWINDOW by default, which would force a taskbar button —
-            // a proper widget must never have one.
-            ex &= !(WS_EX_APPWINDOW.0 as i32);
-            ex |= (WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as i32;
+            // a proper widget must never have one. Do NOT set WS_EX_LAYERED
+            // here: winit + softbuffer uses DwmEnableBlurBehindWindow + BitBlt,
+            // and WS_EX_LAYERED without SetLayeredWindowAttributes hides the window.
+            ex &= !(WS_EX_APPWINDOW.0 as i32 | WS_EX_LAYERED.0 as i32);
+            ex |= (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as i32;
             SetWindowLongW(hwnd, GWL_EXSTYLE, ex);
 
             // Disable DWM fade/slide so show/hide feels instant
@@ -387,22 +385,18 @@ pub fn show_widget(window: &slint::Window) {
         let hwnd = HWND(raw as _);
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-            if ex & WS_EX_LAYERED.0 as i32 == 0 {
-                crate::log_line(&format!(
-                    "WARN: WS_EX_LAYERED NOT set after configure_widget_window (ex=0x{:08X})",
-                    ex
-                ));
-            }
         }
     }
-    // Staged style: ensure window styles and subclass are firmly locked in.
-    for _ in 0..20 {
-        configure_widget_window(window);
-        if has_hwnd(window) && !ensure_frameless(window, false) {
-            break;
+    // Staged style: ensure window styles and subclass are locked in when the HWND
+    // already exists (pre-event-loop show() creates the HWND later on resumed()).
+    if has_hwnd(window) {
+        for _ in 0..20 {
+            configure_widget_window(window);
+            if !ensure_frameless(window, false) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     // Force the first frame now: a shown-but-unpainted window can linger as
     // a white flash on a loaded machine before the backend gets to it.
@@ -619,7 +613,8 @@ pub fn ensure_frameless(window: &slint::Window, click_through: bool) -> bool {
     unsafe {
         let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(hwnd, windows::core::w!(""));
         let _ = SetWindowSubclass(hwnd, Some(frameless_subclass_proc), 0x51554943, 0);
-        let mut changed = false;
+        let mut style_changed = false;
+        let mut ex_changed = false;
         let style = GetWindowLongW(hwnd, GWL_STYLE);
         const FRAME_BITS: i32 =
             (WS_CAPTION.0 | WS_THICKFRAME.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0 | WS_SYSMENU.0)
@@ -628,22 +623,22 @@ pub fn ensure_frameless(window: &slint::Window, click_through: bool) -> bool {
         let mut style_after = style;
         if style & FRAME_BITS != 0 {
             style_after = (style & !FRAME_BITS) | WS_POPUP.0 as i32;
-            changed = true;
+            style_changed = true;
         }
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let mut want =
-            (WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as i32;
+        let mut want = (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as i32;
         if click_through {
             want |= WS_EX_TRANSPARENT.0 as i32;
         }
         let ex_before = ex;
         let mut ex_after = ex;
-        // APPWINDOW forces a taskbar button even on tool windows — strip it.
-        if ex & want != want || ex & (WS_EX_APPWINDOW.0 as i32) != 0 {
-            ex_after = (ex | want) & !(WS_EX_APPWINDOW.0 as i32);
-            changed = true;
+        // APPWINDOW forces a taskbar button; WS_EX_LAYERED on a softbuffer
+        // BitBlt window without SetLayeredWindowAttributes hides the surface.
+        if ex & want != want || ex & ((WS_EX_APPWINDOW.0 | WS_EX_LAYERED.0) as i32) != 0 {
+            ex_after = (ex | want) & !((WS_EX_APPWINDOW.0 | WS_EX_LAYERED.0) as i32);
+            ex_changed = true;
         }
-        if !changed {
+        if !style_changed && !ex_changed {
             return false;
         }
         let first = diagnosed
@@ -655,34 +650,37 @@ pub fn ensure_frameless(window: &slint::Window, click_through: bool) -> bool {
                 "frameless fight hwnd=0x{raw:X}: style 0x{style_before:08X}->0x{style_after:08X} ex 0x{ex_before:08X}->0x{ex_after:08X}"
             ));
         }
-        let due = last_touch
-            .lock()
-            .map(|mut m| {
-                let go = m
-                    .get(&raw)
-                    .map(|t| t.elapsed().as_secs() >= 2)
-                    .unwrap_or(true);
-                if go {
-                    m.insert(raw, std::time::Instant::now());
-                }
-                go
-            })
-            .unwrap_or(false);
+        let due = style_changed
+            || last_touch
+                .lock()
+                .map(|mut m| {
+                    let go = m
+                        .get(&raw)
+                        .map(|t| t.elapsed().as_secs() >= 2)
+                        .unwrap_or(true);
+                    if go {
+                        m.insert(raw, std::time::Instant::now());
+                    }
+                    go
+                })
+                .unwrap_or(false);
         if !due {
             return false;
         }
-        SetWindowLongW(hwnd, GWL_STYLE, style_after);
-        SetWindowLongW(hwnd, GWL_EXSTYLE, ex_after);
-        SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        )
-        .ok();
+        if style_changed {
+            SetWindowLongW(hwnd, GWL_STYLE, style_after);
+        }
+        if ex_changed {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, ex_after);
+        }
+        // Only pass SWP_FRAMECHANGED when non-client frame bits were actually
+        // stripped (forces WM_NCCALCSIZE -> 0 once so client == window rect);
+        // steady-state touches stay paint-neutral.
+        let mut swp = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        if style_changed {
+            swp |= SWP_FRAMECHANGED;
+        }
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, swp).ok();
         true
     }
 }

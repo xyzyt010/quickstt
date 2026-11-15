@@ -17,13 +17,13 @@
 
 #define MyAppName "QuickSTT"
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.0-alpha.27"
+  #define MyAppVersion "2.0.0-alpha.28"
 #endif
 ; The Windows file-version resource needs four numeric fields; the app's own
-; version carries a pre-release label ("2.0.0-alpha.27"). Build-Installer.ps1
-; derives the numeric form and passes it in (/DMyAppVersionNumeric=2.0.0.27).
+; version carries a pre-release label ("2.0.0-alpha.28"). Build-Installer.ps1
+; derives the numeric form and passes it in (/DMyAppVersionNumeric=2.0.0.28).
 #ifndef MyAppVersionNumeric
-  #define MyAppVersionNumeric "2.0.0.27"
+  #define MyAppVersionNumeric "2.0.0.28"
 #endif
 #define MyAppNameVersion MyAppName + " " + MyAppVersion
 #define MyAppPublisher "QuickSTT"

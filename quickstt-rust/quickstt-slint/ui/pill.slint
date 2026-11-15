@@ -255,9 +255,9 @@ export component PillWidget inherits Window {
         // window stays at the fixed expanded footprint (no per-tick resizes
         // — resizes flash white frames), so the invisible margins must not
         // capture clicks (transparent pixels pass through natively).
-        x: !expanded ? (vertical ? (mirror ? 2px : win_w - 11px) : (win_w - 32px) / 2) : 0px;
+        x: !expanded ? (vertical ? (mirror ? 2px : win_w - 11px) : (win_w - 36px) / 2) : 0px;
         y: !expanded ? (vertical ? (win_h - 41px) / 2 : win_h - 8px) : 0px;
-        width: !expanded ? (vertical ? 9px : 32px) : win_w;
+        width: !expanded ? (vertical ? 9px : 36px) : win_w;
         height: !expanded ? (vertical ? 41px : 8px) : win_h;
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
@@ -379,7 +379,7 @@ export component PillWidget inherits Window {
     }
 
     // ── expanded side pair: mic capsule (32px wide, 47px high, 22px mic icon).
-    if expanded && vertical && !mirror: UpperPill {
+    if expanded && vertical && !mirror && upper_op > 0.01: UpperPill {
         x: win_w - (38 + upper_w) * 1px;
         y: (14 + rise_px) * 1px;
         phase: phase;
@@ -388,7 +388,7 @@ export component PillWidget inherits Window {
         levels: levels;
         loading_tick: loading_tick;
         upper_w: upper_w;
-        pill_opacity: pill_opacity;
+        pill_opacity: pill_opacity * upper_op;
     }
     if expanded && vertical && !mirror: Rectangle {
         // Morphs from the 9x41 mini bar into the slender 32x47 vertical capsule.
@@ -474,7 +474,7 @@ export component PillWidget inherits Window {
             mouse-cursor: pointer;
         }
     }
-    if expanded && vertical && mirror: UpperPill {
+    if expanded && vertical && mirror && upper_op > 0.01: UpperPill {
         x: 38px;
         y: (14 + rise_px) * 1px;
         phase: phase;
@@ -483,7 +483,7 @@ export component PillWidget inherits Window {
         levels: levels;
         loading_tick: loading_tick;
         upper_w: upper_w;
-        pill_opacity: pill_opacity;
+        pill_opacity: pill_opacity * upper_op;
     }
 }
 

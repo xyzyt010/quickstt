@@ -1,5 +1,45 @@
 # Changelog
 
+## [2.0.0-alpha.28] — 2026-11-14
+
+Fixes the side-dock startup expand/collapse GUI glitch, eliminates the startup
+style fight that hid the pill briefly on Windows launch, fixes wakewords so
+they actually fire across all microphone levels, and strictly honors the
+Wakeword ON/OFF setting.
+
+### Fixed
+- **Pill startup GUI glitch on side docks (and startup invisibility).**
+  At startup, `main.rs` restored `pill_dock` to the Slint UI (`vertical=true`,
+  `mirror=true`) but left Rust's `vertical` mutex hardcoded to `false`. The
+  pill looked normal on first launch, expanded with the wrong bottom-dock
+  footprint, and on its very first collapse (`anim_ticker`), Rust resized the
+  window to the horizontal `36x8` (`45x10` px) mini footprint while Slint
+  still rendered a `9x41` vertical pill — slicing it into a tiny deformed
+  stub until dragged to another edge. Additionally, `ensure_frameless` kept
+  re-applying `WS_EX_LAYERED` on a `DwmEnableBlurBehindWindow` + `softbuffer`
+  window every 2s (hiding the surface for several seconds on launch), and
+  `mic_grow`/`upper_op` started at `1.0` instead of `0.0`. All of these are
+  now synchronized before showing the widget and on the first HWND tick, and
+  `pill.slint` hides the side status pill immediately on collapse start.
+- **Wakewords never fired on real speech (0.000 despite community heads).**
+  Three stacked pipeline defects killed detection even after loading the
+  community heads: (1) `WakeWordEngine` skipped `push_audio` on 3 out of 4
+  quiet chunks (`quiet_ticks % 4`), starving and time-warping the mel cache;
+  (2) the energy/VAD gate snapped shut on the very first quiet chunk after
+  saying the wakeword — wiping hit counts before openWakeWord's causal
+  76-frame/16-embedding peak (~200–700ms post-speech) ever scored; and
+  (3) `apply_input_gain` multiplied by `3x` and hard-clipped to `i16` before
+  attenuating loud inputs, square-waving normal/Mint speech. `push_audio` now
+  runs losslessly on every chunk, a 960ms post-speech hangover keeps scoring
+  across the causal peak, and `apply_input_gain` scales cleanly in `f32`.
+- **Wakeword ON/OFF setting now strictly honored.**
+  Removed the startup hack that forcibly overwrote `"Off"` back to `"Always On"`;
+  synced `AppState::wakeword_active` with `wake_word_mode` on startup and
+  toggle (fixing 20Hz UI toggle oscillation); added `SetWakewordsEnabled` so
+  turning wakewords OFF shuts down all wakeword inference and triggers even
+  when clap detection keeps the background mic alive; re-applies all saved
+  preferences on every OFF → ON respawn; and persists `showWidget` on Windows.
+
 ## [2.0.0-alpha.27] — 2026-11-14
 
 Two shipped fixes: the blank pill on fresh launch, and the dead wakeword.
