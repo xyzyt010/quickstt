@@ -1,5 +1,37 @@
 # Changelog
 
+## [2.0.0-alpha.29] — 2026-11-15
+
+UI pass: Compact side rail icons are properly centered, Speech Models page is
+drastically simplified and unified, and releases now bundle every engine
+runtime (Linux whisper-cli / transcribe-cli / llama-cli — previously-only-
+built-on-Linux engines are now part of the Windows production too, via the
+release workflow).
+
+### Fixed
+- **Compressed Speech Models nav icons + rail expand button** are now exactly
+  centered in every section (General, Speech Models, Widget Style, Wake Words,
+  System, History): every icon gets explicit vertical centering inside its
+  48px row, and rail mode has its own centered expand glyph in the 44px brand
+  box (the expanded-wordmark collapse button is hidden in rail mode).
+- **Speech Models page is drastically simpler and unified:**
+  - One recommendation banner with a single action that flips Download
+    <size> → % → Use it (replaces "Recommended" pill, "Use it" button, and
+    packaging of a separate already-downloaded "Use it" / "Downloading").
+  - One "Model" dropdown + one "Language" dropdown side by side. The language
+    dropdown always shows exactly what the selected model supports — a single
+    English entry when the model is English-only, or Auto + every language
+    otherwise — never a different note or hidden picker.
+  - One unified catalog card per model: tap-to-select (installed) or
+    Download (missing). One action, one place, no duplicate sections,
+    no "Downloaded" vs "Available" duplication, no card pasting of the
+    progress bar.
+- Recommendation state is refreshed on model selection, on switching the
+  recommended priority, and when a download completes — the "Recommended"
+  badge and banner are now always honest against the current install state.
+- "Optimise for" combo and the models-info/hardware-info prose were removed
+  (redundant with the unified banner and the catalog tags).
+
 ## [2.0.0-alpha.28] — 2026-11-14
 
 Fixes the side-dock startup expand/collapse GUI glitch, eliminates the startup

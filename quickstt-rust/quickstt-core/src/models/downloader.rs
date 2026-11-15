@@ -152,6 +152,7 @@ fn refresh_installed_flags(state: &SharedState) {
                 entry.installed = catalog::is_model_installed(desc);
             }
         }
+        crate::orchestration::refresh_recommendation(&mut s);
     }
 }
 

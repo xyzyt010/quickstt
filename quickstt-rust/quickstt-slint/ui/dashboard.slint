@@ -14,6 +14,7 @@ export struct ModelCard {
     size: string,
     installed: bool,
     is_active: bool,
+    visible: bool,
     index: int,
     downloading: bool,
 }
@@ -174,17 +175,12 @@ export component DashboardWidget inherits Window {
     out property <length> tap-size: 44px;
 
     // Model & Language State
-    in property <[string]> models: ["Vosk Small EN (50M)", "NVIDIA Parakeet TDT 0.6B", "Nemotron 3.5 Streaming", "Vosk Large EN (US)", "Vosk Small Indian EN", "Vosk Small German"];
+    in property <[string]> models: [""];
     in property <int> selected-model: 0;
-    in property <[string]> languages: ["Auto", "English", "German"];
+    in property <[string]> languages: ["English"];
     in property <int> selected-language: 0;
-    /// Shown INSTEAD of the language dropdown when the active model supports
-    /// only one language (e.g. "English only") — a picker with a single
-    /// choice is noise, so an explanatory label replaces it.
-    in property <string> language-note: "";
     /// Recommendation priority (0 = Balanced, 1 = Fastest, 2 = Most accurate).
     in property <int> model-priority: 0;
-    in property <string> models-info: "Local, ultra-fast neural speech recognition. Runs 100% offline.";
 
     // Download & Progress Bar
     in property <bool> is-downloading: false;
@@ -193,6 +189,13 @@ export component DashboardWidget inherits Window {
     in property <string> download-speed: "";
     in property <string> download-bytes: "";
     in property <string> download-file: "";
+    /// The single recommended model, pre-resolved in Rust. One banner, one
+    /// action (Download → Use it) — the visible badge/button for it.
+    in property <string> recommend-model: "";
+    /// True when the recommended model is installed locally.
+    in property <bool> recommend-installed: false;
+    /// Human size of the recommended model ("800 MB").
+    in property <string> recommend-size: "";
 
     // Style Properties
     in property <int> ui-opacity: 100;
@@ -333,11 +336,11 @@ export component DashboardWidget inherits Window {
     callback toggle-wakeword-phrase(string, bool);
     callback set-transient-action(int);
     callback download-catalog-model(int);
-    callback uninstall-catalog-model(int);
     callback select-catalog-model(int);
     callback use-recommended-model();
+    /// Download the recommended model (or activate it when it is local).
+    callback download-recommended-model();
     callback set-catalog-search(string);
-    callback set-catalog-lang-filter(string);
     callback browse-recording-dir();
     callback check-updates();
     /// Re-run the first-run onboarding tour from the top.
@@ -346,12 +349,10 @@ export component DashboardWidget inherits Window {
 
     // Hardware-aware catalog (dynamic cards, image-inspired)
     in property <[ModelCard]> catalog: [];
-    in property <[string]> catalog-langs: ["All Languages"];
-    in property <int> catalog-lang-idx: 0;
     in property <string> catalog-search: "";
+    /// Hardware-aware recommended model name (legacy, use `recommend-model`).
     in property <string> recommend-name: "";
     in property <string> recommend-reason: "";
-    in property <string> hardware-info: "";
 
     // Monitor scale factor (1.0 = 96 dpi, 1.25 = 125%, …), set from Rust via
     // GetDpiForWindow. Slint's winit-software backend renders at this scale but
@@ -405,14 +406,18 @@ export component DashboardWidget inherits Window {
                     // icon_app.png ships everywhere (exe, tray, installer, both
                     // platforms), so the brand is pixel-identical on Windows/Mint.
                     HorizontalLayout {
-                        spacing: 10px;
+                        spacing: root.rail-active ? 0px : 10px;
                         padding-left: root.rail-active ? 0px : 4px;
-                        padding-right: 2px;
+                        padding-right: root.rail-active ? 0px : 2px;
+                        alignment: root.rail-active ? center : start;
 
                         Image {
                             source: @image-url("../../assets/app_icon.svg");
-                            width: root.rail-active ? 24px : 32px;
-                            height: root.rail-active ? 32px : 43px;
+                            // Square-ish artwork box in rail mode keeps the icon
+                            // centered; wordmark branch keeps the banner shape.
+                            width: root.rail-active ? 44px : 32px;
+                            height: root.rail-active ? 40px : 43px;
+                            image-fit: contain;
                             y: (parent.height - self.height) / 2;
                         }
                         VerticalLayout {
@@ -427,10 +432,11 @@ export component DashboardWidget inherits Window {
                                 vertical-alignment: center;
                             }
                         }
-                        Rectangle { horizontal-stretch: 1; }
+                        Rectangle { horizontal-stretch: 1; visible: !root.rail-active; }
                         // Collapse / expand — minimal Material Symbols menu glyph
                         // in a 40px touch target (was a hand-drawn hamburger).
                         Rectangle {
+                            visible: !root.rail-active;
                             width: root.tap-size;
                             height: 40px;
                             border-radius: 8px;
@@ -457,6 +463,31 @@ export component DashboardWidget inherits Window {
                         }
                     }
 
+                    // Rail mode sites its own expand button: the wordmark
+                    // collapse button is hidden there, so the icon needs one.
+                    Rectangle {
+                        visible: root.rail-active;
+                        height: 44px;
+                        border-radius: 8px;
+                        background: chev2_touch.has-hover ? #161616 : transparent;
+                        border-width: chev2_touch.has-hover ? 1px : 0px;
+                        border-color: #262626;
+                        IconSym {
+                            glyph: "\u{E5D2}";
+                            tint: chev2_touch.has-hover ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        chev2_touch := TouchArea {
+                            clicked => {
+                                root.sidebar-collapsed = !root.sidebar-collapsed;
+                                root.set-sidebar-collapsed(root.sidebar-collapsed);
+                            }
+                            mouse-cursor: pointer;
+                        }
+                    }
+
                     // Navigation Item 0: General
                     Rectangle {
                         height: 48px;
@@ -470,6 +501,7 @@ export component DashboardWidget inherits Window {
                             spacing: root.rail-active ? 0px : 10px;
                             alignment: root.rail-active ? center : start;
                             IconSym {
+                                y: (48px - 22px) / 2;
                                 glyph: "\u{E8B8}";
                                 tint: root.active-tab == 0 ? #FFFFFF : #9A9A9A;
                                 size: 22px;
@@ -503,6 +535,7 @@ export component DashboardWidget inherits Window {
                             spacing: root.rail-active ? 0px : 10px;
                             alignment: root.rail-active ? center : start;
                             IconSym {
+                                y: (48px - 22px) / 2;
                                 glyph: "\u{E1B8}";
                                 tint: root.active-tab == 1 ? #FFFFFF : #9A9A9A;
                                 size: 22px;
@@ -536,6 +569,7 @@ export component DashboardWidget inherits Window {
                             spacing: root.rail-active ? 0px : 10px;
                             alignment: root.rail-active ? center : start;
                             IconSym {
+                                y: (48px - 22px) / 2;
                                 glyph: "\u{E3B7}";
                                 tint: root.active-tab == 2 ? #FFFFFF : #9A9A9A;
                                 size: 22px;
@@ -569,6 +603,7 @@ export component DashboardWidget inherits Window {
                             spacing: root.rail-active ? 0px : 10px;
                             alignment: root.rail-active ? center : start;
                             IconSym {
+                                y: (48px - 22px) / 2;
                                 glyph: "\u{E023}";
                                 tint: root.active-tab == 3 ? #FFFFFF : #9A9A9A;
                                 size: 22px;
@@ -602,6 +637,7 @@ export component DashboardWidget inherits Window {
                             spacing: root.rail-active ? 0px : 10px;
                             alignment: root.rail-active ? center : start;
                             IconSym {
+                                y: (48px - 22px) / 2;
                                 glyph: "\u{E30A}";
                                 tint: root.active-tab == 4 ? #FFFFFF : #9A9A9A;
                                 size: 22px;
@@ -635,6 +671,7 @@ export component DashboardWidget inherits Window {
                             spacing: root.rail-active ? 0px : 10px;
                             alignment: root.rail-active ? center : start;
                             IconSym {
+                                y: (48px - 22px) / 2;
                                 glyph: "\u{E28E}";
                                 tint: root.active-tab == 5 ? #FFFFFF : #9A9A9A;
                                 size: 22px;
@@ -988,79 +1025,96 @@ export component DashboardWidget inherits Window {
                     }
 
                     // ══════════════════════════════════════════════════════════════════
-                    // TAB 1: SPEECH MODELS & DOWNLOAD PROGRESS
+                    // TAB 1: SPEECH MODELS
+                    // One recommendation banner, one model dropdown, one
+                    // language dropdown, one unified catalog. Compatibility
+                    // notes are inline; no duplicate progress bars.
                     // ══════════════════════════════════════════════════════════════════
                     if root.active-tab == 1 : VerticalLayout {
                         padding: 20px;
                         spacing: 16px;
 
                         Text {
-                            text: "Speech Recognition Models";
+                            text: "Speech Models";
                             font-size: 18px;
                             font-weight: 700;
                             color: #FFFFFF;
                         }
-                        Text {
-                            text: "Select your active transcription engine or download additional neural acoustic models.";
-                            font-size: 12px;
-                            color: #9A9A9A;
-                            wrap: word-wrap;
-                        }
 
-                        // Dynamic Download Progress Bar Card (Shows whenever downloading)
-                        if root.is-downloading || root.download-progress > 0 : Rectangle {
+                        // ── Recommendation banner (the one action that matters) ──
+                        // ── Recommendation banner (the one action that matters) ──
+                        if root.recommend-model != "" : Rectangle {
                             background: #141414;
                             border-radius: 10px;
                             border-width: 1px;
                             border-color: #FFFFFF;
 
                             VerticalLayout {
-                                padding: 14px;
+                                padding: 12px;
                                 spacing: 8px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text { text: "Recommended"; font-size: 12px; font-weight: 700; color: #9A9A9A; vertical-alignment: center; }
+                                    Text { text: root.recommend-model; font-size: 13px; font-weight: 700; color: #FFFFFF; vertical-alignment: center; overflow: elide; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    // The recommended model's single action —
+                                    // download when missing, use when local,
+                                    // live percent while fetching.
+                                    Rectangle {
+                                        width: root.recommend-installed ? 84px : 128px;
+                                        height: 30px;
+                                        border-radius: 15px;
+                                        background: use_rec.has-hover ? #E4E4E4 : #FFFFFF;
+                                        animate background { duration: 130ms; easing: ease-out; }
+                                        Text {
+                                            text: root.recommend-installed ? "Use it" : ((root.is-downloading && root.recommend-size != "") ? (root.download-progress + "%") : ("Download " + root.recommend-size));
+                                            font-size: 11.5px;
+                                            font-weight: 700;
+                                            color: #000000;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        use_rec := TouchArea {
+                                            clicked => { root.download-recommended-model(); }
+                                            mouse-cursor: pointer;
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
+                        // ── Download progress (single place, single bar) ──
+                        if root.is-downloading : Rectangle {
+                            background: #141414;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #262626;
+
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 6px;
                                 HorizontalLayout {
                                     alignment: space-between;
                                     Text {
-                                        text: root.download-status != "" ? root.download-status : "Downloading Speech Model…";
-                                        font-size: 13px;
+                                        text: root.download-status;
+                                        font-size: 12px;
                                         font-weight: 600;
                                         color: #FFFFFF;
                                         vertical-alignment: center;
+                                        wrap: word-wrap;
                                     }
                                     Text {
                                         text: root.download-progress + "%";
-                                        font-size: 13px;
+                                        font-size: 12px;
                                         font-weight: 700;
                                         color: #FFFFFF;
                                         vertical-alignment: center;
                                     }
                                 }
-
-                                // Throughput row: file • bytes • MB/s (Rust-preformatted).
-                                HorizontalLayout {
-                                    alignment: space-between;
-                                    Text {
-                                        text: root.download-file;
-                                        font-size: 11px;
-                                        color: #9A9A9A;
-                                        vertical-alignment: center;
-                                        overflow: elide;
-                                    }
-                                    Text {
-                                        text: (root.download-bytes != "" && root.download-speed != "") ? (root.download-bytes + " • " + root.download-speed) : root.download-bytes;
-                                        font-size: 11px;
-                                        font-weight: 600;
-                                        color: #9A9A9A;
-                                        vertical-alignment: center;
-                                    }
-                                }
-
-                                // Modern Progress Track
                                 Rectangle {
                                     height: 8px;
                                     border-radius: 4px;
-                                    background: #1A1A1A;
-
+                                    background: #1F1F1F;
                                     Rectangle {
                                         x: 0px;
                                         y: 0px;
@@ -1070,10 +1124,15 @@ export component DashboardWidget inherits Window {
                                         background: #FFFFFF;
                                     }
                                 }
+                                Text {
+                                    text: (root.download-bytes != "" && root.download-speed != "") ? (root.download-bytes + "  ·  " + root.download-speed) : root.download-bytes;
+                                    font-size: 10.5px;
+                                    color: #9A9A9A;
+                                }
                             }
                         }
 
-                        // Active Model & Language Selector Card
+                        // ── Model + Language card ──
                         Rectangle {
                             background: #0E0E0E;
                             border-radius: 10px;
@@ -1081,14 +1140,14 @@ export component DashboardWidget inherits Window {
                             border-color: #262626;
 
                             VerticalLayout {
-                                padding: 16px;
-                                spacing: 14px;
+                                padding: 14px;
+                                spacing: 10px;
 
-                                Text { text: "Active Recognition Engine"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
+                                Text { text: "Active model"; font-size: 13px; font-weight: 600; color: #FFFFFF; }
 
                                 HorizontalLayout {
-                                    spacing: 12px;
-                                    Text { text: "Selected Model:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
+                                    spacing: 10px;
+                                    Text { text: "Model"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 72px; }
                                     ComboBox {
                                         height: 40px;
                                         model: root.models;
@@ -1098,57 +1157,24 @@ export component DashboardWidget inherits Window {
                                 }
 
                                 HorizontalLayout {
-                                    spacing: 12px;
-                                    Text { text: "Active Language:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
-                                    // Multi-language models get the picker
-                                    // (Auto included only where the engine
-                                    // can actually detect language). Models
-                                    // with a single language get a label
-                                    // instead of a one-choice dropdown.
-                                    if root.languages.length > 1 : ComboBox {
+                                    spacing: 10px;
+                                    Text { text: "Language"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 72px; }
+                                    // Exactly one dropdown. Single-language models
+                                    // show a disabled one-entry list — never a
+                                    // prose note — so the column always reads the
+                                    // same way.
+                                    ComboBox {
                                         height: 40px;
                                         model: root.languages;
                                         current-index: root.selected-language;
+                                        enabled: root.languages.length > 1;
                                         selected(v) => { root.select-language(v); }
-                                    }
-                                    if root.languages.length <= 1 : Text {
-                                        text: root.language-note;
-                                        font-size: 13px;
-                                        color: #9A9A9A;
-                                        vertical-alignment: center;
-                                    }
-                                }
-
-                                // Recommendation priority: what the
-                                // "Recommended" badge should optimise for.
-                                HorizontalLayout {
-                                    spacing: 12px;
-                                    Text { text: "Optimise for:"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
-                                    ComboBox {
-                                        height: 40px;
-                                        model: ["Balanced", "Fastest", "Most accurate"];
-                                        current-index: root.model-priority;
-                                        selected(v) => { root.set-model-priority(v); }
-                                    }
-                                }
-
-                                Rectangle {
-                                    background: #1A1A1A;
-                                    border-radius: 6px;
-                                    VerticalLayout {
-                                        padding: 10px;
-                                        Text {
-                                            text: root.models-info;
-                                            font-size: 12px;
-                                            color: #9A9A9A;
-                                            wrap: word-wrap;
-                                        }
                                     }
                                 }
                             }
                         }
 
-                        // Model Catalog Overview Card
+                        // ── Catalog: one searchable list, one card per model ──
                         Rectangle {
                             background: #0E0E0E;
                             border-radius: 10px;
@@ -1156,235 +1182,89 @@ export component DashboardWidget inherits Window {
                             border-color: #262626;
 
                             VerticalLayout {
-                                padding: 16px;
-                                spacing: 12px;
+                                padding: 14px;
+                                spacing: 10px;
 
-                                Text { text: "Transcription Models"; font-size: 16px; font-weight: 700; color: #FFFFFF; }
+                                Text { text: "Catalog"; font-size: 13px; font-weight: 600; color: #FFFFFF; }
 
-                                Text {
-                                    text: "Select a transcription model or download additional models. Different models offer varying levels of accuracy and speed. The list is filtered for your hardware — search or filter by language anytime.";
-                                    font-size: 12px;
-                                    color: #9A9A9A;
-                                    wrap: word-wrap;
+                                LineEdit {
+                                    height: 36px;
+                                    text: root.catalog-search;
+                                    placeholder-text: "Search models…";
+                                    edited(t) => { root.set-catalog-search(t); }
                                 }
 
-                                // ── Dynamic hardware-aware catalog (image-inspired) ──
-                                // Search + language filter row
-                                HorizontalLayout {
-                                    spacing: 10px;
-                                    LineEdit {
-                                        height: 40px;
-                                        text: root.catalog-search;
-                                        placeholder-text: "Search models by name…";
-                                        edited(t) => { root.set-catalog-search(t); }
-                                    }
-                                    ComboBox {
-                                        height: 40px;
-                                        model: root.catalog-langs;
-                                        current-index: root.catalog-lang-idx;
-                                        selected(v) => { root.set-catalog-lang-filter(v); }
-                                    }
-                                }
-
-                                // Recommendation banner (smart algorithm)
-                                if root.recommend-name != "": Rectangle {
-                                    background: #1A1A1A;
-                                    border-radius: 10px;
-                                    border-width: 1px;
-                                    border-color: #FFFFFF;
-                                    VerticalLayout {
-                                        padding: 12px;
-                                        spacing: 6px;
-                                        HorizontalLayout {
-                                            spacing: 8px;
-                                            Text { text: "Recommended:"; font-size: 12px; font-weight: 700; color: #FFFFFF; vertical-alignment: center; }
-                                            Text { text: root.recommend-name; font-size: 13px; font-weight: 700; color: #FFFFFF; vertical-alignment: center; }
-                                            Rectangle {
-                                                width: 110px; height: 24px; border-radius: 12px; background: #FFFFFF;
-                                                Text { text: "Use it"; font-size: 11px; font-weight: 700; color: #000000; horizontal-alignment: center; vertical-alignment: center; }
-                                                TouchArea {
-                                                    x: 0px;
-                                                    y: 0px;
-                                                    width: parent.width;
-                                                    height: parent.height;
-                                                    clicked => { root.use-recommended-model(); }
-                                                    mouse-cursor: pointer;
-                                                }
-                                            }
-                                        }
-                                        Text { text: root.recommend-reason; font-size: 11px; color: #B0B0B0; wrap: word-wrap; }
-                                        Text { text: root.hardware-info; font-size: 11px; color: #9A9A9A; wrap: word-wrap; }
-                                    }
-                                }
-
-                                Text { text: "Downloaded Models"; font-size: 13px; font-weight: 700; color: #FFFFFF; }
-                                for card in root.catalog: Rectangle {
-                                    height: card.installed ? 96px : 0px;
-                                    visible: card.installed;
-                                    border-radius: 10px;
-                                    background: card.is-active ? #1A1A1A : #1A1A1A;
+                                for card in root.catalog : Rectangle {
+                                    visible: card.visible;
+                                    height: card.visible ? 66px : 0px;
+                                    border-radius: 8px;
+                                    background: #141414;
                                     border-width: 1px;
                                     border-color: card.is-active ? #FFFFFF : #262626;
-                                    // Card tap = select model. Declared FIRST so it
-                                    // stays beneath the Delete button above.
-                                    TouchArea {
-                                        x: 0px;
-                                        y: 0px;
-                                        width: parent.width;
-                                        height: parent.height;
-                                        clicked => { root.select-catalog-model(card.index); }
-                                        mouse-cursor: pointer;
-                                    }
-                                    VerticalLayout {
-                                        padding: 12px;
-                                        spacing: 4px;
-                                        HorizontalLayout {
-                                            spacing: 8px;
-                                            alignment: space-between;
-                                            HorizontalLayout {
-                                                spacing: 8px;
-                                                Text { text: card.name; font-size: 13px; font-weight: 700; color: #FFFFFF; vertical-alignment: center; }
-                                                if card.badge != "": Rectangle {
-                                                    width: 96px; height: 22px; border-radius: 11px;
-                                                    background: card.badge == "Legacy" ? #262626 : #FFFFFF;
-                                                    Text { text: card.badge; font-size: 11px; font-weight: 700; color: #000000; horizontal-alignment: center; vertical-alignment: center; }
-                                                }
-                                            }
-                                            HorizontalLayout {
-                                                spacing: 12px;
-                                                VerticalLayout {
-                                                    spacing: 2px;
-                                                    alignment: center;
-                                                    Text { text: "accuracy"; font-size: 10px; color: #9A9A9A; }
-                                                    Rectangle {
-                                                        width: 90px; height: 6px; border-radius: 3px; background: #262626;
-                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.accuracy / 100; border-radius: 3px; background: #FFFFFF; }
-                                                    }
-                                                }
-                                                VerticalLayout {
-                                                    spacing: 2px;
-                                                    alignment: center;
-                                                    Text { text: "speed"; font-size: 10px; color: #9A9A9A; }
-                                                    Rectangle {
-                                                        width: 90px; height: 6px; border-radius: 3px; background: #262626;
-                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.speed / 100; border-radius: 3px; background: #FFFFFF; }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Text { text: card.blurb; font-size: 12px; color: #C9C9C9; }
-                                        HorizontalLayout {
-                                            alignment: space-between;
-                                            Text { text: card.langs; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
-                                            // Explicit-size delete button: guaranteed hit area.
-                                            Rectangle {
-                                                width: 150px;
-                                                height: 26px;
-                                                border-radius: 6px;
-                                                background: del_hover.has-hover ? #1A1A1A : transparent;
-                                                HorizontalLayout {
-                                                    padding-left: 8px;
-                                                    padding-right: 8px;
-                                                    spacing: 10px;
-                                                    alignment: end;
-                                                    Text { text: card.size; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
-                                                    Text { text: "Delete"; font-size: 11px; font-weight: 700; color: #FFFFFF; vertical-alignment: center; }
-                                                }
-                                                del_hover := TouchArea {
-                                                    x: 0px;
-                                                    y: 0px;
-                                                    width: parent.width;
-                                                    height: parent.height;
-                                                    clicked => { root.uninstall-catalog-model(card.index); }
-                                                    mouse-cursor: pointer;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Text { text: "Available to Download"; font-size: 13px; font-weight: 700; color: #FFFFFF; }
-                                for card in root.catalog: Rectangle {
-                                    height: !card.installed ? 96px : 0px;
-                                    visible: !card.installed;
-                                    border-radius: 10px;
-                                    background: #1A1A1A;
-                                    border-width: 1px;
-                                    border-color: #262626;
-                                    VerticalLayout {
-                                        padding: 12px;
-                                        spacing: 4px;
-                                        HorizontalLayout {
-                                            spacing: 8px;
-                                            alignment: space-between;
-                                            HorizontalLayout {
-                                                spacing: 8px;
-                                                Text { text: card.name; font-size: 13px; font-weight: 700; color: #FFFFFF; vertical-alignment: center; }
-                                                if card.badge != "": Rectangle {
-                                                    width: 110px; height: 22px; border-radius: 11px; background: #FFFFFF;
-                                                    Text { text: card.badge; font-size: 11px; font-weight: 700; color: #000000; horizontal-alignment: center; vertical-alignment: center; }
-                                                }
-                                            }
-                                            HorizontalLayout {
-                                                spacing: 12px;
-                                                VerticalLayout {
-                                                    spacing: 2px;
-                                                    alignment: center;
-                                                    Text { text: "accuracy"; font-size: 10px; color: #9A9A9A; }
-                                                    Rectangle {
-                                                        width: 90px; height: 6px; border-radius: 3px; background: #262626;
-                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.accuracy / 100; border-radius: 3px; background: #FFFFFF; }
-                                                    }
-                                                }
-                                                VerticalLayout {
-                                                    spacing: 2px;
-                                                    alignment: center;
-                                                    Text { text: "speed"; font-size: 10px; color: #9A9A9A; }
-                                                    Rectangle {
-                                                        width: 90px; height: 6px; border-radius: 3px; background: #262626;
-                                                        Rectangle { x: 0px; y: 0px; height: 6px; width: 90px * card.speed / 100; border-radius: 3px; background: #FFFFFF; }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Text { text: card.blurb; font-size: 12px; color: #C9C9C9; }
-                                        HorizontalLayout {
-                                            alignment: space-between;
-                                            Text { text: card.langs; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
-                                            // Explicit-size download button: guaranteed hit area
-                                            // (bare TouchAreas in layouts can collapse to 0×0).
-                                            dl_btn := Rectangle {
-                                                width: 170px;
-                                                height: 26px;
-                                                border-radius: 6px;
-                                                background: dl_hover.has-hover ? #222222 : transparent;
-                                                HorizontalLayout {
-                                                    padding-left: 8px;
-                                                    padding-right: 8px;
-                                                    spacing: 6px;
-                                                    alignment: end;
-                                                    Text { text: "⬇"; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
-                                                    Text { text: card.size; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
-                                                    if card.downloading: Text {
-                                                        text: root.download-progress + "%";
-                                                        font-size: 11px;
-                                                        font-weight: 700;
-                                                        color: #FFFFFF;
-                                                        vertical-alignment: center;
-                                                    }
-                                                }
-                                                dl_hover := TouchArea {
-                                                    x: 0px;
-                                                    y: 0px;
-                                                    width: parent.width;
-                                                    height: parent.height;
-                                                    clicked => { if (!card.downloading) { root.download-catalog-model(card.index); } }
-                                                    mouse-cursor: pointer;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
 
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 12px;
+
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            alignment: center;
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                Text { text: card.name; font-size: 13px; font-weight: 600; color: #FFFFFF; vertical-alignment: center; }
+                                                if card.badge != "" : Rectangle {
+                                                    width: 76px; height: 18px; border-radius: 9px; background: #FFFFFF;
+                                                    Text { text: card.badge; font-size: 10px; font-weight: 700; color: #000000; horizontal-alignment: center; vertical-alignment: center; }
+                                                }
+                                            }
+                                            Text { text: card.langs + " · " + card.size; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        // One primary action per card:
+                                        // installed → Select · missing → Download
+                                        if card.installed : Rectangle {
+                                            width: 96px;
+                                            height: 30px;
+                                            border-radius: 15px;
+                                            background: select_touch.has-hover ? #2A2A2A : transparent;
+                                            border-width: 1px;
+                                            border-color: #404040;
+                                            animate background { duration: 130ms; easing: ease-out; }
+                                            Text {
+                                                text: card.is-active ? "Active" : "Select";
+                                                font-size: 11px;
+                                                font-weight: 700;
+                                                color: #FFFFFF;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            select_touch := TouchArea {
+                                                clicked => { root.select-catalog-model(card.index); }
+                                                mouse-cursor: (card.is-active ? default : pointer);
+                                            }
+                                        }
+                                        if !card.installed : Rectangle {
+                                            width: 96px;
+                                            height: 30px;
+                                            border-radius: 15px;
+                                            background: dl_touch.has-hover ? #E4E4E4 : #FFFFFF;
+                                            animate background { duration: 130ms; easing: ease-out; }
+                                            Text {
+                                                text: card.downloading ? (root.download-progress + "%") : "Download";
+                                                font-size: 11px;
+                                                font-weight: 700;
+                                                color: #000000;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            dl_touch := TouchArea {
+                                                clicked => { if (!card.downloading) { root.download-catalog-model(card.index); } }
+                                                mouse-cursor: pointer;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

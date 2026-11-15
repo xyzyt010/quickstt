@@ -68,9 +68,8 @@ pub struct AppState {
     pub recommended_model: Option<usize>,
     pub recommend_reason: String,
     pub hardware_summary: String,
-    /// Dashboard catalog UI state (search + language filter, Slint-driven).
+    /// Dashboard catalog UI state (search).
     pub catalog_search: String,
-    pub catalog_lang_filter: String,
     /// True once the segmenter VAD opened at least once in the current turn
     /// (set on SpeechStarted/SpeechContinues, reset on Start/StopListening).
     /// The UI ghost-turn auto-cancel reads this: same VAD that decides what
@@ -129,7 +128,6 @@ impl AppState {
             hardware_summary: String::new(),
             platform_hidden_models: Vec::new(),
             catalog_search: String::new(),
-            catalog_lang_filter: "All Languages".to_string(),
             session_saw_speech: false,
             last_ghost_text: String::new(),
             ghost_run: 0,
@@ -257,9 +255,9 @@ fn model_name_matches(configured: &str, catalog_name: &str) -> bool {    let con
 }
 
 /// Recompute the smart recommendation from the live entries + fresh hardware
-/// probe. Called on startup and whenever the language changes (CPU scoring
-/// carries a multilingual bonus).
-fn refresh_recommendation(s: &mut AppState) {
+/// probe. Called on startup and whenever inputs change (language, model
+/// selection, or an install completing).
+pub(crate) fn refresh_recommendation(s: &mut AppState) {
     let hw = crate::engine::HardwareInfo::detect();
     let descs: Vec<catalog::ModelDescriptor> = s
         .model_entries
@@ -1430,6 +1428,9 @@ impl AppOrchestrator {
                             warn!("Failed to persist model selection: {}", e);
                         }
                         s.status_message = format!("Selected: {}", name);
+                        // Re-score NOW so the recommended badge/button flips
+                        // without waiting for 20 Hz sync.
+                        refresh_recommendation(&mut s);
                         info!("Model selected: {} ({})", name, s.selected_language.clone());
                         // Model switch strands the previous worker: the idle
                         // timer only fires after a turn ends, so without this
@@ -1542,6 +1543,7 @@ impl AppOrchestrator {
                             // Persist selection so the widget uses it once ready.
                             if let Ok(mut s) = state.lock() {
                                 s.selected_model = idx.min(s.model_entries.len().saturating_sub(1));
+                                refresh_recommendation(&mut s);
                             }
                             info!("Downloading model: {}", d.name);
                             crate::models::downloader::spawn_download(d, state.clone());

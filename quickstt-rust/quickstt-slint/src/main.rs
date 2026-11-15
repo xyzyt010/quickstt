@@ -6548,33 +6548,6 @@ fn dock_hop(
                         if d.get_selected_language() != lang_idx {
                             d.set_selected_language(lang_idx);
                         }
-                        // Single-language models hide the dropdown; Rust says
-                        // why, so the row never looks broken.
-                        let note = if e.languages.len() == 1 {
-                            format!("{} only — this model has no other language", e.languages[0])
-                        } else {
-                            String::new()
-                        };
-                        if d.get_language_note().as_str() != note {
-                            d.set_language_note(note.into());
-                        }
-                    }
-                    let installed = s.model_entries.iter().filter(|e| e.installed).count();
-                    let mut info = format!(
-                        "{} widget models, {} installed — transcription language follows the selected model.",
-                        s.model_entries.len(),
-                        installed
-                    );
-                    // Platform gaps are stated, not silently dropped: the list
-                    // is short by design on Linux (no sherpa-onnx runtime).
-                    if !s.platform_hidden_models.is_empty() {
-                        info.push_str(&format!(
-                            " Hidden on this OS: {}.",
-                            s.platform_hidden_models.join(", ")
-                        ));
-                    }
-                    if d.get_models_info().as_str() != info {
-                        d.set_models_info(info.into());
                     }
                     // ── hardware-aware catalog cards (image-inspired) ──
                     // Badges: Active (selected) > Recommended > none. Search +
@@ -6582,27 +6555,24 @@ fn dock_hop(
                     {
                         use crate::ModelCard;
                         let q = s.catalog_search.trim().to_lowercase();
-                        let lf = s.catalog_lang_filter.clone();
                         let mut cards: Vec<ModelCard> = Vec::new();
                         for (idx, e) in s.model_entries.iter().enumerate() {
-                            if !q.is_empty()
-                                && !e.name.to_lowercase().contains(&q)
-                                && !e.blurb.to_lowercase().contains(&q)
-                            {
-                                continue;
-                            }
-                            if lf != "All Languages" && !e.languages.iter().any(|l| l == &lf) {
-                                continue;
-                            }
+                            // Always build the row — Slint hides/shows via `visible`,
+                            // so the Diff below stays cheap and stable.
+                            let matches = q.is_empty()
+                                || e.name.to_lowercase().contains(&q)
+                                || e.blurb.to_lowercase().contains(&q);
                             let streaming =
                                 quickstt_core::models::catalog::is_streaming_model(&e.name);
-                            let langs_label = if e.languages.len() == 1
-                                && e.languages[0] == "English"
-                            {
-                                if streaming {
+                            let langs_label = if e.languages.len() == 1 {
+                                if e.languages[0] == "English" && streaming {
                                     "English only • Streaming".to_string()
-                                } else {
+                                } else if e.languages[0] == "English" {
                                     "English only".to_string()
+                                } else if e.languages[0] == "Auto" {
+                                    "Auto-detect languages".to_string()
+                                } else {
+                                    format!("{} only", e.languages[0])
                                 }
                             } else {
                                 let n = e
@@ -6611,7 +6581,8 @@ fn dock_hop(
                                     .filter(|l| *l != "Auto")
                                     .count()
                                     .max(1);
-                                let mut lbl = format!("{} languages", n);
+                                let mut lbl =
+                                    if n == 1 { "1 language".to_string() } else { format!("{} languages", n) };
                                 if e.engine_family == "canary" {
                                     lbl.push_str(" • Translate");
                                 } else if streaming {
@@ -6621,13 +6592,15 @@ fn dock_hop(
                             };
                             let size_label = if e.size_mb >= 1024 {
                                 format!("{:.1} GB", e.size_mb as f32 / 1024.0)
-                            } else {
+                            } else if e.size_mb > 0 {
                                 format!("{} MB", e.size_mb)
+                            } else {
+                                "—".to_string()
                             };
                             let is_active = idx == s.selected_model;
                             let is_rec = Some(idx) == s.recommended_model && !is_active;
                             let badge = if is_active {
-                                "✓ Active"
+                                "Active"
                             } else if is_rec {
                                 "Recommended"
                             } else {
@@ -6645,6 +6618,7 @@ fn dock_hop(
                                 size: size_label.into(),
                                 installed: e.installed,
                                 is_active,
+                                visible: matches,
                                 index: idx as i32,
                                 downloading,
                             });
@@ -6658,6 +6632,7 @@ fn dock_hop(
                                         || cur.badge != c.badge
                                         || cur.installed != c.installed
                                         || cur.is_active != c.is_active
+                                        || cur.visible != c.visible
                                         || cur.index != c.index
                                         || cur.downloading != c.downloading
                                     {
@@ -6673,51 +6648,38 @@ fn dock_hop(
                         if !same {
                             d.set_catalog(ModelRc::new(VecModel::from_slice(&cards)));
                         }
-                        // Language filter options: union of entry languages.
-                        let mut lang_opts = vec!["All Languages".to_string()];
-                        for e in s.model_entries.iter() {
-                            for l in e.languages.iter() {
-                                if l != "Auto" && !lang_opts.contains(l) {
-                                    lang_opts.push(l.clone());
-                                }
-                            }
-                        }
-                        if cur_str(&d.get_catalog_langs()) != lang_opts {
-                            d.set_catalog_langs(rc_str(&lang_opts));
-                        }
-                        let lang_idx = lang_opts
-                            .iter()
-                            .position(|l| l == &s.catalog_lang_filter)
-                            .unwrap_or(0)
-                            as i32;
-                        if d.get_catalog_lang_idx() != lang_idx {
-                            d.set_catalog_lang_idx(lang_idx);
-                        }
                         if d.get_catalog_search().as_str() != s.catalog_search.as_str() {
                             d.set_catalog_search(s.catalog_search.clone().into());
-                        }
-                        let rec_name = s
-                            .recommended_model
-                            .and_then(|i| s.model_entries.get(i))
-                            .map(|e| e.name.clone())
-                            .unwrap_or_default();
-                        if d.get_recommend_name().as_str() != rec_name {
-                            d.set_recommend_name(rec_name.into());
-                        }
-                        if d.get_recommend_reason().as_str() != s.recommend_reason.as_str() {
-                            d.set_recommend_reason(s.recommend_reason.clone().into());
                         }
                         let prio = s.settings.model_priority.min(2) as i32;
                         if d.get_model_priority() != prio {
                             d.set_model_priority(prio);
                         }
-                        let hw_line = if s.hardware_summary.is_empty() {
-                            String::new()
-                        } else {
-                            format!("Acceleration: {}", s.hardware_summary)
-                        };
-                        if d.get_hardware_info().as_str() != hw_line {
-                            d.set_hardware_info(hw_line.into());
+                        // Recommendation banner: one pre-resolved hero — name,
+                        // install-state, human size — so the UI needs zero
+                        // ownership logic of its own.
+                        let (rec_name, rec_installed, rec_size) = s
+                            .recommended_model
+                            .and_then(|i| s.model_entries.get(i))
+                            .map(|e| {
+                                let size = if e.size_mb >= 1024 {
+                                    format!("{:.1} GB", e.size_mb as f32 / 1024.0)
+                                } else if e.size_mb > 0 {
+                                    format!("{} MB", e.size_mb)
+                                } else {
+                                    String::new()
+                                };
+                                (e.name.clone(), e.installed, size)
+                            })
+                            .unwrap_or_default();
+                        if d.get_recommend_model().as_str() != rec_name {
+                            d.set_recommend_model(rec_name.into());
+                        }
+                        if d.get_recommend_installed() != rec_installed {
+                            d.set_recommend_installed(rec_installed);
+                        }
+                        if d.get_recommend_size().as_str() != rec_size {
+                            d.set_recommend_size(rec_size.into());
                         }
                     }
                     if d.get_wakeword_enabled() != s.wakeword_active {
@@ -8304,11 +8266,6 @@ fn dock_hop(
         });
     }
     {
-        dashboard.on_uninstall_catalog_model(move |_idx: i32| {
-            log_line("dashboard: uninstall model requested");
-        });
-    }
-    {
         let tx = tx_cmd.clone();
         dashboard.on_select_catalog_model(move |idx: i32| {
             if idx >= 0 {
@@ -8331,17 +8288,39 @@ fn dock_hop(
     }
     {
         let state = state.clone();
-        dashboard.on_set_catalog_search(move |t: slint::SharedString| {
-            if let Ok(mut s) = state.lock() {
-                s.catalog_search = t.to_string();
+        let tx = tx_cmd.clone();
+        dashboard.on_download_recommended_model(move || {
+            let idx = state
+                .lock()
+                .map(|s| {
+                    s.recommended_model.filter(|&i| {
+                        s.model_entries.get(i).is_some_and(|e| !e.installed)
+                    })
+                })
+                .unwrap_or(None);
+            match idx {
+                Some(i) => {
+                    let _ = tx.try_send(OrchestratorCommand::DownloadModel(i));
+                    log_line(&format!("dashboard: download recommended model {i}"));
+                }
+                None => {
+                    // Already local (or nothing to download): act like Use it.
+                    let idx = state.lock().map(|s| s.recommended_model).unwrap_or(None);
+                    if let Some(i) = idx {
+                        let _ = tx.try_send(OrchestratorCommand::SelectModel(i));
+                        log_line(&format!("dashboard: recommended model already local — selected {i}"));
+                    } else {
+                        log_line("dashboard: no recommended model");
+                    }
+                }
             }
         });
     }
     {
         let state = state.clone();
-        dashboard.on_set_catalog_lang_filter(move |v: slint::SharedString| {
+        dashboard.on_set_catalog_search(move |t: slint::SharedString| {
             if let Ok(mut s) = state.lock() {
-                s.catalog_lang_filter = v.to_string();
+                s.catalog_search = t.to_string();
             }
         });
     }
