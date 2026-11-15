@@ -1,4 +1,4 @@
-﻿; ═══════════════════════════════════════════════════════════════════════════
+; ═══════════════════════════════════════════════════════════════════════════
 ;  QuickSTT — Windows installer (Inno Setup 6)
 ;
 ;  Build it with the sibling Build-Installer.ps1 (it reads the version from
@@ -17,13 +17,13 @@
 
 #define MyAppName "QuickSTT"
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.0-alpha.29"
+  #define MyAppVersion "2.0.0-alpha.30"
 #endif
 ; The Windows file-version resource needs four numeric fields; the app's own
 ; version carries a pre-release label ("2.0.0-alpha.29"). Build-Installer.ps1
-; derives the numeric form and passes it in (/DMyAppVersionNumeric=2.0.0.29).
+; derives the numeric form and passes it in (/DMyAppVersionNumeric=2.0.0.30).
 #ifndef MyAppVersionNumeric
-  #define MyAppVersionNumeric "2.0.0.29"
+  #define MyAppVersionNumeric "2.0.0.30"
 #endif
 #define MyAppNameVersion MyAppName + " " + MyAppVersion
 #define MyAppPublisher "QuickSTT"
@@ -119,6 +119,7 @@ Source: "..\..\tools\canary\*"; DestDir: "{app}\tools\canary"; Flags: ignorevers
 ; Both llama-cli.exe and llama-mtmd*.dll / ggml-cpu-*.dll kernels ship together —
 ; llama-cli loads the encoder and kernels at startup from this folder.
 Source: "..\..\tools\lfm3_audio\*"; DestDir: "{app}\tools\lfm3_audio"; Excludes: "*.a,*.bak,*.def,*.py"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: engines
+Source: "..\..\tools\whisper_cpp\*"; DestDir: "{app}\tools\whisper_cpp"; Excludes: "*.obj,*.pdb,*.lib"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: engines
 
 ; ── GPU backends (optional): Vulkan (llama.cpp) + DirectML (ONNX Runtime) ──
 ; Same destination paths as the core tools, so selecting the component puts

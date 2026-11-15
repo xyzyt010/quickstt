@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.0.0-alpha.30] — 2026-11-15
+
+Release pipeline: the GitHub Release now actually ships a working Windows
+portable alongside the Linux builds, and both deliverables bundle the full
+STT engine set (Whisper, Parakeet, Nemotron, LFM3-Audio).
+
+### Fixed
+- **Windows portable job was a no-op for years**: the job built the Qt widget app
+  (which silently failed, `continue-on-error`), produced no QuickSTT
+  distribution, and uploaded an empty `windows-dist` artifact while the
+  release notes pointed at a non-existent `QuickSTT_Portable.exe`. The job now
+  stages a **real, self-contained portable payload** from the Slint build:
+  app exe, fonts, icons, LICENSE, wakeword models, Parakeet engine, Nemotron
+  transcribe-cli (the x64 binary tracked in-tree), whisper.cpp built from
+  source on the runner, LFM3-Audio pinned to llama.cpp b11960, and the
+  Photon/Canary/disfluency Python workers — then zips it as
+  `quickstt-desktop-v<TAG>-win64-portable.zip`.
+- Engine resolution on fresh machines finds everything next to the exe on both
+  deliverables.
+- The Windows installer now also ships `whisper-cli.exe` (same engine, previously
+  missing — Whisper models could not transcribe on a fresh install).
+- Release notes and artifact collection reference the real portable asset name;
+  Windows Qt build steps are gone (they nothing to the release).
+- Repo hygiene: local CI-staged scratch (`QuickSTT-Portable/`, portable zips,
+  `tools/whisper_cpp/`) is git-ignored.
+
 ## [2.0.0-alpha.29] — 2026-11-15
 
 UI pass: Compact side rail icons are properly centered, Speech Models page is

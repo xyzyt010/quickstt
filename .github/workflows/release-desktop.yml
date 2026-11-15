@@ -185,23 +185,14 @@ jobs:
             quickstt-rust/dist/SHA256SUMS
 
   build-windows:
-    name: Windows Portable (Qt + Rust)
+    name: Windows Portable (Rust Slint app)
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: quickstt-rust
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.7.3'
-          host: windows
-          target: desktop
-          arch: win64_msvc2019_64
-          modules: 'qtmultimedia'
       - name: Stage LFM3-Audio runtime (llama.cpp b11960 win-cpu-x64)
         shell: pwsh
         # The portable exe bundles the official llama.cpp CPU binary: the app
@@ -220,45 +211,129 @@ jobs:
           $copied = Get-ChildItem $extract -Recurse -File | Where-Object { $_.Extension -eq '.dll' -or $_.Name -ieq 'llama-cli.exe' }
           foreach ($f in $copied) { Copy-Item $f.FullName (Join-Path 'tools\lfm3_audio' $f.Name) -Force }
           Write-Host "staged $($copied.Count) files into tools\lfm3_audio"
+      - name: Build whisper.cpp (Whisper GGML engine)
+        shell: pwsh
+        # The Windows job built nothing usable for years — the Qt/MinGW toolchain
+        # was wrong for ggml and the portable came out empty. whisper.cpp is a
+        # clean MSVC build (no -march flags), static ggml, CPU-only.
+        run: |
+          $wcpp = Join-Path $env:RUNNER_TEMP 'whisper-cpp'
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp $wcpp
+          if ($LASTEXITCODE -ne 0) { throw "whisper.cpp clone failed" }
+          cmake -S $wcpp -B "$wcpp\build" -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF
+          if ($LASTEXITCODE -ne 0) { throw "whisper.cpp configure failed" }
+          cmake --build "$wcpp\build" --config Release -j $env:NUMBER_OF_PROCESSORS --target whisper-cli
+          if ($LASTEXITCODE -ne 0) { throw "whisper.cpp build failed" }
+          New-Item -ItemType Directory -Force -Path 'tools\whisper_cpp' | Out-Null
+          Copy-Item "$wcpp\build\bin\Release\whisper-cli.exe" 'tools\whisper_cpp\whisper-cli.exe' -Force
+          Write-Host 'whisper-cli staged'
       - name: Cargo build (Rust GUI)
         working-directory: quickstt-rust
         run: cargo build -p quickstt-slint --release
-      - name: CMake Configure
+      - name: Stage Windows portable (Rust Slint app)
         shell: pwsh
+        # The Windows Portable job previously only produced an empty artifact:
+        # the Qt/C++ "Portable" build silently failed (it has not shipped a
+        # portable in any recent release) and these uploads just warned.
+        # Stage the same payload the installer ships as ONE self-contained
+        # directory so "Windows portable" download products actually run.
         run: |
-          cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release || echo "Qt not available, skipping"
-          cmake --build build --target QuickSTT_App -j 4 || echo "Qt build skipped"
-          cmake --build build --target stt_service_native -j 4 || echo "stt_service build skipped"
-          Get-ChildItem build\*.exe -ErrorAction SilentlyContinue | Select-Object Name,Length
-          Get-ChildItem QuickSTT_App\*.exe -ErrorAction SilentlyContinue | Select-Object Name,Length
-          exit 0
-      - name: Build Portable
+          $src = 'QuickSTT-Portable'
+          if (Test-Path $src) { Remove-Item $src -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $src | Out-Null
+          $root = 'quickstt-rust'
+          $exe = Join-Path $root 'target\release\quickstt-slint.exe'
+          Copy-Item $exe (Join-Path $src 'QuickSTT.exe')
+          if (Test-Path 'wakeword_models') {
+            Copy-Item 'wakeword_models' (Join-Path $src 'wakeword_models') -Recurse
+          }
+          Copy-Item 'quickstt-rust\assets\Inter-VariableFont.ttf' (Join-Path $src 'Inter-VariableFont.ttf')
+          Copy-Item 'quickstt-rust\assets\MaterialSymbolsOutlined.ttf' (Join-Path $src 'MaterialSymbolsOutlined.ttf')
+          Copy-Item 'quickstt-rust\assets\Inter-VariableFont.ttf.license' (Join-Path $src 'Inter-VariableFont.ttf.license')
+          Copy-Item 'quickstt-rust\assets\icon_app.png' (Join-Path $src 'icon_app.png')
+          Copy-Item 'icon_app.ico' (Join-Path $src 'icon_app.ico')
+          Copy-Item 'LICENSE' (Join-Path $src 'LICENSE.txt')
+          # ── STT engines (everything staged earlier in this job lands in
+          # repo-root tools/). Absent engines are skipped with a note; the one
+          # engine whose absence would brick fresh installs (whisper) is
+          # verified explicitly below.
+          function Copy-Engine {
+            param([string] $path)
+            if (Test-Path $path) {
+              $leaf = Split-Path $path -Leaf
+              Copy-Item $path (Join-Path $src "tools\$leaf") -Recurse -Force
+              "staged $leaf"
+            } else { "skip $path (not staged on this runner)" }
+          }
+          New-Item -ItemType Directory -Force -Path (Join-Path $src 'tools') | Out-Null
+          foreach ($d in @('tools\whisper_cpp', 'tools\lfm3_audio')) { Copy-Engine $d }
+          # Parakeet engine ships in git (repo-root tools/parakeet); exclude
+          # DirectML.dll like the installer does (GPU-only extra).
+          if (Test-Path 'tools\parakeet') {
+            $dst = Join-Path $src 'tools\parakeet'
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            foreach ($f in Get-ChildItem 'tools\parakeet' -Recurse -File) {
+              if ($f.Name -ieq 'DirectML.dll') { continue }
+              Copy-Item $f.FullName (Join-Path $dst $f.Name) -Force
+            }
+            Write-Host 'staged parakeet (DirectML excluded)'
+          } else { Write-Host 'skip parakeet' }
+          # Nemotron transcribe-cli ships in git (quickstt-rust/tools/nemotron) —
+          # prefer it; the repo-root runtime (untracked, dev machine only) wins
+          # if present.
+          $nemotronDst = Join-Path $src 'tools\nemotron'
+          New-Item -ItemType Directory -Force -Path $nemotronDst | Out-Null
+          if (Test-Path 'tools\nemotron\transcribe-cli.exe') {
+            Get-ChildItem 'tools\nemotron' -Recurse -File | ForEach-Object {
+              if ($_.Name -match '^(ggml-vulkan|.*\.bak|.*\.def|.*\.py|libtranscribe\.a|DirectML)') { return }
+              Copy-Item $_.FullName (Join-Path $nemotronDst $_.Name) -Force
+            }
+            Write-Host 'staged repo-root nemotron runtime'
+          } else {
+            Copy-Item 'quickstt-rust\tools\nemotron\transcribe-cli.exe' (Join-Path $nemotronDst 'transcribe-cli.exe') -Force
+            Write-Host 'staged tracked nemotron transcribe-cli.exe'
+          }
+          # Python workers (Photon / Canary / disfluency) ship in git.
+          foreach ($d in @('photon', 'canary', 'disfluency')) {
+            $srcDir = "quickstt-rust\tools\$d"
+            if (-not (Test-Path $srcDir)) { Write-Host "skip $d"; continue }
+            $dst = Join-Path (Join-Path $src 'tools') $d
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item (Join-Path $srcDir '*.py') $dst -Force
+            Write-Host "staged $d"
+          }
+          # A README the user always sees after unzipping.
+          $readme = "QuickSTT portable`n=================`n`nDouble-click QuickSTT.exe to run it. Everything needed ships next to the exe;`nmodels download on demand (Speech Models tab).`n`nBundled engines: Whisper (whisper-cli), Parakeet (parakeet_engine), Nemotron`n(transcribe-cli), LFM3-Audio (llama-cli, via the llama.cpp project).`nGPU acceleration is not bundled — CPU-only build.`n`nThe tray icon right-click is the same menu the app has always had.`n"
+          Set-Content -Path (Join-Path $src 'README.txt') -Value $readme -Encoding UTF8
+          if (-not (Test-Path (Join-Path $src 'QuickSTT.exe'))) { throw 'portable stage is missing QuickSTT.exe' }
+          if (-not (Test-Path (Join-Path $src 'tools\whisper_cpp\whisper-cli.exe'))) {
+            throw 'portable stage is missing the whisper.cpp engine staged earlier in this job'
+          }
+          Write-Host "portable staged at $src"
+          Get-ChildItem $src -Recurse -File | Measure-Object Length -Sum | ForEach-Object { "total MB: {0:N1}" -f ($_.Sum / 1MB) }
+          Get-ChildItem $src -Recurse | Select-Object FullName | ForEach-Object { $_.FullName }
+      - name: Zip Windows portable
         shell: pwsh
-        if: always()
-        run: |
-          if (Test-Path .\BuildApp.bat) { .\BuildApp.bat } else { echo "BuildApp.bat not found" }
-          if (Test-Path QuickSTT_Portable.exe) { dir QuickSTT_Portable.exe }
-          if (Test-Path QuickSTT_DirectDownload\SHA256SUMS.txt) { Get-Content QuickSTT_DirectDownload\SHA256SUMS.txt | Select-Object -First 10 }
+        run: Compress-Archive -Path 'QuickSTT-Portable' -DestinationPath "quickstt-windows-portable.zip" -Force
+      - name: Rename portable zip per tag
+        shell: pwsh
+        run: Copy-Item "quickstt-windows-portable.zip" "quickstt-${{ github.ref_name }}-win64-portable.zip" -Force
       - name: Upload LFM3-Audio runtime artifact
         if: always()
         # The 24 MB staged runtime, for the maintainer's local installer build
-        # (the portable exe already carries it via BuildApp.bat).
+        # (the installer build stages it separately, not the portable zip).
         uses: actions/upload-artifact@v4
         with:
           name: lfm3-audio-runtime
           path: tools/lfm3_audio
-      - name: Upload Windows artifacts
+      - name: Upload Windows portable artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-dist
-          path: |
-            QuickSTT_Portable.exe
-            QuickSTT_DirectDownload/SHA256SUMS.txt
-            QuickSTT_DirectDownload/release_manifest.json
-            build/stt_service.exe
-            QuickSTT_App/QuickSTT_App.exe
-            quickstt-rust/target/release/QuickSTT.exe
+          # The setup exe is built locally (untracked); the portable zip is
+          # what CI publishes into the release.
+          path: quickstt-${{ github.ref_name }}-win64-portable.zip
 
   publish-release:
     name: Publish Desktop Release
@@ -273,7 +348,7 @@ jobs:
       - name: Collect
         run: |
           mkdir -p release
-          find artifacts -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.tar.gz" -o -name "SHA256SUMS*" -o -name "QuickSTT_Portable.exe" -o -name "QuickSTT_DirectDownload/SHA256SUMS.txt" -o -name "QuickSTT.exe" -o -name "QuickSTT_App.exe" \) -exec cp -f {} release/ \;
+          find artifacts -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.tar.gz" -o -name "*-win64-portable.zip" -o -name "QuickSTT-Setup-*.exe" -o -name "SHA256SUMS*" \) -exec cp -f {} release/ \;
           if [ -f release/SHA256SUMS.txt ]; then
             mv -f release/SHA256SUMS.txt release/SHA256SUMS_PORTABLE_WIN.txt
           fi
@@ -287,10 +362,14 @@ jobs:
           cat > /tmp/notes.md <<'NOTES'
           ## QuickSTT Desktop __VER__ — Linux · Windows
 
-          Floating offline voice typing pill — wakeword, VAD, tray, global hotkeys, stt_service, Qt widget app.
+          Floating offline voice typing pill — wakeword, VAD, tray, global hotkeys.
 
-          ### Desktop release
-          - Windows: `QuickSTT_Portable.exe` (if attached) — full Qt widget app.
+          ### Desktop release (Rust & Slint)
+          - Windows installer: `QuickSTT-Setup-*.exe` — full install with autostart,
+            tray, wakewords, STT engines, and the intro tour on first launch.
+          - Windows portable: `quickstt-desktop-v__VER__-win64-portable.zip` — unzip
+            and double-click `QuickSTT.exe`. Same self-contained payload as the
+            installer; models download on demand from Settings → Speech Models.
           - Linux: `.deb` (Mint/Ubuntu/Debian) or portable `.tar.gz`.
 
           ### Install — Linux
@@ -305,7 +384,11 @@ jobs:
           mkdir -p ~/quickstt && tar xzf /tmp/quickstt.tar.gz -C ~/quickstt && ~/quickstt/QuickSTT &
           ```
 
-          Windows: download `QuickSTT_Portable.exe` (if attached) — portable, no installer.
+          ### Install — Windows
+          - Install: run `QuickSTT-Setup-*.exe` and follow the wizard (launches the
+            app and shows the intro tour on first launch).
+          - Portable: unzip `quickstt-desktop-v__VER__-win64-portable.zip`,
+            double-click `QuickSTT.exe`.
 
           ### Checksums
           See `SHA256SUMS`.
