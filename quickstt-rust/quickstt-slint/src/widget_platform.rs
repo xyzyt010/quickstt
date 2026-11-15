@@ -1482,12 +1482,19 @@ pub fn ensure_widget_top(window: &slint::Window) {
 /// siblings always win on their own — menus must therefore be raised ABOVE
 /// after the pill's raise to sit above it (last raise wins). Leaves
 /// override-redirect untouched so menus stay managed and focusable.
-#[cfg(not(target_os = "windows"))]
+/// No-op outside Linux (Windows uses the winit TOPMOST order directly).
 pub fn raise_above_all(window: &slint::Window) {
-    let Some(xid) = xid_of(window) else {
-        return;
-    };
-    x11q::raise_above_all(xid);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Some(xid) = xid_of(window) else {
+            return;
+        };
+        x11q::raise_above_all(xid);
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
