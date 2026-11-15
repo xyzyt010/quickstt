@@ -3959,6 +3959,7 @@ fn dock_hop(
                 .set_position(slint::PhysicalPosition { x: nx, y: ny });
             widget_platform::show_widget(t.window());
             widget_platform::restack_topmost(t.window());
+            widget_platform::raise_above_all(t.window());
             t.window().request_redraw();
             *mlock(&menu_open_at) = Some(std::time::Instant::now());
             log_line(&format!("menu shown @ {nx},{ny} size {ww}x{hh}"));
@@ -4027,6 +4028,10 @@ fn dock_hop(
                 .set_position(slint::PhysicalPosition { x: nx, y: ny });
             widget_platform::show_widget(m.window());
             widget_platform::restack_topmost(m.window());
+            // On X11 the pill is override-redirect and wins sibling raises on
+            // its own — raise the menu ABOVE it immediately (the heartbeat
+            // re-asserts this while visible).
+            widget_platform::raise_above_all(m.window());
             m.window().request_redraw();
             *mlock(&opened) = Some(std::time::Instant::now());
             log_line(&format!("pill menu shown @ {nx},{ny}"));
@@ -4300,6 +4305,36 @@ fn dock_hop(
             }
         });
     }
+    // Escape inside the menu — same dismissal path as tapping outside.
+    // (Linux has no GetAsyncKeyState shortcut, so hover-leave is the primary
+    // dismiss there; this is the guaranteed one.)
+    {
+        let pm = pillmenu.as_weak();
+        let fly = flyout.as_weak();
+        let pw = pill.as_weak();
+        let anim = foot_anim.clone();
+        let pin = menu_pin.clone();
+        let ui = flyout_ui.clone();
+        pillmenu.on_close_menu(move || {
+            hide_pill_menus(&pm, &fly);
+            *mlock(&pin) = None;
+            if let Ok(mut u) = ui.lock() {
+                u.mode = SubMode::None;
+                u.rect = None;
+            }
+            if let Some(p) = pw.upgrade() {
+                let (mg0, uo0) = (p.get_mic_grow(), p.get_upper_op());
+                *mlock(&anim) = Some(FootAnim {
+                    t0: std::time::Instant::now(),
+                    dur_ms: 200,
+                    expanding: false,
+                    mg0,
+                    _uo0: uo0,
+                });
+            }
+            log_line("pill menu dismissed (Escape)");
+        });
+    }
     // Pill drag-end: magnetic snap to the CLOSEST station (always — the pill
     // is stationary). A quick left-tap intentionally opens NOTHING (menus
     // belong to right-click only); a mic tap never did anything else.
@@ -4461,10 +4496,10 @@ fn dock_hop(
     let mut last_toppin = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
-    // Same heartbeat for the two app windows winit unsets (dashboard and the
-    // onboarding tour) — they must stay above whatever had focus when the
-    // user asked for them.
-    let mut last_dash_toppin = std::time::Instant::now()
+    // Dashboard throttle for the forced redraw (not a topmost re-pin any more
+    // — the dashboard used to be re-raised every 2s forever, which kept it
+    // always-foreground and fed DWM into rendering it ghosted until hover).
+    let mut last_dash_redraw = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
     let mut last_onb_toppin = std::time::Instant::now()
@@ -4749,6 +4784,20 @@ fn dock_hop(
                 last_xstrip = std::time::Instant::now();
                 widget_platform::strip_chrome(p.window());
                 widget_platform::ensure_widget_top(p.window());
+                // The pill is override-redirect: it wins sibling raises on its
+                // own, and the menus end up UNDER the pill (right-click menu
+                // renders "below the pill"). Re-raise the menus after the
+                // pill so they sit above it. Menus stay managed/focusable.
+                if let Some(m) = pillmenu_w.upgrade() {
+                    if m.window().is_visible() {
+                        widget_platform::raise_above_all(m.window());
+                    }
+                }
+                if let Some(f) = flyout_w.upgrade() {
+                    if f.window().is_visible() {
+                        widget_platform::raise_above_all(f.window());
+                    }
+                }
             }
             // Own-XID census (~5s): learn our pill/menu/dashboard XIDs so
             // focus capture never mistakes us for the user's textbox (the
@@ -4783,16 +4832,20 @@ fn dock_hop(
             // white box if unpainted-opaque. Re-requesting while visible
             // closes that hole within a tick. Small windows: every tick
             // (cheap); the fullscreen overlay has its own 150ms throttle.
-            if d.window().is_visible() {
+            // Dashboard: force a re-present at a low rate — an opaque window
+            // needs no per-tick redraw, and forcing one every tick forced
+            // DWM to constantly re-composite a bitmap the user perceives as
+            // "transparent until hovered" (repaint storm fed the glitch).
+            if d.window().is_visible()
+                && last_dash_redraw.elapsed() > std::time::Duration::from_millis(500)
+            {
+                last_dash_redraw = std::time::Instant::now();
                 d.window().request_redraw();
-                // App-window heartbeat (~2s): winit unsets topmost on its own
-                // schedule (the pill lives with the same race — see the pin
-                // above). Re-raise with a flicker-free NOACTIVATE SetWindowPos.
-                if last_dash_toppin.elapsed() > std::time::Duration::from_secs(2) {
-                    last_dash_toppin = std::time::Instant::now();
-                    widget_platform::restack_topmost(d.window());
-                }
             }
+            // NOTE: no topmost re-pin for the dashboard. It must be an
+            // ordinary window: click another app and QuickSTT goes behind,
+            // like any normal window. (It used to be re-pinned TOPMOST every
+            // 2s forever, which is why it never faded into the background.)
             if let Some(ob) = onboarding_poll.as_ref().and_then(|w| w.upgrade()) {
                 if ob.window().is_visible()
                     && last_onb_toppin.elapsed() > std::time::Duration::from_secs(2)
@@ -5660,6 +5713,7 @@ fn dock_hop(
                             })
                             .unwrap_or(false);
 
+                        let now = std::time::Instant::now();
                         #[cfg(target_os = "windows")]
                         let clicked_outside = unsafe {
                             use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
@@ -5671,7 +5725,26 @@ fn dock_hop(
                         #[cfg(not(target_os = "windows"))]
                         let clicked_outside = false;
 
-                        if clicked_outside {
+                        // Hover-leave dismiss (all platforms): the Windows
+                        // click-outside path never ran on Linux (clicked_outside
+                        // was hardcoded false), so the menu lingered and the
+                        // pill read as "frozen". When the pointer stays outside
+                        // the cluster for 650 ms, dismiss and glides shut.
+                        let mut hover_outside_fired = false;
+                        if !in_cluster && !dragging_now {
+                            match menu2_outside {
+                                Some(at) if at.elapsed() > std::time::Duration::from_millis(650) => {
+                                    hover_outside_fired = true;
+                                    menu2_outside = None;
+                                }
+                                Some(_) => {}
+                                None => menu2_outside = Some(now),
+                            }
+                        } else {
+                            menu2_outside = None;
+                        }
+
+                        if clicked_outside || hover_outside_fired {
                             hide_pill_menus(&pillmenu_w, &flyout_w);
                             *mlock(&menu_pin_timer) = None;
                             if let Ok(mut u) = flyout_ui_timer.lock() {
@@ -5681,8 +5754,6 @@ fn dock_hop(
                             menu2_outside = None;
                             // Seamless collapse of pill
                             let is_exp = expanded_timer.lock().map(|e| *e).unwrap_or(false);
-                            let dragging_now = drag_timer.lock().map(|dd| dd.active).unwrap_or(false);
-                            let now = std::time::Instant::now();
                             if !dragging_now && is_exp {
                                 let (mg0, uo0) = (p.get_mic_grow(), p.get_upper_op());
                                 *mlock(&foot_anim_timer) = Some(FootAnim {
@@ -5694,7 +5765,7 @@ fn dock_hop(
                                 });
                                 log_line("ui: menu+pill cluster left -> collapse glide start");
                             }
-                            log_line("pill menu dismissed (click outside)");
+                            log_line(if clicked_outside { "pill menu dismissed (click outside)" } else { "pill menu dismissed (pointer left cluster)" });
                         }
                     } else {
                         menu2_outside = None;

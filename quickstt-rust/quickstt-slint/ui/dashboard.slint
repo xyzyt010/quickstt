@@ -405,23 +405,35 @@ export component DashboardWidget inherits Window {
                     // right-aligned menu button for collapse/expand. The same
                     // icon_app.png ships everywhere (exe, tray, installer, both
                     // platforms), so the brand is pixel-identical on Windows/Mint.
-                    HorizontalLayout {
-                        spacing: root.rail-active ? 0px : 10px;
-                        padding-left: root.rail-active ? 0px : 4px;
-                        padding-right: root.rail-active ? 0px : 2px;
-                        alignment: root.rail-active ? center : start;
+                    if root.rail-active : Rectangle {
+                        height: 44px;
+                        Image {
+                            source: @image-url("../../assets/app_icon.svg");
+                            // Centre the 44-px artwork by raw pixel math — the
+                            // Slint layout's `alignment: center` is off by ~16px
+                            // against the invisible wordmark when both are in
+                            // the tree.
+                            width: 34px;
+                            height: 40px;
+                            image-fit: contain;
+                            x: (parent.width - 34px) / 2;
+                            y: (parent.height - 40px) / 2;
+                        }
+                    }
+                    if !root.rail-active : HorizontalLayout {
+                        spacing: 10px;
+                        padding-left: 4px;
+                        padding-right: 2px;
+                        alignment: start;
 
                         Image {
                             source: @image-url("../../assets/app_icon.svg");
-                            // Square-ish artwork box in rail mode keeps the icon
-                            // centered; wordmark branch keeps the banner shape.
-                            width: root.rail-active ? 44px : 32px;
-                            height: root.rail-active ? 40px : 43px;
+                            width: 32px;
+                            height: 43px;
                             image-fit: contain;
                             y: (parent.height - self.height) / 2;
                         }
                         VerticalLayout {
-                            visible: !root.rail-active;
                             spacing: 0px;
                             padding-top: 2px;
                             Text {
@@ -432,11 +444,10 @@ export component DashboardWidget inherits Window {
                                 vertical-alignment: center;
                             }
                         }
-                        Rectangle { horizontal-stretch: 1; visible: !root.rail-active; }
+                        Rectangle { horizontal-stretch: 1; }
                         // Collapse / expand — minimal Material Symbols menu glyph
                         // in a 40px touch target (was a hand-drawn hamburger).
                         Rectangle {
-                            visible: !root.rail-active;
                             width: root.tap-size;
                             height: 40px;
                             border-radius: 8px;
@@ -496,19 +507,25 @@ export component DashboardWidget inherits Window {
                         border-width: root.active-tab == 0 ? 1px : 0px;
                         border-color: #FFFFFF;
 
-                        HorizontalLayout {
-                            padding-left: root.rail-active ? 0px : 12px;
-                            spacing: root.rail-active ? 0px : 10px;
-                            alignment: root.rail-active ? center : start;
+                        if root.rail-active : IconSym {
+                            glyph: "\u{E8B8}";
+                            tint: root.active-tab == 0 ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: (parent.width - 22px) / 2;
+                            y: (parent.height - 22px) / 2;
+                        }
+                        if !root.rail-active : HorizontalLayout {
+                            padding-left: 12px;
+                            spacing: 10px;
+                            alignment: start;
                             IconSym {
-                                y: (48px - 22px) / 2;
                                 glyph: "\u{E8B8}";
                                 tint: root.active-tab == 0 ? #FFFFFF : #9A9A9A;
                                 size: 22px;
+                                y: (parent.height - 22px) / 2;
                             }
                             Text {
                                 text: "General";
-                                visible: !root.rail-active;
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 0 ? 700 : 500;
@@ -530,19 +547,25 @@ export component DashboardWidget inherits Window {
                         border-width: root.active-tab == 1 ? 1px : 0px;
                         border-color: #FFFFFF;
 
-                        HorizontalLayout {
-                            padding-left: root.rail-active ? 0px : 12px;
-                            spacing: root.rail-active ? 0px : 10px;
-                            alignment: root.rail-active ? center : start;
+                        if root.rail-active : IconSym {
+                            glyph: "\u{E1B8}";
+                            tint: root.active-tab == 1 ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: (parent.width - 22px) / 2;
+                            y: (parent.height - 22px) / 2;
+                        }
+                        if !root.rail-active : HorizontalLayout {
+                            padding-left: 12px;
+                            spacing: 10px;
+                            alignment: start;
                             IconSym {
-                                y: (48px - 22px) / 2;
                                 glyph: "\u{E1B8}";
                                 tint: root.active-tab == 1 ? #FFFFFF : #9A9A9A;
                                 size: 22px;
+                                y: (parent.height - 22px) / 2;
                             }
                             Text {
                                 text: "Speech Models";
-                                visible: !root.rail-active;
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 1 ? 700 : 500;
@@ -564,19 +587,25 @@ export component DashboardWidget inherits Window {
                         border-width: root.active-tab == 2 ? 1px : 0px;
                         border-color: #FFFFFF;
 
-                        HorizontalLayout {
-                            padding-left: root.rail-active ? 0px : 12px;
-                            spacing: root.rail-active ? 0px : 10px;
-                            alignment: root.rail-active ? center : start;
+                        if root.rail-active : IconSym {
+                            glyph: "\u{E3B7}";
+                            tint: root.active-tab == 2 ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: (parent.width - 22px) / 2;
+                            y: (parent.height - 22px) / 2;
+                        }
+                        if !root.rail-active : HorizontalLayout {
+                            padding-left: 12px;
+                            spacing: 10px;
+                            alignment: start;
                             IconSym {
-                                y: (48px - 22px) / 2;
                                 glyph: "\u{E3B7}";
                                 tint: root.active-tab == 2 ? #FFFFFF : #9A9A9A;
                                 size: 22px;
+                                y: (parent.height - 22px) / 2;
                             }
                             Text {
                                 text: "Widget Style";
-                                visible: !root.rail-active;
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 2 ? 700 : 500;
@@ -598,19 +627,25 @@ export component DashboardWidget inherits Window {
                         border-width: root.active-tab == 3 ? 1px : 0px;
                         border-color: #FFFFFF;
 
-                        HorizontalLayout {
-                            padding-left: root.rail-active ? 0px : 12px;
-                            spacing: root.rail-active ? 0px : 10px;
-                            alignment: root.rail-active ? center : start;
+                        if root.rail-active : IconSym {
+                            glyph: "\u{E023}";
+                            tint: root.active-tab == 3 ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: (parent.width - 22px) / 2;
+                            y: (parent.height - 22px) / 2;
+                        }
+                        if !root.rail-active : HorizontalLayout {
+                            padding-left: 12px;
+                            spacing: 10px;
+                            alignment: start;
                             IconSym {
-                                y: (48px - 22px) / 2;
                                 glyph: "\u{E023}";
                                 tint: root.active-tab == 3 ? #FFFFFF : #9A9A9A;
                                 size: 22px;
+                                y: (parent.height - 22px) / 2;
                             }
                             Text {
                                 text: "Wake Words & VAD";
-                                visible: !root.rail-active;
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 3 ? 700 : 500;
@@ -632,19 +667,25 @@ export component DashboardWidget inherits Window {
                         border-width: root.active-tab == 4 ? 1px : 0px;
                         border-color: #FFFFFF;
 
-                        HorizontalLayout {
-                            padding-left: root.rail-active ? 0px : 12px;
-                            spacing: root.rail-active ? 0px : 10px;
-                            alignment: root.rail-active ? center : start;
+                        if root.rail-active : IconSym {
+                            glyph: "\u{E30A}";
+                            tint: root.active-tab == 4 ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: (parent.width - 22px) / 2;
+                            y: (parent.height - 22px) / 2;
+                        }
+                        if !root.rail-active : HorizontalLayout {
+                            padding-left: 12px;
+                            spacing: 10px;
+                            alignment: start;
                             IconSym {
-                                y: (48px - 22px) / 2;
                                 glyph: "\u{E30A}";
                                 tint: root.active-tab == 4 ? #FFFFFF : #9A9A9A;
                                 size: 22px;
+                                y: (parent.height - 22px) / 2;
                             }
                             Text {
                                 text: "System & Info";
-                                visible: !root.rail-active;
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 4 ? 700 : 500;
@@ -666,19 +707,25 @@ export component DashboardWidget inherits Window {
                         border-width: root.active-tab == 5 ? 1px : 0px;
                         border-color: #FFFFFF;
 
-                        HorizontalLayout {
-                            padding-left: root.rail-active ? 0px : 12px;
-                            spacing: root.rail-active ? 0px : 10px;
-                            alignment: root.rail-active ? center : start;
+                        if root.rail-active : IconSym {
+                            glyph: "\u{E28E}";
+                            tint: root.active-tab == 5 ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: (parent.width - 22px) / 2;
+                            y: (parent.height - 22px) / 2;
+                        }
+                        if !root.rail-active : HorizontalLayout {
+                            padding-left: 12px;
+                            spacing: 10px;
+                            alignment: start;
                             IconSym {
-                                y: (48px - 22px) / 2;
                                 glyph: "\u{E28E}";
                                 tint: root.active-tab == 5 ? #FFFFFF : #9A9A9A;
                                 size: 22px;
+                                y: (parent.height - 22px) / 2;
                             }
                             Text {
                                 text: "History";
-                                visible: !root.rail-active;
 
                                 font-size: 13px;
                                 font-weight: root.active-tab == 5 ? 700 : 500;

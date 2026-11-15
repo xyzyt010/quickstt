@@ -504,8 +504,10 @@ pub fn configure_overlay_window(window: &slint::Window) {
 
 /// Bounded resurrection: winit resets z-order styles a hair after show
 /// (the same race the pill lives with), so re-assert TOPMOST for ~2s after
-/// the window is shown. Cheap, silent, and matches how the pill survives
-/// being raised behind fullscreen apps.
+/// the window is shown, then stand it down to HWND_NOTOPMOST so app windows
+/// spend their life as ordinary windows (clicking another app hides them
+/// like any other window — they were pinned forever before). Cheap, silent,
+/// and matches how the pill survives being raised behind fullscreen apps.
 pub fn restack_topmost_borrowed(window: &slint::Window) {
     #[cfg(target_os = "windows")]
     if let Some(raw) = hwnd_of(window) {
@@ -527,6 +529,19 @@ pub fn restack_topmost_borrowed(window: &slint::Window) {
                         );
                     }
                     std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                // Stand down: ordinary window from here on.
+                unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::{HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE};
+                    let _ = SetWindowPos(
+                        hwnd,
+                        HWND_NOTOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
                 }
             })
             .ok();
@@ -1463,6 +1478,18 @@ pub fn ensure_widget_top(window: &slint::Window) {
 /// this the pill carries an OS caption, its reported position includes the
 /// frame offset, and every anchor computation (menu, flyout, dock) drifts —
 /// the "nothing like Windows" gap. No-op when no X window exists yet.
+/// Raise the window above managed X11 siblings. Override-redirect (the pill)
+/// siblings always win on their own — menus must therefore be raised ABOVE
+/// after the pill's raise to sit above it (last raise wins). Leaves
+/// override-redirect untouched so menus stay managed and focusable.
+#[cfg(not(target_os = "windows"))]
+pub fn raise_above_all(window: &slint::Window) {
+    let Some(xid) = xid_of(window) else {
+        return;
+    };
+    x11q::raise_above_all(xid);
+}
+
 #[cfg(not(target_os = "windows"))]
 pub fn strip_chrome(window: &slint::Window) {
     let Some(xid) = xid_of(window) else {
@@ -1726,6 +1753,17 @@ mod x11q {
     /// re-raises, so even fullscreen apps can't cover the pill for more than
     /// ~2s (the poll heartbeat). Best-effort: failures are silent, atoms
     /// from strip_chrome remain as fallback.
+    pub fn raise_above_all(xid: u32) {
+        let _ = with_conn(|conn, _root| {
+            let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+            let _ = conn
+                .configure_window(xid, &aux)
+                .ok()
+                .and_then(|c| c.check().ok());
+            Some(())
+        });
+    }
+
     pub fn ensure_widget_top(xid: u32) {
         use x11rb::protocol::xproto::{
             ChangeWindowAttributesAux, ConfigureWindowAux, StackMode,

@@ -20,14 +20,30 @@ export component PillMenu inherits Window {
     callback model_row();
     callback history_row();
     callback paste_row();
+    /// Escape anywhere inside the menu closes it (same dismissal path as
+    /// tapping outside, which Windows handles in its poll and Linux lacks).
+    callback close_menu();
 
-    Rectangle {
-        x: 0;
-        y: 0;
+    focus_guard := FocusScope {
         width: parent.width;
         height: parent.height;
-        background: #01000000;
-    }
+        // Menu opens under the cursor via a pointer press; pulling keyboard
+        // focus grabs Esc from wherever it was (the whole point of a menu).
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.close_menu();
+                return accept;
+            }
+            reject;
+        }
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            background: #01000000;
+        }
 
     Rectangle {
         x: 0px;
@@ -184,6 +200,7 @@ export component PillMenu inherits Window {
                 }
             }
         }
+    }
     }
 }
 

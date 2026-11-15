@@ -1,5 +1,30 @@
 # Changelog
 
+## [2.0.0-alpha.31] — 2026-11-15
+
+UI/windowing fixes for the pill, the menus and the dashboard.
+
+### Fixed
+- **Compressed sidebar icons are pixel-centered in the collapsed rail** — all
+  six section glyphs and the brand logo now place by direct pixel offsets,
+  both axes, on every platform (Slint's layout-centering was 5–16 px off for
+  several glyphs and the brand image).
+- **Linux pill right-click menu opened UNDER the pill.** The pill is
+  override-redirect on X11 (it wins sibling raises on its own), so the managed
+  context menu rendered beneath it. The menus are now raised ABOVE the pill —
+  at show time and on the ~2s re-raise heartbeat.
+- **Linux pill context menu never dismissed.** `clicked_outside` was hardcoded
+  to `false` for non-Windows, so the menu lingered (occluding the pill and
+  reading as "frozen"). It now dismisses automatically when the pointer leaves
+  the pill/menu/flyout cluster for ~650 ms, **Escape** inside the menu also
+  closes it, and the pill glides back to its collapsed footprint seamlessly —
+  matching Windows.
+- **Dashboard never lost focus to other windows** — it was re-pinned TOPMOST
+  every 2 seconds forever. The topmost hint now stands down ~2 s after show,
+  clicking another app sends QuickSTT behind like any normal window, and the
+  forced per-tick full redraw was throttled to 2 Hz (the DWM ghosting/window
+  rendering as "transparent until hovered" went with it).
+
 ## [2.0.0-alpha.30] — 2026-11-15
 
 Release pipeline: the GitHub Release now actually ships a working Windows
