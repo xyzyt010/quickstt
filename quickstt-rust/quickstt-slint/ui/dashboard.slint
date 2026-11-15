@@ -19,6 +19,20 @@ export struct ModelCard {
     downloading: bool,
 }
 
+// Per-model user parameter row on the Models tab. `kind`:
+// 0 = IntRange (Slider), 1 = Toggle (CheckBox), 2 = Choice (ComboBox).
+// `value` is always a float (0/1 toggles; index for choices; integer for int).
+export struct ModelParamUi {
+    key: string,
+    label: string,
+    kind: int,
+    lo: float,
+    hi: float,
+    choices: [string],
+    value: float,
+    hint: string,
+}
+
 // One recorded turn for the dashboard History section. Times and labels are
 // pre-formatted in Rust so the rows stay cheap (the whole model is rebuilt at
 // most 10x/second, and only while something is actually playing).
@@ -341,6 +355,11 @@ export component DashboardWidget inherits Window {
     /// Download the recommended model (or activate it when it is local).
     callback download-recommended-model();
     callback set-catalog-search(string);
+    /// Per-model parameter writeback: (param key, value). Value semantics by
+    /// kind: IntRange = the integer, Toggle = 0/1. Choice params use
+    /// `set-model-param-choice` instead (ComboBox reports text, not an index).
+    callback set-model-param(string, float);
+    callback set-model-param-choice(string, string);
     callback browse-recording-dir();
     callback check-updates();
     /// Re-run the first-run onboarding tour from the top.
@@ -353,6 +372,9 @@ export component DashboardWidget inherits Window {
     /// Hardware-aware recommended model name (legacy, use `recommend-model`).
     in property <string> recommend-name: "";
     in property <string> recommend-reason: "";
+    /// Per-model parameter rows for the active model — every family has its
+    /// own list (empty when the selected model can't be customised).
+    in property <[ModelParamUi]> model-params: [];
 
     // Monitor scale factor (1.0 = 96 dpi, 1.25 = 125%, …), set from Rust via
     // GetDpiForWindow. Slint's winit-software backend renders at this scale but
@@ -413,11 +435,10 @@ export component DashboardWidget inherits Window {
                         border-width: chev_touch.has-hover ? 1px : 0px;
                         border-color: #262626;
                         IconSym {
-                            // E5D2 = menu, E5CD = close. When the sidebar is
-                            // expanded (showing items), the button collapses
-                            // to rail — show the hamburger. When collapsed,
-                            // it expands — show the X.
-                            glyph: root.sidebar-collapsed ? "\u{E5CD}" : "\u{E5D2}";
+                            // E5D2 = menu (hamburger, 3 lines), E5CD = close X.
+                            // Expanded sidebar shows X (click to collapse);
+                            // collapsed rail shows hamburger (click to expand).
+                            glyph: root.sidebar-collapsed ? "\u{E5D2}" : "\u{E5CD}";
                             tint: chev_touch.has-hover ? #FFFFFF : #9A9A9A;
                             size: 22px;
                             x: root.rail-active ? (parent.width - self.width) / 2 : 12px;
@@ -1149,6 +1170,79 @@ export component DashboardWidget inherits Window {
                                         current-index: root.selected-language;
                                         enabled: root.languages.length > 1;
                                         selected(v) => { root.select-language(v); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Per-model parameters (when the active model
+                        //    exposes any) ── Each row is typed:
+                        //    kind 0 = Slider + value, 1 = CheckBox,
+                        //    2 = ComboBox. Rust is the source of truth:
+                        //    edits echo back through model-params after
+                        //    they are persisted.
+                        if root.model-params.length > 0 : Rectangle {
+                            background: #0E0E0E;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #262626;
+
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 10px;
+
+                                Text { text: "Model parameters"; font-size: 13px; font-weight: 600; color: #FFFFFF; }
+
+                                for param in root.model-params : VerticalLayout {
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Text { text: param.label; font-size: 12px; color: #FFFFFF; vertical-alignment: center; min-width: 124px; }
+
+                                        if param.kind == 0 : HorizontalLayout {
+                                            spacing: 8px;
+                                            Slider {
+                                                height: 30px;
+                                                minimum: param.lo;
+                                                maximum: param.hi;
+                                                value: param.value;
+                                                changed(v) => {
+                                                    root.set-model-param(param.key, round(v));
+                                                }
+                                            }
+                                            Text {
+                                                text: "" + round(param.value);
+                                                font-size: 12px;
+                                                color: #FFFFFF;
+                                                vertical-alignment: center;
+                                                min-width: 24px;
+                                            }
+                                        }
+
+                                        if param.kind == 1 : CheckBox {
+                                            text: "";
+                                            checked: param.value != 0.0;
+                                            toggled => {
+                                                root.set-model-param(param.key, self.checked ? 1.0 : 0.0);
+                                            }
+                                        }
+
+                                        if param.kind == 2 : ComboBox {
+                                            height: 36px;
+                                            model: param.choices;
+                                            current-index: round(param.value);
+                                            selected(v) => {
+                                                root.set-model-param-choice(param.key, v);
+                                            }
+                                        }
+                                    }
+
+                                    if param.hint != "" : Text {
+                                        text: param.hint;
+                                        font-size: 10px;
+                                        color: #9A9A9A;
+                                        wrap: word-wrap;
                                     }
                                 }
                             }

@@ -2317,6 +2317,69 @@ mod sni_tray {
     }
 }
 
+/// Resolve the dashboard's active model to its catalog descriptor.
+fn active_descriptor(s: &AppState) -> Option<quickstt_core::models::catalog::ModelDescriptor> {
+    let name = s.model_entries.get(s.selected_model).map(|e| e.name.clone())?;
+    quickstt_core::models::catalog::all_descriptors()
+        .into_iter()
+        .find(|d| d.name == name)
+}
+
+/// Persist a per-model parameter (Slider / CheckBox). `value` semantics by
+/// kind: IntRange = raw int, Toggle = 0/1, Choice = index.
+fn set_model_param(state: &Arc<Mutex<AppState>>, key: &str, value: f32) {
+    use quickstt_core::models::catalog::ParamKind;
+    let mut s = match state.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let Some(desc) = active_descriptor(&s) else { return };
+    let Some(spec) = desc.params().into_iter().find(|p| p.key == key) else { return };
+    let text = match &spec.kind {
+        ParamKind::IntRange { lo, hi } => {
+            let v = value.clamp(*lo as f32, *hi as f32).round() as i32;
+            v.to_string()
+        }
+        ParamKind::Toggle => {
+            if value != 0.0 { "true".to_string() } else { "false".to_string() }
+        }
+        ParamKind::Choice(choices) => {
+            if choices.is_empty() {
+                return;
+            }
+            let idx = value.round().clamp(0.0, (choices.len() - 1) as f32) as usize;
+            choices[idx].clone()
+        }
+    };
+    s.settings
+        .model_params
+        .insert(format!("{}|{}", desc.model_dir, key), text);
+    if let Err(e) = s.settings.save_model_params() {
+        log_line(&format!("save_model_params FAILED: {e:#}"));
+    }
+}
+
+/// Persist a Choice parameter selected from its ComboBox (the value comes as
+/// the choice text, e.g. "stream").
+fn set_model_param_choice(state: &Arc<Mutex<AppState>>, key: &str, choice: &str) {
+    use quickstt_core::models::catalog::ParamKind;
+    let mut s = match state.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let Some(desc) = active_descriptor(&s) else { return };
+    let Some(spec) = desc.params().into_iter().find(|p| p.key == key) else { return };
+    if !matches!(&spec.kind, ParamKind::Choice(_)) {
+        return;
+    }
+    s.settings
+        .model_params
+        .insert(format!("{}|{}", desc.model_dir, key), choice.to_string());
+    if let Err(e) = s.settings.save_model_params() {
+        log_line(&format!("save_model_params FAILED: {e:#}"));
+    }
+}
+
 /// Tray icon: pre-baked PNG (has alpha), ICO fallback. (An SVG render path
 /// via resvg/usvg used to live here — identical pixels, but the renderer
 /// stack cost megabytes of resident code for a one-shot 64px raster.)
@@ -6732,6 +6795,115 @@ fn dock_hop(
                         if d.get_catalog_search().as_str() != s.catalog_search.as_str() {
                             d.set_catalog_search(s.catalog_search.clone().into());
                         }
+                        // ── Per-model parameter rows for the ACTIVE model ──
+                        {
+                            use quickstt_core::models::catalog::ParamKind;
+                            let active_name = s
+                                .model_entries
+                                .get(s.selected_model)
+                                .map(|e| e.name.clone())
+                                .unwrap_or_default();
+                            let desc = quickstt_core::models::catalog::all_descriptors()
+                                .into_iter()
+                                .find(|x| x.name == active_name);
+                            let mut rows: Vec<crate::ModelParamUi> = Vec::new();
+                            if let Some(desc) = desc {
+                                for p in desc.params() {
+                                    let scoped = format!("{}|{}", desc.model_dir, p.key);
+                                    let saved = s.settings.model_params.get(&scoped).cloned();
+                                    let empty: Vec<slint::SharedString> = Vec::new();
+                                    let empty_rc = ModelRc::new(VecModel::<slint::SharedString>::from_slice(&empty));
+                                    let row = match &p.kind {
+                                        ParamKind::IntRange { lo, hi } => {
+                                            let v = saved
+                                                .as_deref()
+                                                .and_then(|x| x.parse::<f32>().ok())
+                                                .unwrap_or_else(|| p.default.parse().unwrap_or(*lo as f32));
+                                            crate::ModelParamUi {
+                                                key: p.key.clone().into(),
+                                                label: p.label.clone().into(),
+                                                kind: 0,
+                                                lo: *lo as f32,
+                                                hi: *hi as f32,
+                                                choices: empty_rc,
+                                                value: v.clamp(*lo as f32, *hi as f32),
+                                                hint: p.hint.clone().into(),
+                                            }
+                                        }
+                                        ParamKind::Toggle => {
+                                            let v: f32 = match saved.as_deref() {
+                                                Some("true") | Some("1") => 1.0,
+                                                _ => 0.0,
+                                            };
+                                            crate::ModelParamUi {
+                                                key: p.key.clone().into(),
+                                                label: p.label.clone().into(),
+                                                kind: 1,
+                                                lo: 0.0,
+                                                hi: 1.0,
+                                                choices: empty_rc,
+                                                value: v,
+                                                hint: p.hint.clone().into(),
+                                            }
+                                        }
+                                        ParamKind::Choice(choices) => {
+                                            let cur = saved.unwrap_or_else(|| p.default.clone());
+                                            let idx = choices
+                                                .iter()
+                                                .position(|c| *c == cur)
+                                                .unwrap_or(0) as f32;
+                                            let cs: Vec<slint::SharedString> =
+                                                choices.iter().map(|c| c.as_str().into()).collect();
+                                            crate::ModelParamUi {
+                                                key: p.key.clone().into(),
+                                                label: p.label.clone().into(),
+                                                kind: 2,
+                                                lo: 0.0,
+                                                hi: (choices.len().saturating_sub(1)) as f32,
+                                                choices: ModelRc::new(VecModel::from_slice(&cs)),
+                                                value: idx,
+                                                hint: p.hint.clone().into(),
+                                            }
+                                        }
+                                    };
+                                    rows.push(row);
+                                }
+                            }
+                            let cur = d.get_model_params();
+                            let mut same = cur.row_count() == rows.len();
+                            if same {
+                                for (i, r) in rows.iter().enumerate() {
+                                    let Some(a) = cur.row_data(i) else {
+                                        same = false;
+                                        break;
+                                    };
+                                    let mut choice_ok = a.choices.row_count() == r.choices.row_count();
+                                    if choice_ok {
+                                        for j in 0..a.choices.row_count() {
+                                            if a.choices.row_data(j) != r.choices.row_data(j) {
+                                                choice_ok = false;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if a.key != r.key
+                                        || a.kind != r.kind
+                                        || a.lo != r.lo
+                                        || a.hi != r.hi
+                                        || a.label != r.label
+                                        || a.hint != r.hint
+                                        || (a.value - r.value).abs() > 0.001
+                                        || !choice_ok
+                                    {
+                                        same = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !same {
+                                d.set_model_params(ModelRc::new(VecModel::from_slice(&rows)));
+                            }
+                        }
                         let prio = s.settings.model_priority.min(2) as i32;
                         if d.get_model_priority() != prio {
                             d.set_model_priority(prio);
@@ -7623,6 +7795,16 @@ fn dock_hop(
         let tx = tx_cmd.clone();
         dashboard.on_select_language(move |name: slint::SharedString| {
             let _ = tx.try_send(OrchestratorCommand::SelectLanguage(name.to_string()));
+        });
+    }
+    {
+        let state_1 = state.clone();
+        dashboard.on_set_model_param(move |key: slint::SharedString, value: f32| {
+            set_model_param(&state_1, key.as_str(), value);
+        });
+        let state_2 = state.clone();
+        dashboard.on_set_model_param_choice(move |key: slint::SharedString, choice: slint::SharedString| {
+            set_model_param_choice(&state_2, key.as_str(), choice.as_str());
         });
     }
     {

@@ -25,7 +25,8 @@ pub struct SttEngineConfig {
     pub parakeet_engine_path: Option<PathBuf>,
     pub vosk_path: Option<PathBuf>,
     pub nemotron_path: Option<PathBuf>,
-    /// Cactus `needle` CLI for Whistle `.cact` models (one-shot per turn).
+    /// Cactus engine CLI for Whistle `.cact` models (one-shot per turn,
+    /// or `--audio-stream` chunked decode when the user selects stream mode).
     pub whistle_path: Option<PathBuf>,
     /// llama.cpp `llama-cli` (b11960 / v0.8.0+) for LFM3-Audio-2B GGUF models.
     pub lfm3_audio_path: Option<PathBuf>,
@@ -197,10 +198,18 @@ impl SttEngineConfig {
         }
         let photon_worker_candidates = photon_worker_candidates;
 
-        // Cactus `needle` CLI (Whistle `.cact`). The downloader stages the
+        // Cactus engine binary (Whistle `.cact`). The downloader stages the
         // per-OS binary under models/runtimes/whistle; portable builds may
-        // carry it next to the exe instead.
+        // carry it next to the exe instead. `cactus` is the current staging
+        // name; `needle` is kept for existing installs.
         let whistle_candidates = [
+            models_root.join(format!("runtimes/whistle/cactus{}", exe_ext)),
+            bundled_tools.join(format!("whistle/cactus{}", exe_ext)),
+            exe_dir.join(format!("tools/whistle/cactus{}", exe_ext)),
+            PathBuf::from(format!(
+                "/usr/lib/quickstt/tools/whistle/cactus{}",
+                exe_ext
+            )),
             models_root.join(format!("runtimes/whistle/needle{}", exe_ext)),
             bundled_tools.join(format!("whistle/needle{}", exe_ext)),
             exe_dir.join(format!("tools/whistle/needle{}", exe_ext)),
@@ -279,6 +288,60 @@ impl SttEngineConfig {
 pub fn cached_config() -> SttEngineConfig {
     static CACHE: Lazy<SttEngineConfig> = Lazy::new(SttEngineConfig::detect);
     CACHE.clone()
+}
+
+/// Most recent per-model parameter overrides pushed by the orchestrator.
+/// Keyed by `"<model_dir>|<param_key>"`. Engines read defaults by param name
+/// when absent — the map is repopulated per transcription call, so it never
+/// lags the UI.
+pub static LATEST_MODEL_PARAMS: Lazy<Mutex<std::collections::HashMap<String, String>>> =
+    Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+
+fn param(desc: &ModelDescriptor, key: &str) -> String {
+    LATEST_MODEL_PARAMS
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&format!("{}|{}", desc.model_dir, key)).cloned())
+        .unwrap_or_else(|| {
+            desc.params()
+                .into_iter()
+                .find(|p| p.key == key)
+                .map(|p| p.default)
+                .unwrap_or_else(|| "4".to_string())
+        })
+}
+
+fn param_int(desc: &ModelDescriptor, key: &str) -> i32 {
+    param(desc, key).parse().unwrap_or(4)
+}
+
+fn param_bool(desc: &ModelDescriptor, key: &str) -> bool {
+    let v = param(desc, key);
+    v.eq_ignore_ascii_case("true") || v == "1"
+}
+
+/// transcribe.cpp / Handy-fork worker argv for `descriptor`: pins the
+/// session-level knobs (threads, KV ctx cap and, for Canary, the translate
+/// task) at spawn time, since the worker reads them from CLI args. Unknown
+/// flags are tolerated by transcribe.cpp builds.
+fn transcribe_cpp_worker_args(descriptor: &ModelDescriptor) -> Vec<String> {
+    let threads = param_int(descriptor, "threads").clamp(1, 16);
+    let ctx = param_int(descriptor, "ctx").clamp(0, 32768);
+    let mut args = vec![
+        "--threads".to_string(),
+        threads.to_string(),
+        "--n-ctx".to_string(),
+        ctx.to_string(),
+    ];
+    if param_bool(descriptor, "translate") {
+        args.push("--translate".to_string());
+    }
+    args
+}
+
+/// Compare the worker's stored argv so settings changes respawn the helper.
+fn stale_worker(session: &ParakeetSession, exe: &Path, args: &[String]) -> bool {
+    session.exe_path != *exe || session.worker_args != args
 }
 
 /// Primary engine binary plus the fallbacks, in priority order.
@@ -376,15 +439,15 @@ pub fn transcribe_with_language(
             transcribe_sense_voice(config, &model_dir, wav_path, language)
         }
         EngineFamily::Vosk => transcribe_vosk(config, &model_dir, wav_path),
-        EngineFamily::Nemotron => transcribe_nemotron(config, &model_dir, wav_path, language),
-        EngineFamily::Qwen3Asr => transcribe_qwen3_asr(config, &model_dir, wav_path),
-        EngineFamily::Lfm3Audio => transcribe_lfm3_audio(config, &model_dir, wav_path, language),
-        EngineFamily::Whistle => transcribe_whistle(config, &model_dir, wav_path, language),
-        EngineFamily::Canary => transcribe_canary(config, &model_dir, wav_path, language),
+        EngineFamily::Nemotron => transcribe_nemotron(config, &model_dir, wav_path, language, descriptor),
+        EngineFamily::Qwen3Asr => transcribe_qwen3_asr(config, &model_dir, wav_path, descriptor),
+        EngineFamily::Lfm3Audio => transcribe_lfm3_audio(config, &model_dir, wav_path, language, descriptor),
+        EngineFamily::Whistle => transcribe_whistle(config, &model_dir, wav_path, language, descriptor),
+        EngineFamily::Canary => transcribe_canary(config, &model_dir, wav_path, language, descriptor),
         EngineFamily::Photon => transcribe_photon(config, descriptor, wav_path),
         EngineFamily::CanaryQwen => transcribe_canary_qwen(config, descriptor, wav_path),
         EngineFamily::SherpaOnnx | EngineFamily::NemoTransducer | EngineFamily::NemoCTC => {
-            transcribe_sherpa_onnx(config, &model_dir, wav_path, &descriptor.engine_family)
+            transcribe_sherpa_onnx(config, &model_dir, wav_path, &descriptor.engine_family, descriptor)
         }
     }
 }
@@ -605,6 +668,9 @@ struct ParakeetSession {
     stdout: BufReader<ChildStdout>,
     loaded_model_dir: Option<PathBuf>,
     exe_path: PathBuf,
+    /// Argv the worker was spawned with (session-level knobs like threads
+    /// and ctx). Used to respawn when the user changes those settings.
+    worker_args: Vec<String>,
 }
 
 static PARAKEET_SESSION: Lazy<Mutex<Option<ParakeetSession>>> = Lazy::new(|| Mutex::new(None));
@@ -728,7 +794,7 @@ fn parakeet_family_transcribe(
     let needs_spawn =
         dead || guard.as_ref().map(|s| s.exe_path != *exe).unwrap_or(true);
     if needs_spawn {
-        *guard = Some(spawn_parakeet_session(exe)?);
+        *guard = Some(spawn_parakeet_session(exe, &[])?);
     }
 
     let session = guard
@@ -795,10 +861,17 @@ fn locate_onnxruntime_dylib(engine_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-fn spawn_parakeet_session(exe: &Path) -> Result<ParakeetSession> {
+/// Spawn a transcribe.cpp-family worker (the `transcribe-cli` stdin/stdout
+/// JSON protocol or a Handy fork of it). `worker_args` are forwarded verbatim
+/// to the process — the session-level knobs (threads, KV ctx) are set at
+/// spawn time because the protocol's `load` action reads CLI args, not the
+/// JSON line. All calls pass engine-compatible argv; unsupported flags are
+/// inert in transcribe.cpp builds.
+fn spawn_parakeet_session(exe: &Path, worker_args: &[String]) -> Result<ParakeetSession> {
     let workdir = exe.parent().unwrap_or(Path::new("."));
-    info!("Starting Parakeet Rust engine: {:?}", exe);
+    info!("Starting Parakeet Rust engine: {:?} args={:?}", exe, worker_args);
     let mut cmd = Command::new(exe);
+    cmd.args(worker_args);
     // Never flash a terminal when starting transcription (Windows console).
     #[cfg(target_os = "windows")]
     {
@@ -837,6 +910,7 @@ fn spawn_parakeet_session(exe: &Path) -> Result<ParakeetSession> {
         stdout: BufReader::new(stdout),
         loaded_model_dir: None,
         exe_path: exe.to_path_buf(),
+        worker_args: worker_args.to_vec(),
     })
 }
 
@@ -1373,6 +1447,10 @@ fn transcribe_whisper_cpp_with(
         "Whisper CLI: {:?} model: {:?} wav: {:?} lang: {:?}",
         cli, model_file, wav_path, lang_code,
     );
+    let thread_n = param_int(descriptor, "threads").clamp(1, 16);
+    let beam_n = param_int(descriptor, "beam_size").clamp(1, 8);
+    let translate = param_bool(descriptor, "translate");
+    info!("Whisper: user-tuned threads={} beam-size={} translate={}", thread_n, beam_n, translate);
 
     let mut cmd = Command::new(cli);
     no_window(&mut cmd);
@@ -1382,6 +1460,11 @@ fn transcribe_whisper_cpp_with(
         .arg(wav_path);
     if let Some(code) = lang_code {
         cmd.arg("-l").arg(code);
+    }
+    // -tr keeps the engine's built-in AST path; omit it otherwise so
+    // non-English speakers keep their own language.
+    if translate {
+        cmd.arg("-tr");
     }
     let output = cmd
         .arg("--no-timestamps")
@@ -1393,7 +1476,9 @@ fn transcribe_whisper_cpp_with(
         .arg("-nth")
         .arg("0.85")
         .arg("-t")
-        .arg("4")
+        .arg(thread_n.to_string())
+        .arg("-bs")
+        .arg(beam_n.to_string())
         .output()
         .context("Failed to run whisper-cli")?;
 
@@ -1443,6 +1528,7 @@ fn transcribe_sherpa_onnx(
     model_dir: &Path,
     wav_path: &Path,
     family: &EngineFamily,
+    descriptor: &ModelDescriptor,
 ) -> Result<String> {
     let cli = config
         .sherpa_onnx_path
@@ -1450,13 +1536,9 @@ fn transcribe_sherpa_onnx(
         .context("sherpa-onnx-offline not found")?;
 
     // sherpa-onnx uses `--opt=value` syntax (space-separated `--opt value`
-    // is rejected as "Invalid option"). CPU-optimised: 4 threads (physical
-    // cores on most laptops, avoids oversubscription on PTT flush), cpu
-    // provider, explicit model-type so the model loads once.
-    let num_threads = std::thread::available_parallelism()
-        .map(|n| n.get().clamp(2, 8) as u32)
-        .unwrap_or(4)
-        .min(4);
+    // is rejected as "Invalid option"). CPU-optimised: user-tunable threads
+    // (default 4), cpu provider, explicit model-type so the model loads once.
+    let num_threads = param_int(descriptor, "threads").clamp(1, 16) as u32;
 
     let mut cmd = Command::new(cli);
     no_window(&mut cmd);
@@ -1819,6 +1901,7 @@ fn transcribe_nemotron(
     model_dir: &Path,
     wav_path: &Path,
     language: &str,
+    descriptor: &ModelDescriptor,
 ) -> Result<String> {
     let cli = config.nemotron_path.as_ref().context(
         "Nemotron engine not found — install the Nemotron 3.5 ASR Streaming 0.6B model \
@@ -1833,6 +1916,10 @@ fn transcribe_nemotron(
     // becomes a BCP-47 locale tag. Passing the raw display name ("German")
     // used to reach the worker verbatim, which it rejects.
     let lang_code = crate::models::catalog::nemotron_locale_code(language);
+
+    let thread_n = param_int(descriptor, "threads").clamp(1, 16);
+    let ctx_n = param_int(descriptor, "ctx");
+    info!("Nemotron: user-tuned threads={} ctx={}", thread_n, ctx_n);
 
     // Q4_K_M is the working CPU quant: Q8_0 decodes to all-<unk> in the
     // shipped GGUF (verified 2026-09: Q4 gives clean JFK transcript, Q8 gives
@@ -1861,13 +1948,13 @@ fn transcribe_nemotron(
         info!("Nemotron via transcribe-cli {:?} gguf={:?}", cli, gguf);
         let mut nc = Command::new(cli);
         no_window(&mut nc);
-        // CPU-optimised: 4 threads max (RNNT joint is memory-bound, more
-        // threads hurt), cpu backend (Vulkan iGPU gives same <unk> as CPU
-        // for broken Q8, and CPU is deterministic), correct locale.
+        // CPU-optimised: user-tuned threads (the RNNT joint is memory-bound;
+        // default 4), user-tuned KV ctx cap (0 = model max), correct locale.
         let output = nc
             .arg("-m").arg(&gguf)
             .arg("--language").arg(&lang_code)
-            .arg("--threads").arg("4")
+            .arg("--threads").arg(thread_n.to_string())
+            .arg("--n-ctx").arg(ctx_n.to_string())
             .arg("--backend").arg("cpu")
             .arg(wav_path)
             .output()
@@ -1894,14 +1981,18 @@ fn transcribe_nemotron(
         .lock()
         .map_err(|_| anyhow::anyhow!("Nemotron session lock poisoned"))?;
 
+    let worker_args = transcribe_cpp_worker_args(descriptor);
     let dead = guard
         .as_mut()
         .map(|s| matches!(s.child.try_wait(), Ok(Some(_))))
         .unwrap_or(true);
-    let needs_spawn =
-        dead || guard.as_ref().map(|s| s.exe_path != *cli).unwrap_or(true);
+    let needs_spawn = dead
+        || guard
+            .as_ref()
+            .map(|s| stale_worker(s, cli, &worker_args))
+            .unwrap_or(true);
     if needs_spawn {
-        *guard = Some(spawn_parakeet_session(cli)?);
+        *guard = Some(spawn_parakeet_session(cli, &worker_args)?);
     }
 
     let session = guard
@@ -1950,6 +2041,7 @@ fn transcribe_qwen3_asr(
     config: &SttEngineConfig,
     model_dir: &Path,
     wav_path: &Path,
+    descriptor: &ModelDescriptor,
 ) -> Result<String> {
     let candidates = engine_candidates(config.nemotron_path.clone(), &config.nemotron_fallbacks);
     if candidates.is_empty() {
@@ -1960,7 +2052,7 @@ fn transcribe_qwen3_asr(
     }
     let mut last: Option<anyhow::Error> = None;
     for cli in &candidates {
-        match transcribe_qwen3_asr_with(config, model_dir, wav_path, cli) {
+        match transcribe_qwen3_asr_with(config, model_dir, wav_path, cli, descriptor) {
             Ok(text) => return Ok(text),
             Err(e) => {
                 warn!("Qwen3-ASR engine {:?} failed: {:#}", cli, e);
@@ -1976,13 +2068,16 @@ fn transcribe_qwen3_asr_with(
     model_dir: &Path,
     wav_path: &Path,
     cli: &Path,
+    descriptor: &ModelDescriptor,
 ) -> Result<String> {
     let gguf = find_qwen3_gguf(model_dir)?;
     let stem = cli.file_stem().and_then(|f| f.to_str()).unwrap_or("");
     let is_tcpp_cli = stem == "transcribe-cli" || stem == "transcribe";
 
     if is_tcpp_cli {
-        info!("Qwen3-ASR via transcribe-cli {:?} gguf={:?}", cli, gguf);
+        let thread_n = param_int(descriptor, "threads").clamp(1, 16);
+        let ctx_n = param_int(descriptor, "ctx").clamp(0, 32768);
+        info!("Qwen3-ASR via transcribe-cli {:?} gguf={:?} threads={} ctx={}", cli, gguf, thread_n, ctx_n);
         let mut nc = Command::new(cli);
         no_window(&mut nc);
         // No --language: this port only supports auto-detect.
@@ -1990,7 +2085,9 @@ fn transcribe_qwen3_asr_with(
             .arg("-m")
             .arg(&gguf)
             .arg("--threads")
-            .arg("4")
+            .arg(thread_n.to_string())
+            .arg("--n-ctx")
+            .arg(ctx_n.to_string())
             .arg("--backend")
             .arg("cpu")
             .arg(wav_path)
@@ -2025,14 +2122,18 @@ fn transcribe_qwen3_asr_with(
         .lock()
         .map_err(|_| anyhow::anyhow!("Qwen3-ASR session lock poisoned"))?;
 
+    let worker_args = transcribe_cpp_worker_args(descriptor);
     let dead = guard
         .as_mut()
         .map(|s| matches!(s.child.try_wait(), Ok(Some(_))))
         .unwrap_or(true);
-    let needs_spawn =
-        dead || guard.as_ref().map(|s| s.exe_path != *cli).unwrap_or(true);
+    let needs_spawn = dead
+        || guard
+            .as_ref()
+            .map(|s| stale_worker(s, cli, &worker_args))
+            .unwrap_or(true);
     if needs_spawn {
-        *guard = Some(spawn_parakeet_session(cli)?);
+        *guard = Some(spawn_parakeet_session(cli, &worker_args)?);
     }
 
     let session = guard
@@ -2109,6 +2210,7 @@ fn transcribe_lfm3_audio(
     model_dir: &Path,
     wav_path: &Path,
     language: &str,
+    descriptor: &ModelDescriptor,
 ) -> Result<String> {
     let _serial = LFM3_SERIAL
         .lock()
@@ -2177,6 +2279,7 @@ fn transcribe_lfm3_audio(
             wav_path,
             &sys_prompt,
             &out_path,
+            descriptor,
         );
         let _ = std::fs::remove_file(&out_path);
         match result {
@@ -2197,10 +2300,13 @@ fn transcribe_lfm3_audio_with(
     wav_path: &Path,
     sys_prompt: &str,
     out_path: &Path,
+    descriptor: &ModelDescriptor,
 ) -> Result<String> {
+    let thread_n = param_int(descriptor, "threads").clamp(1, 16);
+    let ctx_n = param_int(descriptor, "ctx").clamp(512, 32768);
     info!(
-        "LFM3-Audio via llama-cli {:?} model: {:?} wav: {:?} sys: {:?}",
-        cli, model_file, wav_path, sys_prompt,
+        "LFM3-Audio via llama-cli {:?} model: {:?} wav: {:?} sys: {:?} threads={} ctx={}",
+        cli, model_file, wav_path, sys_prompt, thread_n, ctx_n,
     );
 
     let mut cmd = Command::new(cli);
@@ -2214,9 +2320,11 @@ fn transcribe_lfm3_audio_with(
         .arg("-st")
         // Keep the per-turn context small: utterances are seconds long and
         // the model supports 32K, but a 32K KV cache for every dictation
-        // turn is wasteful. 4096 tokens covers minutes of audio.
+        // turn is wasteful. 4096 tokens covers minutes of audio (default).
         .arg("-c")
-        .arg("4096")
+        .arg(ctx_n.to_string())
+        .arg("-t")
+        .arg(thread_n.to_string())
         .arg("-p")
         .arg("<__media__>")
         .arg("-sys")
@@ -2284,27 +2392,29 @@ fn parse_lfm3_asr_artifact(artifact: &str) -> String {
     cleaned
 }
 
-/// Cactus Whistle via the `needle` CLI (one-shot, offline). The CLI returns
-/// one JSON object: {"text":..,"language":..,"ttft_ms":..,"decode_tps":..}.
-/// Language is auto-detected unless the UI selects one of the seven supported
-/// languages. The process exits after the turn, so no RAM stays resident.
+/// Cactus Whistle via the `cactus` engine CLI (one-shot, offline; or chunked
+/// `--audio-stream` decode in live mode). The engine returns one JSON object
+/// per turn: {"text":..,"language":..,"ttft_ms":..,"decode_tps":..} (pieces in
+/// stream mode). Language is auto-detected unless the UI selects one of the
+/// seven supported languages. The process exits after the turn, so no RAM
+/// stays resident.
 fn transcribe_whistle(
-
     config: &SttEngineConfig,
     model_dir: &Path,
     wav_path: &Path,
     language: &str,
+    descriptor: &ModelDescriptor,
 ) -> Result<String> {
     let candidates = engine_candidates(config.whistle_path.clone(), &config.whistle_fallbacks);
     if candidates.is_empty() {
         anyhow::bail!(
             "Cactus Whistle runtime not found — install the Whistle model from \
-             Settings → Models (the Cactus `needle` CLI is fetched with it)"
+             Settings → Models (the Cactus `cactus` engine is fetched with it)"
         );
     }
     let mut last: Option<anyhow::Error> = None;
     for cli in &candidates {
-        match transcribe_whistle_with(model_dir, wav_path, language, cli) {
+        match transcribe_whistle_with(model_dir, wav_path, language, cli, descriptor) {
             Ok(text) => return Ok(text),
             Err(e) => {
                 warn!("Whistle engine {:?} failed: {:#}", cli, e);
@@ -2320,11 +2430,17 @@ fn transcribe_whistle_with(
     wav_path: &Path,
     language: &str,
     cli: &Path,
+    descriptor: &ModelDescriptor,
 ) -> Result<String> {
     let cact = model_dir.join("whistle.cact");
     if !cact.exists() {
         anyhow::bail!("Whistle model file not found: {:?}", cact);
     }
+    let thread_n = param_int(descriptor, "threads").clamp(1, 16);
+    let mode = param(descriptor, "mode");
+    let stream = mode.eq_ignore_ascii_case("stream");
+    info!("Whistle: user-tuned threads={} mode={}", thread_n, if stream { "stream" } else { "clip" });
+
     let mut cmd = Command::new(cli);
     no_window(&mut cmd);
     cmd.arg("--model").arg(&cact).arg("--audio").arg(wav_path);
@@ -2335,32 +2451,48 @@ fn transcribe_whistle_with(
             cmd.arg("--audio-language").arg(code);
         }
     }
-    let output = cmd.output().context("Failed to run Cactus needle")?;
+    cmd.arg("--threads").arg(thread_n.to_string());
+    if stream {
+        // Chunked decode: the clip is fed to the engine a chunk at a time
+        // (default 1 s per --audio-chunk) and the engine prints every piece
+        // as it is committed.
+        cmd.arg("--audio-stream").arg("--audio-chunk").arg("1");
+    }
+    let output = cmd.output().context("Failed to run Cactus cactus engine")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!("needle (Whistle) error: {}", stderr);
+        warn!("cactus (Whistle) error: {}", stderr);
         anyhow::bail!(
-            "needle failed ({}): {}",
+            "cactus failed ({}): {}",
             describe_exit(&output.status),
             stderr
         );
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // The last JSON object on stdout is the transcript (banners, if any,
-    // precede it). Fall back to trimmed stdout for older binaries.
-    for line in stdout.lines().rev() {
+    // Clip mode: the last JSON object on stdout is the transcript (banners, if
+    // any, precede it). Stream mode: the engine prints every committed piece
+    // as it is decoded — join every `text` line with a single space to
+    // reconstruct the utterance (matches the clip result).
+    let mut pieces: Vec<String> = Vec::new();
+    for line in stdout.lines() {
         let line = line.trim();
-        if line.starts_with('{') && line.contains("\"text\"") {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                return Ok(v
-                    .get("text")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .trim()
-                    .to_string());
+        if !(line.starts_with('{') && line.contains("\"text\"")) {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(v) => {
+                let t = v.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+                if !t.is_empty() {
+                    pieces.push(t.to_string());
+                }
             }
+            Err(_) => {}
         }
     }
+    if !pieces.is_empty() {
+        return Ok(pieces.join(" "));
+    }
+    // Fallback for older binaries that print bare text.
     Ok(stdout.trim().to_string())
 }
 
@@ -2404,6 +2536,7 @@ fn transcribe_canary(
     model_dir: &Path,
     wav_path: &Path,
     language: &str,
+    descriptor: &ModelDescriptor,
 ) -> Result<String> {
     let cli = config.nemotron_path.as_ref().context(
         "Canary engine not found — the Handy transcribe worker ships with the app \
@@ -2431,14 +2564,18 @@ fn transcribe_canary(
     let mut guard = CANARY_SESSION
         .lock()
         .map_err(|_| anyhow::anyhow!("Canary session lock poisoned"))?;
+    let worker_args = transcribe_cpp_worker_args(descriptor);
     let dead = guard
         .as_mut()
         .map(|s| matches!(s.child.try_wait(), Ok(Some(_))))
         .unwrap_or(true);
-    let needs_spawn =
-        dead || guard.as_ref().map(|s| s.exe_path != *cli).unwrap_or(true);
+    let needs_spawn = dead
+        || guard
+            .as_ref()
+            .map(|s| stale_worker(s, cli, &worker_args))
+            .unwrap_or(true);
     if needs_spawn {
-        *guard = Some(spawn_parakeet_session(cli)?);
+        *guard = Some(spawn_parakeet_session(cli, &worker_args)?);
     }
     let session = guard
         .as_mut()

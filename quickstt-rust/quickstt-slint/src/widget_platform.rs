@@ -1520,21 +1520,24 @@ pub fn is_minimized(_window: &slint::Window) -> bool {
 /// for windows that are re-shown after creation when a visible flicker can
 /// be absorbed (menus, flyouts, textboard) — never on windows that stay
 /// mapped all the time (the pill), so their old (smooth) 50 ms timings hold.
-#[cfg(target_os = "windows")]
+/// Re-show via SLINT API (not Win32 ShowWindow), because SLINT_DESTROY_WINDOW_ON_HIDE=1
+/// makes hide() destroy the HWND and show() re-create it with a fresh,
+/// fully-painted surface — exactly what an invalidate-DWM-redirect happens to need.
+/// Win32 SW_HIDE/SW_SHOW preserves the broken HWND, so the first show fixes
+/// nothing for this glitch (we verified the window stayed white).
 pub fn hide_show_cycle(window: &slint::Window, hold_ms: u64) {
-    let Some(raw) = hwnd_of(window) else {
+    if let Err(e) = window.hide() {
+        crate::log_line(&format!("hide_show_cycle: hide() FAILED: {e:?}"));
         return;
-    };
-    let hwnd = HWND(raw as _);
-    unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW};
-        let _ = ShowWindow(hwnd, SW_HIDE);
-        std::thread::sleep(std::time::Duration::from_millis(hold_ms));
-        let _ = ShowWindow(hwnd, SW_SHOW);
     }
+    std::thread::sleep(std::time::Duration::from_millis(hold_ms));
+    if let Err(e) = window.show() {
+        crate::log_line(&format!("hide_show_cycle: show() FAILED: {e:?}"));
+        return;
+    }
+    configure_app_window(window);
+    window.request_redraw();
 }
-#[cfg(not(target_os = "windows"))]
-pub fn hide_show_cycle(_window: &slint::Window, _hold_ms: u64) {}
 
 /// Raise the window above managed X11 siblings. Override-redirect (the pill)
 /// siblings always win on their own — menus must therefore be raised ABOVE

@@ -1235,15 +1235,19 @@ fn install_lfm3_audio(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Re
     Ok(())
 }
 
-// ── Cactus Whistle (`.cact` + Cactus `needle` runtime) ──
+// ── Cactus Whistle (`.cact` + Cactus engine) ──
 // Apache-2.0, 16.9 MB single container, 7 languages, CPU-only. The runtime is
-// the Cactus `needle` CLI (~1.5 MB) from the needle3 repo, one binary per OS;
-// it is staged in models/runtimes/whistle so engine detection finds it even
-// for portable installs.
+// the per-OS Cactus engine binary (~1.6 MB) — the CLI built from the same
+// engine as the Python `cactus` package; it is fetched from the pinned
+// `Cactus-Compute/cactus` release and staged in models/runtimes/whistle so
+// engine detection finds it even for portable installs. (Earlier builds
+// fetched a `needle` path from the needle3 repo, which only carries model
+// weights and 404s.)
 
 const WHISTLE_REPO: &str = "Cactus-Compute/whistle";
 const WHISTLE_REV: &str = "main";
-const NEEDLE3_REPO: &str = "Cactus-Compute/needle3";
+const CACTUS_REPO: &str = "Cactus-Compute/cactus";
+const CACTUS_RELEASE: &str = "releases/4.1.1"; // pinned engine release train
 
 fn install_whistle(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<()> {
     let models_root = catalog::models_root();
@@ -1303,12 +1307,17 @@ fn install_needle_runtime(state: &SharedState) -> anyhow::Result<()> {
     let rt_dir = catalog::models_root().join("runtimes/whistle");
     std::fs::create_dir_all(&rt_dir)?;
 
-    let (dest_name, remote) = if cfg!(target_os = "windows") {
-        ("needle.exe", "windows-x86_64/needle.exe")
+    // Per-OS Cactus engine binary from the pinned release. The old staging
+    // name `needle(.exe)` is still accepted by engine detection so existing
+    // installs keep working; new installs stage `cactus(.exe)`.
+    let (dest_name, remote) = if cfg!(target_os = "windows") && cfg!(target_arch = "x86_64") {
+        ("cactus.exe", "windows-x86_64/cactus.exe")
+    } else if cfg!(target_os = "windows") {
+        ("cactus.exe", "windows-arm64/cactus.exe")
     } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
-        ("needle", "linux-x86_64/needle")
+        ("cactus", "linux-x86_64/cactus")
     } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
-        ("needle", "linux-arm64/needle")
+        ("cactus", "linux-arm64/cactus")
     } else {
         // No runnable CLI target on this platform; the model still installs
         // and engine detection reports the missing runtime.
@@ -1323,10 +1332,10 @@ fn install_needle_runtime(state: &SharedState) -> anyhow::Result<()> {
     {
         return Ok(());
     }
-    set_status(state, "Downloading Cactus needle runtime…".into());
+    set_status(state, "Downloading Cactus engine runtime…".into());
     let url = format!(
-        "https://huggingface.co/{}/resolve/main/{}",
-        NEEDLE3_REPO, remote
+        "https://huggingface.co/{}/resolve/main/{}/{}",
+        CACTUS_REPO, CACTUS_RELEASE, remote
     );
     download_file(
         &url,

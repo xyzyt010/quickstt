@@ -148,6 +148,11 @@ pub struct Settings {
     /// 2 = Most accurate. Drives the hardware-aware recommendation weights.
     #[serde(default)]
     pub model_priority: u32,
+    /// Model-specific parameter overrides.
+    /// Key format: `<model_dir>|<param_key>` → stringly-typed value
+    /// ("4", "true", "stream" …). Missing key means use the model's default.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_params: HashMap<String, String>,
     /// Widget visibility (Show/Hide). Default shown; toggles persist across
     /// restarts/updates. Hidden only hides the pill window — the app, tray,
     /// hotkeys and wakewords keep running, and any trigger re-shows it.
@@ -257,6 +262,7 @@ impl Default for Settings {
             transient_action: 0,
             selected_microphone: String::new(),
             model_priority: 0,
+            model_params: HashMap::new(),
             show_widget: true,
             extra: HashMap::new(),
         }
@@ -325,6 +331,15 @@ impl Settings {
             .filter_map(|entry| entry.split_once('='))
             .map(|(model, lang)| (model.trim().to_string(), lang.trim().to_string()))
             .filter(|(model, lang)| !model.is_empty() && !lang.is_empty())
+            .collect();
+        // Per-model parameter overrides. Key = "model_dir|param_key", value =
+        // string (e.g. "4", "true", "stream").
+        settings.model_params = read_multi_string(key, "modelParams")
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|entry| entry.split_once('='))
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .filter(|(k, _v)| !k.is_empty())
             .collect();
         settings.widget_models = read_multi_string(key, "widgetModels").unwrap_or_default();
         if settings.widget_models.len() == 1
@@ -746,6 +761,18 @@ impl Settings {
                     .filter(|(model, lang)| !model.is_empty() && !lang.is_empty())
                     .collect();
             }
+            "modelParams" => {
+                self.model_params = values
+                    .iter()
+                    .filter_map(|entry| {
+                        entry.split_once('=').and_then(|(k, v)| {
+                            let k = k.trim().to_string();
+                            let v = v.trim().to_string();
+                            if k.is_empty() { None } else { Some((k, v)) }
+                        })
+                    })
+                    .collect();
+            }
             _ => {
                 // Store as comma-joined fallback
                 self.extra.insert(key.to_string(), values.join(","));
@@ -803,6 +830,23 @@ impl Settings {
         }
     }
 
+    /// Persist per-model parameter overrides ("model_dir|key=value").
+    pub fn save_model_params(&self) -> QuickSttResult<()> {
+        let pairs: Vec<String> = self
+            .model_params
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        #[cfg(target_os = "windows")]
+        {
+            Self::save_multi_string_windows("modelParams", &pairs)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.save_to_toml()
+        }
+    }
+
     /// Persist entire settings object — used by Settings UI
     pub fn save_all(&self) -> QuickSttResult<()> {
         #[cfg(target_os = "windows")]
@@ -851,6 +895,13 @@ impl Settings {
                 .map(|(model, lang)| format!("{model}={lang}"))
                 .collect();
             let _ = write_multi("modelLanguages", &model_lang_pairs);
+            // Per-model parameter overrides ("model_dir|key=value").
+            let param_pairs: Vec<String> = self
+                .model_params
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            let _ = write_multi("modelParams", &param_pairs);
             let _ = write_str("wakeEngine", &self.wake_engine);
             let _ = write_str("porcupineAccessKey", &self.porcupine_access_key);
             let _ = write_str("recordingDir", &self.recording_dir);

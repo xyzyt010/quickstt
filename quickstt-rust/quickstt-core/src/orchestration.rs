@@ -618,11 +618,18 @@ fn flush_pending_utterance(
     }
     let tx_clone = tx_cmd.clone();
     let state_err = Arc::clone(state);
+    let model_params_snapshot = state.lock().map(|s| s.settings.model_params.clone()).unwrap_or_default();
     std::thread::Builder::new()
         .name("stt-transcribe".to_string())
         .spawn(move || {
             // Cached engine detection (no per-utterance probing).
             let config = crate::models::engine::cached_config();
+            // Refresh the parameter override map every call so the engines
+            // honour the latest settings without reaching into settings
+            // deeper than they need to.
+            if let Ok(mut m) = crate::models::engine::LATEST_MODEL_PARAMS.lock() {
+                *m = model_params_snapshot.clone();
+            }
             let t0 = std::time::Instant::now();
             match crate::models::engine::transcribe_with_language(
                 &config,
@@ -828,10 +835,14 @@ fn process_audio_chunk(
         let tx_clone = tx_cmd.clone();
         let wav_clone = wav_path.clone();
         let state_err = Arc::clone(state);
+        let model_params_snapshot = state.lock().map(|s| s.settings.model_params.clone()).unwrap_or_default();
         let _ = std::thread::Builder::new()
             .name("stt-transcribe".to_string())
             .spawn(move || {
                 let config = crate::models::engine::cached_config();
+                if let Ok(mut m) = crate::models::engine::LATEST_MODEL_PARAMS.lock() {
+                    *m = model_params_snapshot.clone();
+                }
                 let t0 = std::time::Instant::now();
                 match crate::models::engine::transcribe_with_language(
                     &config,
@@ -1029,7 +1040,7 @@ impl AppOrchestrator {
         // ── Platform filter ──
         // Models whose engine has no runtime on THIS OS never make the list.
         // Windows ships every engine binary; Linux builds parakeet / whisper /
-        // transcribe.cpp and fetches libvosk + the Cactus needle CLI on demand,
+        // transcribe.cpp and fetches libvosk + the Cactus engine on demand,
         // but sherpa-onnx (Moonshine) has no Linux runtime at all — offering it
         // would install and then silently never transcribe.
         let platform_hidden: Vec<String> = selected_descriptors

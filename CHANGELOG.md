@@ -1,8 +1,68 @@
 # Changelog
 
+## [2.0.0-alpha.34] — 2026-11-15
+
+The release that makes models configurable. Every catalog model now surfaces
+the parameters its engine actually honours — one panel on the Speech Models
+tab, beside the existing per-model language dropdown — plus two long-standing
+fixes carried over from the alpha.33 bring-up.
+
+### Added
+- **Model parameters panel (all catalogued engines).** A new "Model
+  parameters" card sits under the per-model language dropdown on the Speech
+  Models tab (Tab 1) and adapts its rows to the active model:
+  - **Whisper.cpp**: Threads (slider 1–16, default 4), Beam size (slider
+    1–8, default 5), Translate to English (toggle, `-tr`).
+  - **Sherpa-ONNX / NeMo Transducer / NeMo CTC (Moonshine family)**: Threads
+    (`--num-threads=N`).
+  - **Nemotron 3.5 Streaming / Qwen3-ASR / Canary Flash**: Threads
+    (`--threads N` at worker spawn — verified accepted by the shipped
+    transcribe.cpp Handy worker and by the TCPP fallback CLI), Context window
+    (`--n-ctx N`, Choice 0–4096; 0 = model maximum), Canary additionally
+    exposes Translate to English (`--translate`).
+  - **Cactus Whistle**: Threads (`--threads N`), Mode (Choice, `clip` default
+    / `stream` — stream feeds the utterance through `--audio-stream
+    --audio-chunk 1` so it decodes like a live pass; output pieces join with
+    spaces).
+  - **LFM3-Audio 2B**: Threads (`llama-cli -t N`), Context window (`-c N`,
+    default 4096; the whole dictation KV cache).
+  - Parakeet TDT / Phonon-2 / SenseVoice / Vosk / Photon / Canary-Qwen expose
+    **no** knobs through this layer (Handy ONNX/Python workers carry no
+    session-level CLI surface we can honestly drive); the panel stays hidden
+    for them.
+  - Values persist per model in settings (`model_params` — registry
+    `modelParams` on Windows, TOML on Linux/macOS), are refreshed per
+    transcription turn, and the persistent transcribe.cpp workers respawn
+    automatically when the user changes Threads/Context/Translate
+    (spawn-args comparison, no stale sessions).
+
+### Fixed
+- **Taskbar minimize → restore left the dashboard blank/white** on this
+  Windows build even after the alpha.33 SW_HIDE/SW_SHOW cycle on `IsIconic`
+  transition. The cycle now uses Slint's `window.hide()`/`window.show()`
+  instead of raw Win32 calls (with `SLINT_DESTROY_WINDOW_ON_HIDE=1` set, hide
+  destroys and show() re-creates the HWND, which re-seats the DWM redirect
+  bitmap), followed by `configure_app_window` + `request_redraw()`.
+  Verified across repeated minimize/restore cycles.
+- **Sidebar collapse toggle direction** (alpha.33 showed the X on the rail).
+  Final layout: expanded sidebar shows the **X (close)** glyph on top (click
+  to collapse), collapsed rail shows the **hamburger (menu)** glyph on top
+  (click to expand). Rail icons remain pixel-centered.
+- **Cactus Whistle runtime could never be downloaded**: the staging URL
+  pointed at `Cactus-Compute/needle3`, which only ships model weights
+  (404 on the expected path). The runtime now comes from the pinned
+  `Cactus-Compute/cactus` release (`releases/4.1.1`), per-OS binary
+  (linux-x86_64 / linux-arm64 / windows-x86_64 / windows-arm64), staged as
+  `cactus(.exe)`. Legacy `needle` names are still accepted by engine
+  detection so existing installs keep working.
+
+### Changed
+- Bump version to 2.0.0-alpha.34.
+
 ## [2.0.0-alpha.33] — 2026-11-15
 
-Bug fix for wakeword-off mode.
+Bug fix release for wakeword-off dictation, the side-bar collapse toggle,
+and minimize→restore rendering.
 
 ### Fixed
 - **When wakewords are Off, the background mic is fully muted for triggers.**
@@ -12,6 +72,21 @@ Bug fix for wakeword-off mode.
   With wakewords off the entire acoustic auto-start path is now silenced:
   no wakewords, no claps, no applause. Dictation only ever starts from an
   explicit user action (Ctrl+Space / mic tap).
+- **Sidebar collapsed-state toggle was missing/mis-rendered**: the brand row
+  with the logo + "QuickSTT" wordmark hid the collapse button in rail mode and
+  the collapsed-mode X glyph was briefly drawn as the literal text "E5C".
+  - The rail now shows one morphing toggle: hamburger (menu icon) in expanded
+    sidebar → X (close icon) in the collapsed rail, matching the Material
+    baseline.
+  - The toggle sits at the left edge of the sidebar in both modes (12px padding
+    in expanded, centered in rail).
+  - Glyph-escaping fixed before the Slint compile (the previous double-
+    backslash stored the literal characters `\u{E5CD}` / `\u{E5D2}` in the
+    string), so the hamburger/X are real font glyphs on Windows.
+- **Taskbar minimize → restore left the dashboard white / invisible** on this
+  Windows build. The 50ms poll now also detects the `IsIconic` transition
+  (minimized → restored) and re-runs the same SW_HIDE/SW_SHOW sequence used
+  on first show. No manual show/hide ever needed.
 
 ## [2.0.0-alpha.32] — 2026-11-15
 

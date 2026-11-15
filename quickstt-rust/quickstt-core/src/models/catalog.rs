@@ -23,11 +23,137 @@ pub struct ModelDescriptor {
     pub gpu_only: bool,
 }
 
+impl ModelDescriptor {
+    /// Model-specific params surfaced to the user on the Models screen.
+    /// Empty list = user can't customise this model. Every entry must be a
+    /// knob the engine actually honours — see the per-family wiring in
+    /// `models::engine`. Language is intentionally absent everywhere: the
+    /// existing per-model language dropdown already owns that setting.
+    pub fn params(&self) -> Vec<ParamSpec> {
+        use EngineFamily::*;
+        match self.engine_family {
+            WhisperCpp => vec![threads_param(), beam_size_param(), translate_param()],
+            SherpaOnnx | NemoTransducer | NemoCTC => vec![threads_param()],
+            ParakeetRust | Phonon2 | SenseVoice => vec![],
+            Vosk => vec![],
+            Nemotron => vec![threads_param(), ctx_param()],
+            Qwen3Asr => vec![threads_param(), ctx_param()],
+            Whistle => vec![threads_param(), mode_param()],
+            Canary => vec![threads_param(), ctx_param(), translate_param()],
+            Photon => vec![],
+            // Canary-Qwen = NeMo SALM python worker (CUDA-only). No exposed
+            // knob through the app pipeline.
+            CanaryQwen => vec![],
+            Lfm3Audio => vec![threads_param(), lfm3_ctx_param()],
+        }
+    }
+
+    pub fn param_value(
+        &self,
+        model_params: &std::collections::HashMap<String, String>,
+        key: &str,
+    ) -> Option<String> {
+        let scoped = format!("{}|{}", self.model_dir, key);
+        model_params.get(&scoped).cloned().or_else(|| {
+            self.params()
+                .into_iter()
+                .find(|p| p.key == key)
+                .map(|p| p.default)
+        })
+    }
+}
+
+fn threads_param() -> ParamSpec {
+    ParamSpec {
+        key: "threads".into(),
+        label: "Threads".into(),
+        kind: ParamKind::IntRange { lo: 1, hi: 16 },
+        default: "4".into(),
+        hint: "CPU threads the engine may use per utterance.".into(),
+    }
+}
+
+fn ctx_param() -> ParamSpec {
+    ParamSpec {
+        key: "ctx".into(),
+        label: "Context window".into(),
+        kind: ParamKind::Choice(vec!["256".into(), "512".into(), "1024".into(), "2048".into(), "4096".into()]),
+        default: "1024".into(),
+        hint: "Max KV tokens — larger keeps more context, but uses more RAM.".into(),
+    }
+}
+
+fn mode_param() -> ParamSpec {
+    ParamSpec {
+        key: "mode".into(),
+        label: "Mode".into(),
+        kind: ParamKind::Choice(vec!["clip".into(), "stream".into()]),
+        default: "clip".into(),
+        hint: "clip = decode the whole utterance at once; stream = feed the utterance to the engine chunk-by-chunk (decodes like a live pass).".into(),
+    }
+}
+
+fn translate_param() -> ParamSpec {
+    ParamSpec {
+        key: "translate".into(),
+        label: "Translate to English".into(),
+        kind: ParamKind::Toggle,
+        default: "false".into(),
+        hint: "Emit English text even when the speaker used another supported language.".into(),
+    }
+}
+
+fn beam_size_param() -> ParamSpec {
+    ParamSpec {
+        key: "beam_size".into(),
+        label: "Beam size".into(),
+        kind: ParamKind::IntRange { lo: 1, hi: 8 },
+        default: "5".into(),
+        hint: "Decoding candidates kept per step — higher = slower but more accurate.".into(),
+    }
+}
+
+fn lfm3_ctx_param() -> ParamSpec {
+    ParamSpec {
+        key: "ctx".into(),
+        label: "Context window".into(),
+        kind: ParamKind::Choice(vec!["512".into(), "1024".into(), "2048".into(), "4096".into(), "8192".into(), "16384".into(), "32768".into()]),
+        default: "4096".into(),
+        hint: "KV cache in tokens — keep this small; dictations are only seconds long.".into(),
+    }
+}
+
 fn default_accuracy() -> u8 {
     70
 }
 fn default_speed() -> u8 {
     70
+}
+
+/// One user-tweakable parameter. Per-family params are returned by
+/// [`ModelDescriptor::params`]. Values are persisted per model in
+/// `settings.model_params` as strings (typed decode on use).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamSpec {
+    /// Stable key, lowercase snake_case ("threads", "mode", …).
+    pub key: String,
+    /// UI label ("Threads", "Mode").
+    pub label: String,
+    pub kind: ParamKind,
+    /// Persisted default when no user value exists.
+    pub default: String,
+    /// One-line tooltip (wired into the UI).
+    pub hint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ParamKind {
+    /// Integer in [lo, hi].
+    IntRange { lo: i32, hi: i32 },
+    /// Boolean — UI shows a checkbox/toggle.
+    Toggle,
+    /// Pick exactly one entry; entries appear in this order.
+    Choice(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,7 +183,7 @@ pub enum EngineFamily {
     /// rejected upstream, so the UI offers "Auto" alone.
     Qwen3Asr,
     /// Cactus Whistle (Apache-2.0): a single 16.9 MB `.cact` container run by
-    /// the Cactus `needle` CLI. Offline, CPU-only, 7 languages with language
+    /// the Cactus engine CLI. Offline, CPU-only, 7 languages with language
     /// detection. One-shot process per utterance (no idle RAM to release).
     Whistle,
     /// Handy transcribe.cpp GGUF worker (same JSON protocol as Nemotron):
@@ -1055,7 +1181,7 @@ pub fn recommend_model(
 ///
 /// Windows ships every engine binary. On Linux the release pipeline builds
 /// parakeet_engine, whisper-cli and transcribe.cpp (Nemotron/Canary/Qwen3),
-/// libvosk.so is fetched on demand, and the Cactus `needle` CLI has per-OS
+/// libvosk.so is fetched on demand, and the Cactus engine CLI has per-OS
 /// releases — but **sherpa-onnx has no Linux runtime at all** (nothing builds
 /// or downloads `sherpa-onnx-offline` for Linux), so Moonshine cannot run
 /// there. Offering it would be a guaranteed "installs, then never transcribes".

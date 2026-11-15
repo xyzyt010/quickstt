@@ -14,7 +14,7 @@ QuickSTT is **100% offline** by default. Every model runs on-device via `quickst
 | **Qwen3-ASR 0.6B Q4_K_M** | `Qwen3Asr` (same `transcribe.cpp` worker, offline) | `qwen3_asr/qwen3-0.6b-q4km/` | same | same | 562 MB | 30-language offline ASR with auto language detect |
 | **LFM3-Audio 2B Q4_0** | `Lfm3Audio` (llama.cpp `llama cli` b11960 / v0.8.0+, GGUF + mmproj) | `lfm3_audio/lfm3_audio_2b_q4_0/` | same | same | 1155 MB | Liquid any-to-any speech LLM ASR, 18 languages, English-class accuracy |
 | **LFM3-Audio 2B Q4_K_M** | `Lfm3Audio` (llama.cpp `llama cli` b11960 / v0.8.0+, GGUF + mmproj) | `lfm3_audio/lfm3_audio_2b_q4_k_m/` | same | same | 1213 MB | Recommended 4-bit quant of LFM3-Audio-2B, 18 languages |
-| **Cactus Whistle 16M** | `Whistle` (Cactus `needle` CLI, `.cact`) | `whistle/whistle-16m/` | same | same | 17 MB | Tiny 7-language CPU ASR, one-shot |
+| **Cactus Whistle 16M** | `Whistle` (Cactus `cactus` engine CLI, `.cact`) | `whistle/whistle-16m/` | same | same | 17 MB | Tiny 7-language CPU ASR, one-shot or chunked stream |
 
 LFM3-Audio needs the **llama.cpp `llama-cli` runtime**, which the installers
 ship under `tools/lfm3_audio/` (Windows: CPU binary + ggml dispatch DLLs;
@@ -68,13 +68,13 @@ mkdir -p ~/.local/share/QuickSTT/models/qwen3_asr/qwen3-0.6b-q4km
 curl -L -o ~/.local/share/QuickSTT/models/qwen3_asr/qwen3-0.6b-q4km/Qwen3-ASR-0.6B-Q4_K_M.gguf \
   https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/main/Qwen3-ASR-0.6B-Q4_K_M.gguf
 
-# Cactus Whistle (17M) + its needle runtime
+# Cactus Whistle (17M) + the Cactus engine runtime
 mkdir -p ~/.local/share/QuickSTT/models/whistle/whistle-16m ~/.local/share/QuickSTT/models/runtimes/whistle
 curl -L -o ~/.local/share/QuickSTT/models/whistle/whistle-16m/whistle.cact \
   https://huggingface.co/Cactus-Compute/whistle/resolve/main/whistle.cact
-curl -L -o ~/.local/share/QuickSTT/models/runtimes/whistle/needle \
-  https://huggingface.co/Cactus-Compute/needle3/resolve/main/linux-x86_64/needle
-chmod +x ~/.local/share/QuickSTT/models/runtimes/whistle/needle
+curl -L -o ~/.local/share/QuickSTT/models/runtimes/whistle/cactus \
+  https://huggingface.co/Cactus-Compute/cactus/resolve/main/releases/4.1.1/linux-x86_64/cactus
+chmod +x ~/.local/share/QuickSTT/models/runtimes/whistle/cactus
 ```
 
 DeepFilter frontend (`DeepFilterNet3.tar.gz`) is optional; `engine.rs:198` skips it for `Nemotron|Vosk` (they have internal VAD). For Whisper/Sherpa it can run if `QUICKSTT_DEEPFILTER_FRONTEND=1`.
@@ -170,22 +170,25 @@ printf 'DOWNLOAD Qwen3-ASR\n' | timeout 2 bash -c 'cat > /dev/tcp/127.0.0.1/4763
 ## Cactus Whistle 16M (Cactus Compute)
 
 `EngineFamily::Whistle` runs **Cactus Whistle** from a single 16.9 MB
-`.cact` container on the Cactus `needle` CPU engine. Seven languages
+`.cact` container on the Cactus CPU engine. Seven languages
 (en/de/fr/es/it/nl/pl) with in-model detection, no GPU, no Python. It is
-per-utterance: the app invokes `needle --model whistle.cact --audio <wav>`
+per-utterance: the app invokes `cactus --model whistle.cact --audio <wav>`
 once per turn, so the process exits and releases its RAM immediately.
 
 | File | Source |
 |---|---|
 | `whistle.cact` (16.9 MB) | `Cactus-Compute/whistle` |
 | `config.json` | same |
-| `runtimes/whistle/needle` | `Cactus-Compute/needle3` → `linux-x86_64`, `windows-x86_64`, `linux-arm64` |
+| `runtimes/whistle/cactus` | `Cactus-Compute/cactus` → `releases/4.1.1/{linux-x86_64,linux-arm64,windows-x86_64,windows-arm64}/cactus(.exe)` |
 
 Output is one JSON object (`text`, detected `language`, `ttft_ms`,
-`decode_tps`). The dashboard language list is `Auto` + the seven languages;
-`Auto` lets the model detect. The runtime binary is downloaded with the model
-(never bundled) into `models/runtimes/whistle/`, and engine detection also
-accepts `tools/whistle/needle` next to the executable for portable builds.
+`decode_tps`); in stream mode (`--audio-stream`) the engine prints one piece
+per committed chunk and the app joins the pieces with spaces. The dashboard
+language list is `Auto` + the seven languages; `Auto` lets the model detect.
+The runtime binary is downloaded with the model (never bundled) into
+`models/runtimes/whistle/`, and engine detection also accepts
+`tools/whistle/cactus` next to the executable for portable builds (legacy
+`needle` names are still accepted for existing installs).
 
 **Android differs:** the APK bundles `whistle.cact` in
 `assets/models/whistle.cact`, extracts it into the app's private model
@@ -209,7 +212,7 @@ printf 'DOWNLOAD Cactus Whistle\n' | timeout 2 bash -c 'cat > /dev/tcp/127.0.0.1
 - **SenseVoice:** `transcribe-rs` Rust ONNX CTC session (`SenseVoice` family), CPU EP; `model.int8.onnx` + `tokens.txt` from `sensevoice/small_multilingual/`, language token chosen in the dashboard (`Auto` by default).
 - **Nemotron:** `nemotron_engine` (built from `tools/nemotron` `transcribe.cpp` Handy) invoked `nemotron_engine --model *.gguf --audio *.wav --vad` (`engine.rs:find_gguf_file`).
 - **Qwen3-ASR:** same persistent Handy worker (`nemotron_engine`), offline `{"action":"load","language":"auto"}` + `{"action":"transcribe"}`; Linux falls back to `tools/nemotron/transcribe-cli -m *.gguf`.
-- **Cactus Whistle:** one-shot Cactus `needle --model whistle.cact --audio *.wav [--audio-language xx]`; the JSON `text` field is the transcript, and on desktop the process exits after each turn (no idle RAM). The Android build keeps the model onloaded/offloaded explicitly.
+- **Cactus Whistle:** one-shot Cactus `cactus --model whistle.cact --audio *.wav [--audio-language xx]` (chunked `--audio-stream` decode when the user picks stream mode in Model parameters); the JSON `text` field is the transcript, and on desktop the process exits after each turn (no idle RAM). The Android build keeps the model onloaded/offloaded explicitly.
 
 At runtime `RUST_LOG=info quickstt 2>&1 | grep -E "Whisper|Parakeet|Vosk|Nemotron|libvosk|libonnx"` shows which engine fired.
 
