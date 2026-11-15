@@ -401,96 +401,29 @@ export component DashboardWidget inherits Window {
                     padding: root.rail-active ? 6px : 12px;
                     spacing: 8px;
 
-                    // Brand row: the app logo centred against the wordmark,
-                    // right-aligned menu button for collapse/expand. The same
-                    // icon_app.png ships everywhere (exe, tray, installer, both
-                    // platforms), so the brand is pixel-identical on Windows/Mint.
-                    if root.rail-active : Rectangle {
-                        height: 44px;
-                        Image {
-                            source: @image-url("../../assets/app_icon.svg");
-                            // Centre the 44-px artwork by raw pixel math — the
-                            // Slint layout's `alignment: center` is off by ~16px
-                            // against the invisible wordmark when both are in
-                            // the tree.
-                            width: 34px;
-                            height: 40px;
-                            image-fit: contain;
-                            x: (parent.width - 34px) / 2;
-                            y: (parent.height - 40px) / 2;
-                        }
-                    }
-                    if !root.rail-active : HorizontalLayout {
-                        spacing: 10px;
-                        padding-left: 4px;
-                        padding-right: 2px;
-                        alignment: start;
-
-                        Image {
-                            source: @image-url("../../assets/app_icon.svg");
-                            width: 32px;
-                            height: 43px;
-                            image-fit: contain;
-                            y: (parent.height - self.height) / 2;
-                        }
-                        VerticalLayout {
-                            spacing: 0px;
-                            padding-top: 2px;
-                            Text {
-                                text: "QuickSTT";
-                                font-size: 16px;
-                                font-weight: 700;
-                                color: #FFFFFF;
-                                vertical-alignment: center;
-                            }
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                        // Collapse / expand — minimal Material Symbols menu glyph
-                        // in a 40px touch target (was a hand-drawn hamburger).
-                        Rectangle {
-                            width: root.tap-size;
-                            height: 40px;
-                            border-radius: 8px;
-                            background: chev_touch.has-hover ? #161616 : transparent;
-                            border-width: chev_touch.has-hover ? 1px : 0px;
-                            border-color: #262626;
-                            IconSym {
-                                glyph: "\u{E5D2}";
-                                tint: chev_touch.has-hover ? #FFFFFF : #9A9A9A;
-                                size: 22px;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                            }
-                            chev_touch := TouchArea {
-                                // Write the property directly for a 0 ms visual
-                                // response (the callback alone only persisted the
-                                // choice — the UI never followed along live).
-                                clicked => {
-                                    root.sidebar-collapsed = !root.sidebar-collapsed;
-                                    root.set-sidebar-collapsed(root.sidebar-collapsed);
-                                }
-                                mouse-cursor: pointer;
-                            }
-                        }
-                    }
-
-                    // Rail mode sites its own expand button: the wordmark
-                    // collapse button is hidden there, so the icon needs one.
+                    // Sidebar collapse/expand toggle. The glyph morphs between
+                    // hamburger (collapse) and close/X (expand) based on the
+                    // live collapsed state, the way every Material sidebar
+                    // does it. Left-aligned in expanded mode (matches the nav
+                    // items), centered in the collapsed rail.
                     Rectangle {
-                        visible: root.rail-active;
-                        height: 44px;
+                        height: root.rail-active ? 44px : 40px;
                         border-radius: 8px;
-                        background: chev2_touch.has-hover ? #161616 : transparent;
-                        border-width: chev2_touch.has-hover ? 1px : 0px;
+                        background: chev_touch.has-hover ? #161616 : transparent;
+                        border-width: chev_touch.has-hover ? 1px : 0px;
                         border-color: #262626;
                         IconSym {
-                            glyph: "\u{E5D2}";
-                            tint: chev2_touch.has-hover ? #FFFFFF : #9A9A9A;
+                            // E5D2 = menu, E5CD = close. When the sidebar is
+                            // expanded (showing items), the button collapses
+                            // to rail — show the hamburger. When collapsed,
+                            // it expands — show the X.
+                            glyph: root.sidebar-collapsed ? "\u{E5CD}" : "\u{E5D2}";
+                            tint: chev_touch.has-hover ? #FFFFFF : #9A9A9A;
                             size: 22px;
-                            x: (parent.width - self.width) / 2;
+                            x: root.rail-active ? (parent.width - self.width) / 2 : 12px;
                             y: (parent.height - self.height) / 2;
                         }
-                        chev2_touch := TouchArea {
+                        chev_touch := TouchArea {
                             clicked => {
                                 root.sidebar-collapsed = !root.sidebar-collapsed;
                                 root.set-sidebar-collapsed(root.sidebar-collapsed);

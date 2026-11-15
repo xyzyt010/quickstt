@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.0.0-alpha.33] — 2026-11-15
+
+Bug fix for wakeword-off mode.
+
+### Fixed
+- **When wakewords are Off, the background mic is fully muted for triggers.**
+  The background listener still ran for clap detection (and level metering),
+  and the clap arbiter would start dictation on many non-speech sounds
+  (coughs, doors, keyboard thumps, music onsets) — even with wake = Off.
+  With wakewords off the entire acoustic auto-start path is now silenced:
+  no wakewords, no claps, no applause. Dictation only ever starts from an
+  explicit user action (Ctrl+Space / mic tap).
+
 ## [2.0.0-alpha.32] — 2026-11-15
 
 Rendering + polish fixes for the dashboard and floating overlays.

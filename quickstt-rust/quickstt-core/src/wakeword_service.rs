@@ -419,6 +419,14 @@ fn process_audio_chunk(
         }
         _ => {}
     }
+    // HARD OFF: wakewords Off means dictation is completely manual (mic tap or
+    // Ctrl+Space). No clap, no applause, no whistle will open a session — the
+    // user's complaint was exactly that the pill kept firing off on ambient
+    // noise when claps were still armed. The ONNX detector, VAD and acoustic
+    // arbiter all stay silent here.
+    if !wakewords_enabled {
+        return false;
+    }
 
     // Clap first: detections go through the two-chunk arbiter: only
     // ISOLATED impulses act, while sustained sounds (speech syllables,
@@ -428,9 +436,9 @@ fn process_audio_chunk(
     // Background handles START (idle → listen); STOP is handled in the
     // foreground thread, which owns the mic while a session is live.
     // The level meter below always runs regardless of the clap action.
-    if *transient_action != TRANSIENT_DISABLED {
+    if wakewords_enabled && *transient_action != TRANSIENT_DISABLED {
         let detected = transient.process(chunk);
-        if detected.is_some() && wakewords_enabled {
+        if detected.is_some() {
             engine.suppress(0.4);
         }
         // Raw detections log at info (pre-arbiter): separates "clap never

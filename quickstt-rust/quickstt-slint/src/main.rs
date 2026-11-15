@@ -4501,6 +4501,13 @@ fn dock_hop(
     let mut last_toppin = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
+    // Dashboard minimization detector: on Windows the taskbar button calls
+    // ShowWindow(SW_MINIMIZE) which leaves the HWND at -32000 with a zeroed
+    // redirect bitmap — restore brings it back WHITE until some other event
+    // repaints it. Poll IsIconic and, when the dashboard transitions from
+    // iconic to normal, replay the same hide/show cycle the first-show fix does.
+    #[cfg(target_os = "windows")]
+    let mut dash_iconic = false;
     let mut last_onb_toppin = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
@@ -4831,6 +4838,21 @@ fn dock_hop(
             // white box if unpainted-opaque. Re-requesting while visible
             // closes that hole within a tick. Small windows: every tick
             // (cheap); the fullscreen overlay has its own 150ms throttle.
+            // Windows minimization: when the dashboard was minimized and is
+            // now active again, DWM lost its redirect bitmap — this is the
+            // exact "restore shows a white window" glitch. Detect the
+            // iconic → non-iconic transition and replay the hide/show cycle
+            // the first-show fix already uses. We don't gate on is_visible
+            // because Slint keeps minimized windows as "visible" in its own
+            // model — IsIconic is the authority.
+            #[cfg(target_os = "windows")]
+            {
+                let iconic_now = widget_platform::is_minimized(d.window());
+                if dash_iconic && !iconic_now {
+                    widget_platform::hide_show_cycle(d.window(), 120);
+                }
+                dash_iconic = iconic_now;
+            }
             if d.window().is_visible() {
                 d.window().request_redraw();
             }

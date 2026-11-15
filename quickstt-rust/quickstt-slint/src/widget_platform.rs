@@ -1489,6 +1489,23 @@ pub fn ensure_widget_top(window: &slint::Window) {
     }
 }
 
+/// True when the OS has minimized this window (taskbar button / minimize
+/// button). Slint's winit backend collapses the window to a placeholder
+/// `-32000,-32000` and drops the redirect bitmap, so re-activating it can
+/// paint nothing (the user's "taskbar restore shows a white window" glitch).
+#[cfg(target_os = "windows")]
+pub fn is_minimized(window: &slint::Window) -> bool {
+    let Some(raw) = hwnd_of(window) else {
+        return false;
+    };
+    use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+    unsafe { IsIconic(windows::Win32::Foundation::HWND(raw as _)).as_bool() }
+}
+#[cfg(not(target_os = "windows"))]
+pub fn is_minimized(_window: &slint::Window) -> bool {
+    false
+}
+
 /// Strip window-manager chrome on X11 (XFCE/xfwm4, Cinnamon-X11, XWayland):
 /// no title bar, no taskbar/pager entry, always-on-top, sticky. Without
 /// this the pill carries an OS caption, its reported position includes the
