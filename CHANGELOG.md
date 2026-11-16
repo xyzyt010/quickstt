@@ -1,5 +1,35 @@
 # Changelog
 
+## [2.0.0-alpha.35] — 2026-11-16
+
+Linux pill-menu stacking + shape fix.
+
+### Fixed
+- **Linux (Xfce/Mutter/XWayland): the mini-pill's right-click menu could not
+  escape the pill.** On this machine the pill is an override-redirect
+  (true-widget) window; managed siblings can't raise above an
+  override-redirect sibling under xfwm4 no matter the `StackMode::ABOVE`
+  raise ordering, so the menu (a managed window) was always parked below
+  the pill. The frameless menu windows now join the same override-redirect
+  layer on first show — exactly what the pill itself does — so they stack
+  above the expanded pill at all times. Keyboard focus/dismissal paths are
+  unchanged (Winit/XSetInputFocus handles it).
+- **Menus now raise ABOVE the pill after the hide/show re-creation,
+  not before.** `SLINT_DESTROY_WINDOW_ON_HIDE=1` tears down and
+  re-creates the window on every hide/show on Windows (and avoids a freshly
+  re-created Linux window seating itself below the pill); the z-order raise
+  is the last step now, matching the 2-second z-order heartbeat which always
+  raised the pill first and the menus after.
+- **The right-click menu had an opaque dark square frame.** The frameless
+  frameless menu windows now use `background: transparent` (like the pill and
+  the dock overlay) so the rounded card composites cleanly — the 14/12/10px
+  radius shows through as intended on the Linux desktop, matching Windows.
+- Tray menu (`TrayMenu`), pill menu (`PillMenu`) and submenu flyout
+  (`MenuFlyout`) all fixed.
+
+### Changed
+- Bump version to 2.0.0-alpha.35.
+
 ## [2.0.0-alpha.34] — 2026-11-15
 
 The release that makes models configurable. Every catalog model now surfaces

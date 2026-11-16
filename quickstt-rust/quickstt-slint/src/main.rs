@@ -874,6 +874,11 @@ fn show_flyout(
         // Re-present: Slint menus shown after creation sometimes never land
         // in the DWM redirect bitmap (symptom: invisible until a hover).
         widget_platform::hide_show_cycle(f.window(), 120);
+        // Menus must join the true-widget layer (override-redirect) or the
+        // WM stacks them below the override-redirect pill on Linux.
+        widget_platform::ensure_widget_top(f.window());
+        widget_platform::raise_above_all(f.window());
+        f.window().request_redraw();
         log_line(&format!("flyout '{title}' @ {x},{y} n={}", items.len()));
     }
 }
@@ -4025,8 +4030,13 @@ fn dock_hop(
                 .set_position(slint::PhysicalPosition { x: nx, y: ny });
             widget_platform::show_widget(t.window());
             widget_platform::restack_topmost(t.window());
-            widget_platform::raise_above_all(t.window());
+            // Raise AFTER the hide/show cycle below: SLINT_DESTROY_WINDOW_ON_HIDE
+            // tears down and re-creates the window. Menus also join the
+            // override-redirect true-widget layer so the WM can't park them
+            // under the pill (which is override-redirect on Linux).
             widget_platform::hide_show_cycle(t.window(), 120);
+            widget_platform::ensure_widget_top(t.window());
+            widget_platform::raise_above_all(t.window());
             t.window().request_redraw();
             *mlock(&menu_open_at) = Some(std::time::Instant::now());
             log_line(&format!("menu shown @ {nx},{ny} size {ww}x{hh}"));
@@ -4095,11 +4105,13 @@ fn dock_hop(
                 .set_position(slint::PhysicalPosition { x: nx, y: ny });
             widget_platform::show_widget(m.window());
             widget_platform::restack_topmost(m.window());
-            // On X11 the pill is override-redirect and wins sibling raises on
-            // its own — raise the menu ABOVE it immediately (the heartbeat
-            // re-asserts this while visible).
-            widget_platform::raise_above_all(m.window());
+            // The pill is override-redirect on Linux and the WM parks managed
+            // siblings below it regardless of raise order. Join the
+            // true-widget layer (override-redirect) like the pill so the
+            // menu stacks above it.
             widget_platform::hide_show_cycle(m.window(), 120);
+            widget_platform::ensure_widget_top(m.window());
+            widget_platform::raise_above_all(m.window());
             m.window().request_redraw();
             *mlock(&opened) = Some(std::time::Instant::now());
             log_line(&format!("pill menu shown @ {nx},{ny}"));
@@ -4859,11 +4871,13 @@ fn dock_hop(
                 // pill so they sit above it. Menus stay managed/focusable.
                 if let Some(m) = pillmenu_w.upgrade() {
                     if m.window().is_visible() {
+                        widget_platform::ensure_widget_top(m.window());
                         widget_platform::raise_above_all(m.window());
                     }
                 }
                 if let Some(f) = flyout_w.upgrade() {
                     if f.window().is_visible() {
+                        widget_platform::ensure_widget_top(f.window());
                         widget_platform::raise_above_all(f.window());
                     }
                 }

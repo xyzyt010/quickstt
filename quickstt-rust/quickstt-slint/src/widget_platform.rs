@@ -1488,6 +1488,8 @@ pub fn ensure_widget_top(window: &slint::Window) {
         x11q::ensure_widget_top(xid);
     }
 }
+#[cfg(target_os = "windows")]
+pub fn ensure_widget_top(_window: &slint::Window) {}
 
 /// True when the OS has minimized this window (taskbar button / minimize
 /// button). Slint's winit backend collapses the window to a placeholder
