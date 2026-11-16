@@ -4093,12 +4093,57 @@ fn dock_hop(
             let (wl, wt, wr, wb) = widget_platform::work_area();
             let ww = (PM_W as f32 * scale).round() as i32;
             let hh = (PM_H as f32 * scale).round() as i32;
-            let (cx, cy) = pos.unwrap_or_else(widget_platform::cursor_position);
-            let nx = cx.min((wr - ww).max(wl)).max(wl);
-            let ny = if cy + hh > wb {
-                (wb - hh).max(wt)
-            } else {
-                cy.max(wt)
+            const GAP: i32 = 6; // matches dock EXP_GAP
+            let gap = (GAP as f32 * scale).round() as i32;
+            let (nx, ny) = match pos {
+                // Explicit anchor (tests / synthetic right-click) — keep the
+                // old cursor-adjacent placement.
+                Some((cx, cy)) => {
+                    let nx = cx.min((wr - ww).max(wl)).max(wl);
+                    let ny = if cy + hh > wb {
+                        (wb - hh).max(wt)
+                    } else {
+                        cy.min((wb - hh).max(wt))
+                    };
+                    (nx, ny)
+                }
+                // Pill-anchored: the menu sits flush against the expanded
+                // pill's edge — never below it. All three dock stations get a
+                // matching touch-the-edge placement (bottom dock -> above,
+                // right dock -> left of the pill, left dock -> right of the
+                // pill) and all three fit inside the work area.
+                None => {
+                    let ppos = p.window().position();
+                    let psz = p.window().size();
+                    let px = ppos.x;
+                    let py = ppos.y;
+                    let pw = psz.width as i32;
+                    let ph = psz.height as i32;
+                    let pill_cx = px + pw / 2;
+                    let pill_cy = py + ph / 2;
+                    let is_bottom = py + ph >= wb - 32;
+                    let is_right = !is_bottom && px + pw >= wr - 32;
+                    let mut nx;
+                    let mut ny;
+                    if is_bottom {
+                        nx = (pill_cx - ww / 2).clamp(wl, (wr - ww).max(wl));
+                        ny = py - hh - gap;
+                        if ny < wt {
+                            // Pillar (bottom dock) with no headroom for the
+                            // full menu height — open on the right side
+                            // instead of half-off-screen.
+                            nx = (px + pw + gap).min((wr - ww).max(wl));
+                            ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
+                        }
+                    } else if is_right {
+                        nx = (px - gap - ww).max(wl);
+                        ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
+                    } else {
+                        nx = (px + pw + gap).min((wr - ww).max(wl));
+                        ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
+                    }
+                    (nx, ny)
+                }
             };
             m.set_menu_op(0.0);
             m.window()

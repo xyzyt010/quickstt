@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.0.0-alpha.36] — 2026-11-16
+
+Right-click menu dock-station placement.
+
+### Changed
+- **The mini-pill right-click menu now opens flush against the expanded pill's
+  edge — never below it.** Placement follows the pill's dock station: bottom
+  dock → menu directly above (bottom edge touching the pill), right dock →
+  menu to the pill's left (right edge touching), left dock → menu to the
+  pill's right (left edge touching). All three candidates clamp inside the
+  work area; if the above-pill slot can't fit the menu height it drops to
+  the pill's side instead of half-off-screen. Explicit positions passed by
+  callers (tests / synthetic clicks) keep the old cursor-adjacent behaviour.
+
+### Changed
+- Bump version to 2.0.0-alpha.36.
+
 ## [2.0.0-alpha.35] — 2026-11-16
 
 Linux pill-menu stacking + shape fix.
