@@ -874,6 +874,10 @@ fn show_flyout(
         // Re-present: Slint menus shown after creation sometimes never land
         // in the DWM redirect bitmap (symptom: invisible until a hover).
         widget_platform::hide_show_cycle(f.window(), 120);
+        // The hide/show cycle destroys the native window; re-apply the
+        // position now so the fresh window lands in the same spot.
+        f.window()
+            .set_position(slint::PhysicalPosition { x, y });
         // Menus must join the true-widget layer (override-redirect) or the
         // WM stacks them below the override-redirect pill on Linux.
         widget_platform::ensure_widget_top(f.window());
@@ -4035,6 +4039,10 @@ fn dock_hop(
             // override-redirect true-widget layer so the WM can't park them
             // under the pill (which is override-redirect on Linux).
             widget_platform::hide_show_cycle(t.window(), 120);
+            // The hide/show cycle destroys the native window; re-apply the
+            // position now so the fresh window lands in the same spot.
+            t.window()
+                .set_position(slint::PhysicalPosition { x: nx, y: ny });
             widget_platform::ensure_widget_top(t.window());
             widget_platform::raise_above_all(t.window());
             t.window().request_redraw();
@@ -4075,7 +4083,14 @@ fn dock_hop(
         let pin = menu_pin.clone();
         let ui = flyout_ui.clone();
         let opened = menu2_open_at.clone();
-        move |pos: Option<(i32, i32)>| {
+        // Right-click opens the pill menu. `Some((px, py, pw, ph))` anchors
+        // from this rect directly — use it when the caller just moved the
+        // pill synchronously (a synchronous place_pill doesn't reflect in
+        // window().position() until the next frame, so the right-click
+        // expand path passes the rect explicitly). `None` re-reads the live
+        // window position/size (it's valid once Slint has processed the
+        // commit, which is true as soon as the pill is expanded).
+        move |explicit: Option<(i32, i32, i32, i32)>| {
             let (Some(m), Some(p)) = (pm.upgrade(), pill_wm.upgrade()) else {
                 return;
             };
@@ -4095,23 +4110,32 @@ fn dock_hop(
             let hh = (PM_H as f32 * scale).round() as i32;
             const GAP: i32 = 6; // matches dock EXP_GAP
             let gap = (GAP as f32 * scale).round() as i32;
-            let (nx, ny) = match pos {
-                // Explicit anchor (tests / synthetic right-click) — keep the
-                // old cursor-adjacent placement.
-                Some((cx, cy)) => {
-                    let nx = cx.min((wr - ww).max(wl)).max(wl);
-                    let ny = if cy + hh > wb {
-                        (wb - hh).max(wt)
+            let (nx, ny) = match explicit {
+                // Explicit anchor passed by the right-click handler after it
+                // synchronously expanded the pill — the rect in the values.
+                Some((px, py, pw, ph)) => {
+                    let pill_cx = px + pw / 2;
+                    let pill_cy = py + ph / 2;
+                    let is_bottom = py + ph >= wb - 32;
+                    let is_right = !is_bottom && px + pw >= wr - 32;
+                    let mut nx;
+                    let mut ny;
+                    if is_bottom {
+                        nx = (pill_cx - ww / 2).clamp(wl, (wr - ww).max(wl));
+                        ny = py - hh - gap;
+                        if ny < wt {
+                            nx = (px + pw + gap).min((wr - ww).max(wl));
+                            ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
+                        }
+                    } else if is_right {
+                        nx = (px - gap - ww).max(wl);
+                        ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
                     } else {
-                        cy.min((wb - hh).max(wt))
-                    };
+                        nx = (px + pw + gap).min((wr - ww).max(wl));
+                        ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
+                    }
                     (nx, ny)
                 }
-                // Pill-anchored: the menu sits flush against the expanded
-                // pill's edge — never below it. All three dock stations get a
-                // matching touch-the-edge placement (bottom dock -> above,
-                // right dock -> left of the pill, left dock -> right of the
-                // pill) and all three fit inside the work area.
                 None => {
                     let ppos = p.window().position();
                     let psz = p.window().size();
@@ -4129,9 +4153,6 @@ fn dock_hop(
                         nx = (pill_cx - ww / 2).clamp(wl, (wr - ww).max(wl));
                         ny = py - hh - gap;
                         if ny < wt {
-                            // Pillar (bottom dock) with no headroom for the
-                            // full menu height — open on the right side
-                            // instead of half-off-screen.
                             nx = (px + pw + gap).min((wr - ww).max(wl));
                             ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
                         }
@@ -4155,6 +4176,10 @@ fn dock_hop(
             // true-widget layer (override-redirect) like the pill so the
             // menu stacks above it.
             widget_platform::hide_show_cycle(m.window(), 120);
+            // The hide/show cycle destroys the native window; re-apply the
+            // position now so the fresh window lands in the same spot.
+            m.window()
+                .set_position(slint::PhysicalPosition { x: nx, y: ny });
             widget_platform::ensure_widget_top(m.window());
             widget_platform::raise_above_all(m.window());
             m.window().request_redraw();
@@ -4166,12 +4191,69 @@ fn dock_hop(
     let show_pillmenu = std::sync::Arc::new(show_pillmenu);
     // Pill right-click opens the dark pill menu (Hide / Settings /
     // Microphone / Model / History / Paste) at the cursor. Menus are
-    // right-click only; a quick left-tap opens nothing.
+    // right-click only; a quick left-tap opens nothing. Force-expand the
+    // pill first if it was collapsed: the hover expand happens on the next
+    // poll tick otherwise, and the menu would anchor to the stale collapsed
+    // footprint instead of the expanded one.
     {
         let show = show_pillmenu.clone();
+        let pill_w = pill.as_weak();
+        let exp_c = expanded.clone();
+        let vert_c = vertical.clone();
+        let corner_idx_c = corner_idx.clone();
+        let foot_anim_c = foot_anim.clone();
         pill.on_right_clicked(move || {
             log_line("ui: right click -> dark pill menu");
-            show(None);
+            let mut explicit: Option<(i32, i32, i32, i32)> = None;
+            if let Some(p) = pill_w.upgrade() {
+                if let Ok(mut exp) = exp_c.lock() {
+                    if !*exp {
+                        // Mirror the hover-expand path (expanded footprint,
+                        // place_pill + set_footprint); this is a synchronous
+                        // copy so the window exists in its expanded layout
+                        // before the menu placement reads it. We also pass
+                        // the rect explicitly to the menu placement: Slint's
+                        // window().position() lags by a frame after
+                        // set_position, so the menu would anchor to the
+                        // stale collapsed footprint otherwise.
+                        let scale = widget_platform::window_scale(p.window()).max(0.5);
+                        let vert = vert_c.lock().map(|g| *g).unwrap_or(false);
+                        let idx = corner_idx_c.lock().map(|g| *g).unwrap_or(0);
+                        let (ew, eh) = if vert {
+                            (SIDE_EXP_W, SIDE_EXP_H)
+                        } else {
+                            (EXP_W, EXP_H)
+                        };
+                        let (nx, ny) = widget_platform::dock_position(idx, ew, eh, EDGE_GAP, scale);
+                        let pw = (ew as f32 * scale).round() as i32;
+                        let ph = (eh as f32 * scale).round() as i32;
+                        let mg0 = p.get_mic_grow();
+                        let uo0 = p.get_upper_op();
+                        place_pill(&p, nx, ny);
+                        set_footprint(&p, ew, eh);
+                        *exp = true;
+                        if let Ok(mut a) = foot_anim_c.lock() {
+                            *a = Some(FootAnim {
+                                t0: std::time::Instant::now(),
+                                dur_ms: 460,
+                                expanding: true,
+                                mg0,
+                                _uo0: uo0,
+                            });
+                        }
+                        p.set_expanded(true);
+                        p.set_upper_op(1.0);
+                        p.set_slide_px(0);
+                        p.set_rise_px(0);
+                        // Rect anchor for the placement function: Slint is
+                        // about to acknowledge the new window position but
+                        // hasn't yet.
+                        explicit = Some((nx, ny, pw, ph));
+                        log_line("ui: right click -> expand glide start");
+                    }
+                }
+            }
+            show(explicit);
         });
     }
     // Row actions (shared by Slint taps; MENU2ROW tests the same path via

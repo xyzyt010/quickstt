@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.0.0-alpha.37] — 2026-11-17
+
+Release-engineering + Linux menu placement.
+
+### Fixed
+- **Linux: first right-click on the pill menu lands at the wrong position.**
+  The hide/show re-creation destroys the native window; the previously set
+  position was lost with it. The menu position is now also re-applied after
+  `hide_show_cycle`, so the first click opens the menu flush against the
+  pill just like the second and later ones.
+- **Linux: menu z-order keeps the menu above the expanded pill.** Menus are
+  override-redirect (same true-widget layer as the pill), raised after the
+  hide/show cycle — verified with xwininfo stacking output.
+- **Right-click menu opens flush to the expanded pill's edges on all three
+  docks** (bottom: above, right-to-left, left-to-right). Verified
+  placements from a real run for all three docks.
+
+### Changed / packaging
+- **Dropped the legacy Qt/C++ build from the Linux release entirely.** The
+  Rust/Slint app is the only one exec'd; the Qt `quickstt-app` and C++
+  `stt_service` build steps, the CMake dependency in the Linux release, the
+  bundled deb `Recommends: libqt6*`, and the tarball payload entries are all
+  removed. Removes ~5 MB of dead weight from the Linux package and removes
+  the Qt toolchain from the Linux CI for good.
+- Bump version to 2.0.0-alpha.37.
+
 ## [2.0.0-alpha.36] — 2026-11-16
 
 Right-click menu dock-station placement.

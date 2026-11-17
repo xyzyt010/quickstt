@@ -110,17 +110,11 @@ jobs:
           cp -f "$BIN_LLM" quickstt-rust/target/release/tools/lfm3_audio/llama-cli
           file quickstt-rust/target/release/tools/lfm3_audio/llama-cli
           ldd quickstt-rust/target/release/tools/lfm3_audio/llama-cli | head -20
-      - name: CMake native backend + Qt widget GUI (stt_service + quickstt-app)
-        run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -DGGML_NATIVE=OFF \
-            -DCMAKE_C_FLAGS="-march=x86-64 -mtune=generic" \
-            -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
-          cmake --build build --target stt_service_native QuickSTT_App -j"$(nproc)"
-          file build/stt_service build/quickstt-app
-          ldd build/quickstt-app | grep -i "not found" && exit 1 || true
-          cp -f build/stt_service quickstt-rust/target/release/stt_service
-          cp -f build/quickstt-app quickstt-rust/target/release/quickstt-app
+      # The legacy Qt/C++ build products (quickstt-app, stt_service) are no
+      # longer shipped: they aren't exec'd by the Rust Slint app and aren't
+      # referenced by the Linux desktop entry — dropping them entirely
+      # removes the Qt toolchain dependency from the Linux release, shortens
+      # the CI build, and removes ~5 MB of dead weight from the package.
       - name: cargo deb
         working-directory: quickstt-rust
         run: |
@@ -133,11 +127,8 @@ jobs:
         run: |
           mkdir -p dist
           BIN="target/release/quickstt-slint"
-          STT="target/release/stt_service"
           cp -f assets/icon_app.png assets/quickstt.png
-          EXTRA=""
-          [[ -f "$STT" ]] && EXTRA="-e $STT"
-          linuxdeploy --appdir dist/AppDir -e "$BIN" $EXTRA -d assets/quickstt.desktop -i assets/quickstt.png --plugin gtk --output appimage > dist/linuxdeploy.log 2>&1 || true
+          linuxdeploy --appdir dist/AppDir -e "$BIN" -d assets/quickstt.desktop -i assets/quickstt.png --plugin gtk --output appimage > dist/linuxdeploy.log 2>&1 || true
           tail -n 25 dist/linuxdeploy.log || true
           mkdir -p dist/AppDir/usr/bin/wakeword_models
           cp -f target/release/wakeword_models/*.onnx dist/AppDir/usr/bin/wakeword_models/ 2>/dev/null || true
@@ -159,9 +150,6 @@ jobs:
             echo "AppImage failed — building plain tarball payload"
             rm -rf dist/payload && mkdir -p dist/payload
             cp -f "$BIN" dist/payload/QuickSTT
-            cp -f "$STT" dist/payload/stt_service 2>/dev/null || true
-            cp -f target/release/quickstt-app dist/payload/quickstt-app 2>/dev/null || true
-            cp -f target/release/stt_service dist/payload/stt_service 2>/dev/null || true
             cp -f ../Source/mic_active.svg ../Source/mic_inactive.svg ../Source/Untitled-1.svg dist/payload/ 2>/dev/null || true
             cp -f assets/icon_app.png dist/payload/icon_app.png 2>/dev/null || true
             cp -f assets/Inter-VariableFont.ttf dist/payload/Inter-VariableFont.ttf
