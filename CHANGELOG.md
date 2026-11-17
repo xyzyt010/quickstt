@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.0.0-alpha.38] — 2026-11-17
+
+Linux packaging refinement.
+
+### Changed
+- The `.deb` no longer hard-depends on `libgtk-3-0` and
+  `libayatana-appindicator3-1`. The shipping Slint app links no GTK at all
+  (software renderer for icons/cards) and the Linux tray is SNI over
+  D-Bus — pulling GTK into every fresh install bought nothing.
+  Verified live: the app starts and paints the pill + dashboard correctly
+  on the Mint without these packages resolved by this release.
+
+### Changed
+- Bump version to 2.0.0-alpha.38.
+
 ## [2.0.0-alpha.37] — 2026-11-17
 
 Release-engineering + Linux menu placement.
