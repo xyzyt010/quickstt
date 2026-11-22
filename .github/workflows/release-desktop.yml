@@ -98,9 +98,15 @@ jobs:
           # supports LFM3-Audio. GGML_NATIVE=OFF keeps the binary portable
           # (no -march flags leak across hosts), GGML_OPENMP=OFF avoids a
           # libgomp1 dependency the deb doesn't otherwise need.
+          # LLAMA_USE_PREBUILT_UI=OFF: we only build llama-cli (the LFM3-Audio
+          # engine), never the embedded web UI. Upstream's `llama-ui-assets`
+          # target is ALL and otherwise downloads a HF bucket whose dist layout
+          # changed (bundle[hash].js etc.), failing CMake validation. Skipping
+          # the prebuilt UI produces an empty ui.cpp — harmless for llama-cli.
           git clone --depth 1 --branch b11960 https://github.com/ggml-org/llama.cpp /tmp/llamacpp
           cmake -S /tmp/llamacpp -B /tmp/llamacpp/build -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF \
+            -DLLAMA_USE_PREBUILT_UI=OFF \
             -DCMAKE_C_FLAGS="-march=x86-64 -mtune=generic" \
             -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
           cmake --build /tmp/llamacpp/build -j"$(nproc)" --target llama-cli
