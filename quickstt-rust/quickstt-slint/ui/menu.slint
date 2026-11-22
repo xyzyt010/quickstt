@@ -141,19 +141,11 @@ export component PillMenu inherits Window {
                     mouse-cursor: pointer;
                 }
                 Text {
-                    // Explicit geometry: without a width/y Slint auto-sizes
-                    // the Text, which renders as a weird gap/shift on
-                    // Windows (DirectWrite) vs. the other menu rows.
                     x: 10px;
-                    y: 0px;
-                    width: 160px;
                     height: 34px;
                     text: "Model";
                     color: #FFFFFF;
-                    font-size: 26px; // 2x the other rows — submenu heading
-                    font-weight: 600;
-                    letter-spacing: 0px;
-                    horizontal-alignment: left;
+                    font-size: 13px;
                     vertical-alignment: center;
                 }
                 Text {
@@ -255,10 +247,9 @@ export component MenuFlyout inherits Window {
             width: 240px;
             height: 32px;
             text: head_text;
-            color: #FFFFFF;
-            font-size: 22px; // 2x — was an 11px label floating in a 32px box
+            color: #A0A0A0;
+            font-size: 11px;
             font-weight: 600;
-            letter-spacing: 0px;
             vertical-alignment: center;
             overflow: elide;
         }

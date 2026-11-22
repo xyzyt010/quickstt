@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.0.0-alpha.40] — 2026-11-23
+
+Revert menu heading sizing; uniform quiet waveform on Linux.
+
+### Fixed
+- **Right-click menu "Model" heading is back to its original size.** The
+  alpha.39 2× enlargement (13px → 26px) and the flyout header enlargement
+  (11px → 22px) are reverted — both render exactly as the other menu rows
+  again. The red mic icon / black active pill from alpha.39 is kept.
+- **Linux: waveform is uniform while quiet, matching Windows.** Linux's
+  ALSA/PipeWire capture reports low-level room noise as a fluctuating
+  5–20/100, which snapped to 1/6 steps and rendered as a mix of 2px dots and
+  taller bars. A quiet deadzone (0.20, aligned with the VAD's ~25/100 speech
+  floor) now collapses that noise to the same minimal height on every bar,
+  so the idle waveform is a clean, even row — as on Windows.
+
+### Changed
+- Bump version to 2.0.0-alpha.40.
+
 ## [2.0.0-alpha.39] — 2026-11-23
 
 UI polish: menu heading and active-pill colours.

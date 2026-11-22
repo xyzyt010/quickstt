@@ -7128,8 +7128,17 @@ fn dock_hop(
                         d.set_vad_sensitivity(vad_sens);
                     }
                 }
-                // waveform: push audio_level, decay smoothly
-                let target = (s.audio_level as f32 / 100.0).clamp(0.0, 1.0);
+                // waveform: push audio_level, decay smoothly.
+                // Linux (ALSA/PipeWire, no OS-level noise suppression) reports
+                // room noise as a fluctuating 5-20/100; once snapped to 1/6
+                // steps that renders as a mix of 2px dots and taller bars —
+                // visibly uneven while quiet. Windows' capture reports a
+                // steady ~0, so all 24 bars sit at the same minimal height.
+                // Apply the same quiet deadzone here (aligned with the VAD's
+                // 0.0055 RMS speech floor ≈ 25/100) so both look identical.
+                const QUIET_GATE: f32 = 0.20;
+                let raw_level = (s.audio_level as f32 / 100.0).clamp(0.0, 1.0);
+                let target = if raw_level < QUIET_GATE { 0.0 } else { raw_level };
                 let live_bars = live_session || transcribing;
                 // Fast attack: when speech starts, wake the whole 24-bar
                 // history at once — otherwise bars fill in from the left
