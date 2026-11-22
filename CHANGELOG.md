@@ -1,5 +1,30 @@
 # Changelog
 
+## [2.0.0-alpha.39] — 2026-11-23
+
+UI polish: menu heading and active-pill colours.
+
+### Fixed
+- **Right-click menu "Model" heading looked loosely spaced / had a visible
+  gap, and was too small.** Both places that render the "Model" heading were
+  tightened up and doubled in size:
+  - the `PillMenu` "Model" row now has explicit geometry (x/y/width) instead
+    of relying on Slint's auto-sized Text (which shifted oddly under
+    DirectWrite on Windows), and its font goes 13px → 26px;
+  - the `MenuFlyout` submenu header (shown when you open the Model or
+    Microphone submenu) goes 11px → 22px and now uses a bright white colour
+    instead of dim gray, so it reads as a heading instead of a label floating
+    in a 32px box with ~10px of dead space above and below.
+  - Both headings pin `letter-spacing: 0px` for deterministic spacing.
+- **Active/transcribing mini pill colours inverted.** The mic capsule used to
+  turn red (`#FF334B`) with a white icon while recording. Now the capsule
+  stays pitch black (`#000000`) and the mic icon itself turns red, on all
+  three docks (bottom / right edge / left edge). Added a red mic SVG asset
+  (`mic_inactive_red.svg`); Slint embeds it into the binary at compile time.
+
+### Changed
+- Bump version to 2.0.0-alpha.39.
+
 ## [2.0.0-alpha.38] — 2026-11-17
 
 Linux packaging refinement.

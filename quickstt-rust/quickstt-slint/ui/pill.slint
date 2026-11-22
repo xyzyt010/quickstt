@@ -340,7 +340,10 @@ export component PillWidget inherits Window {
         width: Math.round(36 + 7 * mic_grow) * 1px;
         height: Math.round(8 + 24 * mic_grow) * 1px;
         border-radius: Math.round((8 + 24 * mic_grow) / 2) * 1px;
-        background: phase == 1 ? #FF334B : phase == 4 ? #3A1414 : #000000;
+        // Active (phase 1) is now PITCH BLACK — the red moves to the mic
+        // icon instead of the pill body. Idle is black too; the icon colour
+        // is the active cue.
+        background: phase == 1 ? #000000 : phase == 4 ? #3A1414 : #000000;
         opacity: pill_opacity;
         // Borderless when expanded (per request): the mini-only outline
         // would ring the capsule next to the status pill.
@@ -354,7 +357,11 @@ export component PillWidget inherits Window {
             height: Math.round(22 * mic_grow) * 1px;
             x: Math.round(((36 + 7 * mic_grow) - 22 * mic_grow) / 2) * 1px;
             y: Math.round(((8 + 24 * mic_grow) - 22 * mic_grow) / 2) * 1px;
-            source: (phase == 1 || phase == 4) ? @image-url("../../assets/mic_inactive.svg") : @image-url("../../assets/mic_active.svg");
+            // Active (phase 1): red mic on the black pill. No-model (4)
+            // keeps the crossed-out mic; idle keeps the plain white mic.
+            source: phase == 1 ? @image-url("../../assets/mic_inactive_red.svg")
+                 : phase == 4 ? @image-url("../../assets/mic_inactive.svg")
+                 : @image-url("../../assets/mic_active.svg");
             image-fit: contain;
         }
 
@@ -397,7 +404,10 @@ export component PillWidget inherits Window {
         width: Math.round(9 + 23 * mic_grow) * 1px;
         height: Math.round(41 + 6 * mic_grow) * 1px;
         border-radius: Math.round((9 + 23 * mic_grow) / 2) * 1px;
-        background: phase == 1 ? #FF334B : phase == 4 ? #3A1414 : #000000;
+        // Active (phase 1) is now PITCH BLACK — the red moves to the mic
+        // icon instead of the pill body. Idle is black too; the icon colour
+        // is the active cue.
+        background: phase == 1 ? #000000 : phase == 4 ? #3A1414 : #000000;
         opacity: pill_opacity;
         border-width: 0px;
         border-color: transparent;
@@ -409,7 +419,11 @@ export component PillWidget inherits Window {
             height: Math.round(22 * mic_grow) * 1px;
             x: Math.round(((9 + 23 * mic_grow) - 22 * mic_grow) / 2) * 1px;
             y: Math.round(((41 + 6 * mic_grow) - 22 * mic_grow) / 2) * 1px;
-            source: (phase == 1 || phase == 4) ? @image-url("../../assets/mic_inactive.svg") : @image-url("../../assets/mic_active.svg");
+            // Active (phase 1): red mic on the black pill. No-model (4)
+            // keeps the crossed-out mic; idle keeps the plain white mic.
+            source: phase == 1 ? @image-url("../../assets/mic_inactive_red.svg")
+                 : phase == 4 ? @image-url("../../assets/mic_inactive.svg")
+                 : @image-url("../../assets/mic_active.svg");
             image-fit: contain;
         }
 
@@ -439,7 +453,10 @@ export component PillWidget inherits Window {
         width: Math.round(9 + 23 * mic_grow) * 1px;
         height: Math.round(41 + 6 * mic_grow) * 1px;
         border-radius: Math.round((9 + 23 * mic_grow) / 2) * 1px;
-        background: phase == 1 ? #FF334B : phase == 4 ? #3A1414 : #000000;
+        // Active (phase 1) is now PITCH BLACK — the red moves to the mic
+        // icon instead of the pill body. Idle is black too; the icon colour
+        // is the active cue.
+        background: phase == 1 ? #000000 : phase == 4 ? #3A1414 : #000000;
         opacity: pill_opacity;
         border-width: 0px;
         border-color: transparent;
@@ -451,7 +468,11 @@ export component PillWidget inherits Window {
             height: Math.round(22 * mic_grow) * 1px;
             x: Math.round(((9 + 23 * mic_grow) - 22 * mic_grow) / 2) * 1px;
             y: Math.round(((41 + 6 * mic_grow) - 22 * mic_grow) / 2) * 1px;
-            source: (phase == 1 || phase == 4) ? @image-url("../../assets/mic_inactive.svg") : @image-url("../../assets/mic_active.svg");
+            // Active (phase 1): red mic on the black pill. No-model (4)
+            // keeps the crossed-out mic; idle keeps the plain white mic.
+            source: phase == 1 ? @image-url("../../assets/mic_inactive_red.svg")
+                 : phase == 4 ? @image-url("../../assets/mic_inactive.svg")
+                 : @image-url("../../assets/mic_active.svg");
             image-fit: contain;
         }
 
