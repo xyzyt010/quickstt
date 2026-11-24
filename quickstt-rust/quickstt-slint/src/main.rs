@@ -2904,8 +2904,8 @@ fn main() -> QuickSttResult<()> {
                 s.settings.vad_sensitivity,
                 s.settings.transient_action,
                 s.settings.auto_offload,
-                if s.settings.ctrl_space_mode == 1 { "toggle" } else { "hold" },
                 s.settings.offload_seconds,
+                if s.settings.ctrl_space_mode == 1 { "toggle" } else { "hold" },
             ));
         }
     }

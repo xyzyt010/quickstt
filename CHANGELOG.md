@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.0.0-alpha.43] — 2026-11-24
+
+Startup log line fix.
+
+### Fixed
+- **Startup "settings restored" line printed the trigger mode in the wrong
+  slot** (`offload=false/holds trigger=300` — `trigger=` showed the offload
+  delay, not the mode). Argument order corrected; the line now ends with
+  `offload=false/300s trigger=hold|toggle`.
+
+### Changed
+- Bump version to 2.0.0-alpha.43.
+
 ## [2.0.0-alpha.42] — 2026-11-24
 
 Menu trace scaffold + menu re-creation churn removed; Trigger Mode hardening.
