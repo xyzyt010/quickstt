@@ -45,6 +45,10 @@ impl ModelDescriptor {
             // knob through the app pipeline.
             CanaryQwen => vec![],
             Lfm3Audio => vec![threads_param(), lfm3_ctx_param()],
+            // Groq is a hosted API: no local weights / threads to tune. The
+            // only user-supplied knob is the API key (entered on the Models
+            // tab and persisted under this model's params).
+            Groq => vec![api_key_param()],
         }
     }
 
@@ -123,6 +127,16 @@ fn lfm3_ctx_param() -> ParamSpec {
     }
 }
 
+fn api_key_param() -> ParamSpec {
+    ParamSpec {
+        key: "api_key".into(),
+        label: "Groq API key".into(),
+        kind: ParamKind::Text,
+        default: "".into(),
+        hint: "Paste your Groq API key (console.groq.com). Stored locally in settings; audio is sent to Groq for transcription.".into(),
+    }
+}
+
 fn default_accuracy() -> u8 {
     70
 }
@@ -154,6 +168,8 @@ pub enum ParamKind {
     Toggle,
     /// Pick exactly one entry; entries appear in this order.
     Choice(Vec<String>),
+    /// Free text (secret/credential). The dashboard renders a LineEdit.
+    Text,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +222,11 @@ pub enum EngineFamily {
     /// One-shot process per utterance — no persistent worker, so idle RAM
     /// is zero; the cost is a model load per turn (like whisper.cpp).
     Lfm3Audio,
+    /// Groq-hosted Whisper Large v3 Turbo. No local weights or runtime: the
+    /// WAV is POSTed to Groq's OpenAI-compatible transcriptions endpoint with
+    /// the user's API key. Offline engines stay fully offline; this one is
+    /// explicitly opt-in by selecting the card and entering a key.
+    Groq,
 }
 
 impl EngineFamily {
@@ -226,6 +247,7 @@ impl EngineFamily {
             EngineFamily::Photon => "photon",
             EngineFamily::CanaryQwen => "canary-qwen",
             EngineFamily::Lfm3Audio => "lfm3-audio",
+            EngineFamily::Groq => "groq-api",
         }
     }
 }
@@ -448,6 +470,22 @@ pub fn all_descriptors() -> Vec<ModelDescriptor> {
             blurb: "SOTA English ASR. Needs NVIDIA GPU + NeMo (see card); weights auto-fetch on first run".into(),
             gpu_only: true,
         },
+        // Groq hosted Whisper Large v3 Turbo — the ONLY cloud model. No local
+        // weights (size_mb = 0), nothing to download: the card is selectable
+        // as soon as the user pastes a Groq API key in its Model parameters.
+        // Accuracy/speed mirror the local Large v3 Turbo but reflect the
+        // hosted runtime rather than a local GPU.
+        ModelDescriptor {
+            name: "Groq Whisper Large v3 Turbo (API)".into(),
+            engine_family: EngineFamily::Groq,
+            model_dir: "groq/whisper-large-v3-turbo".into(),
+            size_mb: 0,
+            widget_selectable: true,
+            accuracy: 96,
+            speed: 92,
+            blurb: "Hosted Whisper Large v3 Turbo on Groq — no download, no local compute; needs a Groq API key (audio leaves the device)".into(),
+            gpu_only: false,
+        },
     ]
 }
 
@@ -495,6 +533,10 @@ pub fn is_model_installed(desc: &ModelDescriptor) -> bool {
     // downloaded or wrong-format dir (safetensors instead of .ort, broken Q8
     // without Q4) must show "[Not Installed]" so the user re-downloads.
     match desc.engine_family {
+        // Hosted/cloud models have no local weights — always "installed"
+        // so the card offers Select instead of Download. The API key check
+        // happens at transcription time in the Groq engine.
+        EngineFamily::Groq => true,
         EngineFamily::WhisperCpp => {
             // Any ggml bin in the descriptor dir counts.
             if model_path.is_dir() {
@@ -911,6 +953,8 @@ pub fn models_for_hardware(
                     || d.name.contains("Qwen3-ASR")
                     || d.name.contains("Whistle")
                     || d.name.contains("LFM3-Audio")
+                    // Cloud models run identically on GPU and CPU machines.
+                    || d.engine_family == EngineFamily::Groq
             } else {
                 !d.gpu_only
             }
@@ -1539,5 +1583,31 @@ mod tests {
         assert_eq!(RecommendPriority::from_u32(1), RecommendPriority::Fastest);
         assert_eq!(RecommendPriority::from_u32(2), RecommendPriority::MostAccurate);
         assert_eq!(RecommendPriority::from_u32(99), RecommendPriority::Balanced);
+    }
+
+    #[test]
+    fn groq_turbo_is_registered_on_cpu_and_gpu() {
+        let d = all_descriptors()
+            .into_iter()
+            .find(|d| d.engine_family == EngineFamily::Groq)
+            .expect("Groq descriptor must exist");
+        assert_eq!(d.name, "Groq Whisper Large v3 Turbo (API)");
+        assert_eq!(d.model_dir, "groq/whisper-large-v3-turbo");
+        assert_eq!(d.size_mb, 0);
+        assert!(!d.gpu_only);
+        // Hosted model: no local weights, always "installed" so the card
+        // offers Select rather than Download.
+        assert!(is_model_installed(&d));
+        // The only knob is a free-text API key.
+        let params = d.params();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].key, "api_key");
+        assert!(matches!(params[0].kind, ParamKind::Text));
+        // Visible on both hardware paths (cloud runs identically on both).
+        for gpu in [false, true] {
+            assert!(models_for_hardware(gpu)
+                .iter()
+                .any(|x| x.engine_family == EngineFamily::Groq));
+        }
     }
 }

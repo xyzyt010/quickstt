@@ -1147,6 +1147,31 @@ pub fn cursor_position() -> (i32, i32) {
     }
 }
 
+/// Cursor position + "any mouse button currently held", from ONE platform
+/// query. The menu dismiss logic must never mix a fresh button state with a
+/// stale position. `None` means the query itself failed (X11 connection
+/// hiccup) — callers must not read that as (0,0)/"outside" or a single bad
+/// X round-trip will snap the menu and flyout shut.
+pub fn pointer_state() -> Option<(i32, i32, bool)> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let mut pt = windows::Win32::Foundation::POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut pt).is_err() {
+            return None;
+        }
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON,
+        };
+        let down = (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000 != 0)
+            || (GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16 & 0x8000 != 0);
+        Some((pt.x, pt.y, down))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        x11q::pointer_state()
+    }
+}
+
 /// Logical (DIP) scale of the monitor hosting this window.
 pub fn window_scale(window: &slint::Window) -> f32 {
     #[cfg(target_os = "windows")]
@@ -1659,11 +1684,22 @@ mod x11q {
         });
     }
 
-    pub fn cursor_pos() -> Option<(i32, i32)> {
+    /// Single XQueryPointer reply: root coords + held mouse buttons.
+    /// Button1/2/3 mask bits are 1<<8 / 1<<9 / 1<<10. `None` on any X error —
+    /// never fabricate (0,0), which would look like "pointer left the menu".
+    pub fn pointer_state() -> Option<(i32, i32, bool)> {
         with_conn(|conn, root| {
             let r = conn.query_pointer(root).ok()?.reply().ok()?;
-            Some((r.root_x as i32, r.root_y as i32))
+            let mask = u16::from(r.mask);
+            let buttons = u16::from(x11rb::protocol::xproto::KeyButMask::BUTTON1)
+                | u16::from(x11rb::protocol::xproto::KeyButMask::BUTTON2)
+                | u16::from(x11rb::protocol::xproto::KeyButMask::BUTTON3);
+            Some((r.root_x as i32, r.root_y as i32, mask & buttons != 0))
         })
+    }
+
+    pub fn cursor_pos() -> Option<(i32, i32)> {
+        pointer_state().map(|(x, y, _)| (x, y))
     }
 
     /// Union of all enabled CRTCs (multi-display); root geometry fallback.

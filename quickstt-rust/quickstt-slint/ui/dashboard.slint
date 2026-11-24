@@ -30,6 +30,9 @@ export struct ModelParamUi {
     hi: float,
     choices: [string],
     value: float,
+    /// Free-text value for kind == 3 (API keys). Float `value` carries the
+    /// numeric/toggle/choice kinds.
+    text-value: string,
     hint: string,
 }
 
@@ -360,6 +363,8 @@ export component DashboardWidget inherits Window {
     /// `set-model-param-choice` instead (ComboBox reports text, not an index).
     callback set-model-param(string, float);
     callback set-model-param-choice(string, string);
+    /// Free-text parameter writeback (e.g. the Groq API key).
+    callback set-model-param-text(string, string);
     callback browse-recording-dir();
     callback check-updates();
     /// Re-run the first-run onboarding tour from the top.
@@ -1234,6 +1239,15 @@ export component DashboardWidget inherits Window {
                                             current-index: round(param.value);
                                             selected(v) => {
                                                 root.set-model-param-choice(param.key, v);
+                                            }
+                                        }
+
+                                        if param.kind == 3 : LineEdit {
+                                            height: 36px;
+                                            text: param.text-value;
+                                            placeholder-text: "Paste API key…";
+                                            edited(t) => {
+                                                root.set-model-param-text(param.key, t);
                                             }
                                         }
                                     }

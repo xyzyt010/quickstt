@@ -871,13 +871,21 @@ fn show_flyout(
         f.set_fly_op(0.0);
         f.window().set_position(slint::PhysicalPosition { x, y });
         widget_platform::show_widget(f.window());
-        // Re-present: Slint menus shown after creation sometimes never land
-        // in the DWM redirect bitmap (symptom: invisible until a hover).
-        widget_platform::hide_show_cycle(f.window(), 120);
-        // The hide/show cycle destroys the native window; re-apply the
-        // position now so the fresh window lands in the same spot.
-        f.window()
-            .set_position(slint::PhysicalPosition { x, y });
+        // Re-present ONLY the first time. hide_show_cycle sleeps 120ms on the
+        // UI thread and (with SLINT_DESTROY_WINDOW_ON_HIDE) destroys/recreates
+        // the native X window. Doing that on EVERY hover switch between the
+        // adjacent Mic/Model bands stalled the 50ms poll, made the cursor
+        // snapshot stale, and produced the Linux flicker / "menu vanished"
+        // bug. Later opens just show + raise the already-created window.
+        static FLY_FIRST_PRESENT: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(true);
+        if FLY_FIRST_PRESENT.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            widget_platform::hide_show_cycle(f.window(), 120);
+            // The hide/show cycle destroyed the native window; re-apply the
+            // position now so the fresh window lands in the same spot.
+            f.window()
+                .set_position(slint::PhysicalPosition { x, y });
+        }
         // Menus must join the true-widget layer (override-redirect) or the
         // WM stacks them below the override-redirect pill on Linux.
         widget_platform::ensure_widget_top(f.window());
@@ -2359,6 +2367,8 @@ fn set_model_param(state: &Arc<Mutex<AppState>>, key: &str, value: f32) {
             let idx = value.round().clamp(0.0, (choices.len() - 1) as f32) as usize;
             choices[idx].clone()
         }
+        // Text params (API keys) come through set_model_param_text.
+        ParamKind::Text => return,
     };
     s.settings
         .model_params
@@ -2387,6 +2397,29 @@ fn set_model_param_choice(state: &Arc<Mutex<AppState>>, key: &str, choice: &str)
     if let Err(e) = s.settings.save_model_params() {
         log_line(&format!("save_model_params FAILED: {e:#}"));
     }
+}
+
+/// Persist a free-text parameter (currently only the Groq API key). Stored
+/// under the same scoped key as every other model param, so the engine sees
+/// it through LATEST_MODEL_PARAMS on the very next utterance.
+fn set_model_param_text(state: &Arc<Mutex<AppState>>, key: &str, text: &str) {
+    use quickstt_core::models::catalog::ParamKind;
+    let mut s = match state.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let Some(desc) = active_descriptor(&s) else { return };
+    let Some(spec) = desc.params().into_iter().find(|p| p.key == key) else { return };
+    if !matches!(spec.kind, ParamKind::Text) {
+        return;
+    }
+    s.settings
+        .model_params
+        .insert(format!("{}|{}", desc.model_dir, key), text.to_string());
+    if let Err(e) = s.settings.save_model_params() {
+        log_line(&format!("save_model_params FAILED: {e:#}"));
+    }
+    log_line(&format!("saved {} param '{}' ({} chars)", desc.name, key, text.len()));
 }
 
 /// Tray icon: pre-baked PNG (has alpha), ICO fallback. (An SVG render path
@@ -4312,7 +4345,10 @@ fn dock_hop(
         let state = state.clone();
         let pin = menu_pin.clone();
         let ui = flyout_ui.clone();
+        let opened = menu2_open_at.clone();
         pillmenu.on_mic_row(move || {
+            // Refresh the dismiss grace on any deliberate menu interaction.
+            *mlock(&opened) = Some(std::time::Instant::now());
             let mut pinned = mlock(&pin);
             if *pinned == Some(SubMode::Mic) {
                 *pinned = None;
@@ -4348,7 +4384,10 @@ fn dock_hop(
         let state = state.clone();
         let pin = menu_pin.clone();
         let ui = flyout_ui.clone();
+        let opened = menu2_open_at.clone();
         pillmenu.on_model_row(move || {
+            // Refresh the dismiss grace on any deliberate menu interaction.
+            *mlock(&opened) = Some(std::time::Instant::now());
             let mut pinned = mlock(&pin);
             if *pinned == Some(SubMode::Model) {
                 *pinned = None;
@@ -4795,6 +4834,10 @@ fn dock_hop(
     let flyout_ui_timer = flyout_ui.clone();
     let menu2_open_at_timer = menu2_open_at.clone();
     let mut menu2_outside: Option<std::time::Instant> = None;
+    // Last good cursor position. XQueryPointer occasionally fails while the
+    // menus are being raised/re-created; reusing the last sample stops a
+    // transient (0,0) from being read as "pointer left the menu".
+    let mut last_cursor: (i32, i32) = (0, 0);
     let mut prev_snoozed = false;
     #[allow(unused_variables)]
     let show_traymenu_poll = show_traymenu.clone();
@@ -5815,7 +5858,18 @@ fn dock_hop(
                         let mpos = m.window().position();
                         let mw = (PM_W as f32 * scale).round() as i32;
                         let mh = (PM_H as f32 * scale).round() as i32;
-                        let (cx, cy) = widget_platform::cursor_position();
+                        // One platform query for position AND button state:
+                        // Windows GetCursorPos+GetAsyncKeyState, Linux a
+                        // single XQueryPointer reply. On X failure reuse the
+                        // last good position instead of fabricating (0,0).
+                        let (cx, cy, mouse_down) =
+                            match widget_platform::pointer_state() {
+                                Some((x, y, down)) => {
+                                    last_cursor = (x, y);
+                                    (x, y, down)
+                                }
+                                None => (last_cursor.0, last_cursor.1, false),
+                            };
                         let in_band = |y0: i32, y1: i32| {
                             cx >= mpos.x
                                 && cx <= mpos.x + mw
@@ -5885,6 +5939,14 @@ fn dock_hop(
                                         u.idx_map = idx_map;
                                         u.rect = Some(rect);
                                     }
+                                    // Restart the grace window whenever the
+                                    // flyout opens or switches — otherwise a
+                                    // mouse-up from the very click that opened
+                                    // it (or a late X event) can be read as an
+                                    // outside press and tear everything down.
+                                    *mlock(&menu2_open_at_timer) =
+                                        Some(std::time::Instant::now());
+                                    menu2_outside = None;
                                 }
                             }
                             (None, _) if pinned.is_none() => {
@@ -5928,24 +5990,20 @@ fn dock_hop(
                             .unwrap_or(false);
 
                         let now = std::time::Instant::now();
-                        #[cfg(target_os = "windows")]
-                        let clicked_outside = unsafe {
-                            use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
-                            (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000 != 0
-                                || GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16 & 0x8000 != 0)
-                                && !in_cluster
-                                && !fresh
-                        };
-                        #[cfg(not(target_os = "windows"))]
-                        let clicked_outside = false;
+                        // Outside press: IDENTICAL on Windows and Linux.
+                        // Linux used to hardcode this to false, so pressing
+                        // anywhere outside did nothing and only a 650ms hover
+                        // timer could close the menu — it felt frozen/glitchy.
+                        let clicked_outside = mouse_down && !in_cluster && !fresh;
 
-                        // Hover-leave dismiss (all platforms): the Windows
-                        // click-outside path never ran on Linux (clicked_outside
-                        // was hardcoded false), so the menu lingered and the
-                        // pill read as "frozen". When the pointer stays outside
-                        // the cluster for 650 ms, dismiss and glides shut.
+                        // Hover-leave dismiss, now guarded by the SAME
+                        // fresh-open grace as the click path. Previously the
+                        // grace was computed but ignored here, so one bad X
+                        // cursor sample right after opening could arm the
+                        // 650ms timer that hid the flyout and then collapsed
+                        // the whole pill ("turns off completely").
                         let mut hover_outside_fired = false;
-                        if !in_cluster && !dragging_now {
+                        if !in_cluster && !dragging_now && !fresh {
                             match menu2_outside {
                                 Some(at) if at.elapsed() > std::time::Duration::from_millis(650) => {
                                     hover_outside_fired = true;
@@ -6968,6 +7026,7 @@ fn dock_hop(
                                                 hi: *hi as f32,
                                                 choices: empty_rc,
                                                 value: v.clamp(*lo as f32, *hi as f32),
+                                                text_value: "".into(),
                                                 hint: p.hint.clone().into(),
                                             }
                                         }
@@ -6984,6 +7043,7 @@ fn dock_hop(
                                                 hi: 1.0,
                                                 choices: empty_rc,
                                                 value: v,
+                                                text_value: "".into(),
                                                 hint: p.hint.clone().into(),
                                             }
                                         }
@@ -7003,6 +7063,21 @@ fn dock_hop(
                                                 hi: (choices.len().saturating_sub(1)) as f32,
                                                 choices: ModelRc::new(VecModel::from_slice(&cs)),
                                                 value: idx,
+                                                text_value: "".into(),
+                                                hint: p.hint.clone().into(),
+                                            }
+                                        }
+                                        ParamKind::Text => {
+                                            let text = saved.unwrap_or_else(|| p.default.clone());
+                                            crate::ModelParamUi {
+                                                key: p.key.clone().into(),
+                                                label: p.label.clone().into(),
+                                                kind: 3,
+                                                lo: 0.0,
+                                                hi: 0.0,
+                                                choices: empty_rc,
+                                                value: 0.0,
+                                                text_value: text.into(),
                                                 hint: p.hint.clone().into(),
                                             }
                                         }
@@ -7033,6 +7108,7 @@ fn dock_hop(
                                         || a.hi != r.hi
                                         || a.label != r.label
                                         || a.hint != r.hint
+                                        || a.text_value != r.text_value
                                         || (a.value - r.value).abs() > 0.001
                                         || !choice_ok
                                     {
@@ -7955,6 +8031,10 @@ fn dock_hop(
         let state_2 = state.clone();
         dashboard.on_set_model_param_choice(move |key: slint::SharedString, choice: slint::SharedString| {
             set_model_param_choice(&state_2, key.as_str(), choice.as_str());
+        });
+        let state_3 = state.clone();
+        dashboard.on_set_model_param_text(move |key: slint::SharedString, text: slint::SharedString| {
+            set_model_param_text(&state_3, key.as_str(), text.as_str());
         });
     }
     {

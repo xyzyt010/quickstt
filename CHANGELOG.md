@@ -1,5 +1,37 @@
 # Changelog
 
+## [2.0.0-alpha.41] — 2026-11-24
+
+Menu hover/dismissal parity, outside-click on Linux, Groq cloud Whisper.
+
+### Fixed
+- **Right-click menu / flyout hover glitches on Linux.** The shared
+  Microphone/Model flyout used to re-create its native X window (and sleep
+  120 ms on the UI thread) on *every* hover switch between the adjacent rows,
+  leaving a stale cursor snapshot that closed the flyout, hid the whole menu,
+  or collapsed the pill. The re-present now happens once on first open only.
+  A failed X cursor query reuses the last good position instead of a bogus
+  (0,0) that looked like "pointer left the cluster". Opening/switching the
+  flyout restarts the dismiss grace window, and the grace is now applied to
+  the hover-leave timer (it was computed but ignored on Linux).
+- **Pressing outside the menu now dismisses it on Linux too.** Previously
+  `clicked_outside` was hardcoded `false` on non-Windows, so only a 650 ms
+  hover timer could close the menu. Both platforms now use the same pointer
+  query (position + held buttons) and the same dismissal rule.
+
+### Added
+- **Groq cloud transcription model.** Settings → Models now lists
+  *Groq Whisper Large v3 Turbo (API)*. Select it, paste your Groq API key in
+  its "Model parameters" field, and dictation is transcribed through
+  `whisper-large-v3-turbo` on Groq's OpenAI-compatible endpoint. No local
+  weights or download; the key persists per-model on Windows and Linux and
+  takes effect on the next utterance. Other engines remain fully offline.
+  Language names from the UI are mapped to ISO-639-1 codes; unknown values
+  fall back to auto-detect. Added a catalog regression test.
+
+### Changed
+- Bump version to 2.0.0-alpha.41.
+
 ## [2.0.0-alpha.40] — 2026-11-23
 
 Revert menu heading sizing; uniform quiet waveform on Linux.
