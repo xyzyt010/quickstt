@@ -832,8 +832,19 @@ fn apply_dark_theme_to_process_windows() {
     }
 }
 
-/// Hide the dark pill menu + its flyout.
-fn hide_pill_menus(pm: &slint::Weak<PillMenu>, fly: &slint::Weak<MenuFlyout>) {
+/// Hide the dark pill menu + its flyout. Caller-tagged so the menu trace can
+/// say exactly which path tore the cluster down (item click vs outside
+/// dismiss vs hover-leave vs drag).
+fn hide_pill_menus_tagged(
+    pm: &slint::Weak<PillMenu>,
+    fly: &slint::Weak<MenuFlyout>,
+    caller: &str,
+) {
+    menu_trace_line(&format!(
+        "HI- call={caller} menu_vis={} fly_vis={}",
+        pm.upgrade().map(|m| m.window().is_visible()).unwrap_or(false),
+        fly.upgrade().map(|f| f.window().is_visible()).unwrap_or(false),
+    ));
     if let Some(m) = pm.upgrade() {
         let _ = m.hide();
     }
@@ -891,6 +902,11 @@ fn show_flyout(
         widget_platform::ensure_widget_top(f.window());
         widget_platform::raise_above_all(f.window());
         f.window().request_redraw();
+        menu_trace_line(&format!(
+            "SF- show_flyout '{title}' @ {x},{y} n={} fly_vis={}",
+            items.len(),
+            f.window().is_visible()
+        ));
         log_line(&format!("flyout '{title}' @ {x},{y} n={}", items.len()));
     }
 }
@@ -964,6 +980,7 @@ fn open_submenu(
         return None;
     };
     if !m.window().is_visible() {
+        menu_trace_line("OB- open_submenu: menu NOT visible -> None");
         return None;
     }
     let (items, sel, idx_map) = match mode {
@@ -975,6 +992,7 @@ fn open_submenu(
         SubMode::None => return None,
     };
     if items.is_empty() {
+        menu_trace_line("OB- open_submenu: NO items -> None");
         return None;
     }
     let scale = widget_platform::window_scale(p.window()).max(0.5);
@@ -1203,6 +1221,59 @@ fn log_line(msg: &str) {
         // Short lines fit in a single syscall, so append stays line-atomic.
         let line = format!("[{secs}] {msg}\n");
         let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Pixel-level trace for the right-click menu / flyout cluster, in its own
+/// file (`quickstt-menu-trace.log` next to the main log) so the 50ms-tick
+/// digests never slow ordinary field logs. Always armed, but bounded: only
+/// 10s after each `show_pillmenu` open, ~200 lines per open, flushed per
+/// line. Written for diagnosing the Linux "menu vanishes on hover" report.
+static MENU_TRACE_F: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> =
+    std::sync::OnceLock::new();
+/// 10-second window, restarted on every menu open (10s of behaviour per
+/// right-click, as requested by the field report).
+static MENU_TRACE_UNTIL: std::sync::OnceLock<std::sync::Mutex<std::time::Instant>> =
+    std::sync::OnceLock::new();
+/// Monotonic tick counter so events line up by order in the trace too.
+static MENU_TRACE_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn menu_trace_arm() {
+    let slot = MENU_TRACE_UNTIL
+        .get_or_init(|| std::sync::Mutex::new(std::time::Instant::now()));
+    if let Ok(mut g) = slot.lock() {
+        *g = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    }
+    menu_trace_line("=== TRACE WINDOW ARMED (10s) ===");
+}
+
+fn menu_trace_active() -> bool {
+    MENU_TRACE_UNTIL
+        .get()
+        .and_then(|s| s.lock().ok())
+        .map(|g| std::time::Instant::now() < *g)
+        .unwrap_or(false)
+}
+
+fn menu_trace_line(msg: &str) {
+    let f = MENU_TRACE_F.get_or_init(|| {
+        let path = std::env::temp_dir().join("quickstt-menu-trace.log");
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap_or_else(|_| std::fs::File::create(std::env::temp_dir().join("quickstt-menu-trace.log")).unwrap());
+        std::sync::Mutex::new(f)
+    });
+    let n = MENU_TRACE_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut g) = f.lock() {
+        use std::io::Write as _;
+        let _ = g.write_all(format!("[{secs}][#{n}] {msg}\n").as_bytes());
+        let _ = g.flush();
     }
 }
 
@@ -2826,13 +2897,14 @@ fn main() -> QuickSttResult<()> {
         }
         if let Ok(s) = state.lock() {
             log_line(&format!(
-                "settings restored: model='{}' wake='{}' sens={}/{} clap={} offload={}/{}s dock={start_dock} pos=({x},{y})",
+                "settings restored: model='{}' wake='{}' sens={}/{} clap={} offload={}/{}s trigger={} dock={start_dock} pos=({x},{y})",
                 s.settings.selected_model,
                 s.settings.wake_word_mode,
                 s.settings.wakeword_sensitivity,
                 s.settings.vad_sensitivity,
                 s.settings.transient_action,
                 s.settings.auto_offload,
+                if s.settings.ctrl_space_mode == 1 { "toggle" } else { "hold" },
                 s.settings.offload_seconds,
             ));
         }
@@ -3262,6 +3334,13 @@ fn dock_hop(
         let fg_ptt = last_external_fg.clone();
         let hide_until_ptt = hide_until.clone();
         let snooze_ptt_show_ptt = snooze_ptt_show.clone();
+        // Physical key state, for autorepeat protection: holding the key
+        // can deliver repeated Pressed events on some backends; in toggle
+        // mode a repeat looks exactly like a second press and would
+        // instantly stop the session it just started ("toggle does
+        // nothing"). Ignore Pressed while the key is already down.
+        let key_down = Arc::new(Mutex::new(false));
+        let key_down_c = key_down.clone();
         // The background listener owns the same ALSA PCM the foreground
         // session needs. Hand the device over cleanly: stop the
         // background stream FIRST and wait for the release, otherwise the
@@ -3327,6 +3406,19 @@ fn dock_hop(
                     }
                     match GlobalHotKeyEvent::receiver().try_recv() {
                         Ok(ev) if ev.id == ptt_id => {
+                            // Autorepeat guard (see above): drop repeat
+                            // Pressed while the key is physically down — in
+                            // toggle mode a repeat would stop the session a
+                            // few hundred ms after starting it.
+                            if ev.state == HotKeyState::Pressed {
+                                if *mlock(&key_down_c) {
+                                    log_line("Ctrl+Space autorepeat-pressed ignored");
+                                    continue;
+                                }
+                                *mlock(&key_down_c) = true;
+                            } else if ev.state == HotKeyState::Released {
+                                *mlock(&key_down_c) = false;
+                            }
                             // Trigger mode: 0 = push-to-talk (hold), 1 = toggle
                             // (press on / press off). Toggle must be honoured
                             // HERE — the old handler always did hold, so the
@@ -3407,6 +3499,8 @@ fn dock_hop(
                                 }
                                 if tx.try_send(OrchestratorCommand::StartListening).is_err() {
                                     log_line("PTT send FAILED (command loop dead?)");
+                                } else if toggle {
+                                    log_line("toggle: started (release ignored; next press stops)");
                                 }
                             } else if ev.state == HotKeyState::Released {
                                 // In toggle mode the release is irrelevant — the
@@ -4208,15 +4302,26 @@ fn dock_hop(
             // siblings below it regardless of raise order. Join the
             // true-widget layer (override-redirect) like the pill so the
             // menu stacks above it.
-            widget_platform::hide_show_cycle(m.window(), 120);
-            // The hide/show cycle destroys the native window; re-apply the
-            // position now so the fresh window lands in the same spot.
-            m.window()
-                .set_position(slint::PhysicalPosition { x: nx, y: ny });
+            // Re-present (hide/show) ONLY on the first open — same reasoning
+            // as the flyout: with SLINT_DESTROY_WINDOW_ON_HIDE it destroys and
+            // recreates the native X window on every run, forcing an X
+            // unmap+map under the cursor on each right-click and giving the
+            // hover/cursor logic a churn window. The DWM-bitmap first-show
+            // issue it fixed only ever applied to the first presentation.
+            static PM_FIRST_PRESENT: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(true);
+            if PM_FIRST_PRESENT.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                widget_platform::hide_show_cycle(m.window(), 120);
+                // The hide/show cycle destroyed the native window; re-apply
+                // the position now so the fresh window lands in the same spot.
+                m.window()
+                    .set_position(slint::PhysicalPosition { x: nx, y: ny });
+            }
             widget_platform::ensure_widget_top(m.window());
             widget_platform::raise_above_all(m.window());
             m.window().request_redraw();
             *mlock(&opened) = Some(std::time::Instant::now());
+            menu_trace_arm();
             log_line(&format!("pill menu shown @ {nx},{ny}"));
             log_line(&widget_platform::window_state_debug("pillmenu", m.window()));
         }
@@ -4299,7 +4404,7 @@ fn dock_hop(
         let hide_until = hide_until.clone();
         let snooze_ptt_row = snooze_ptt_show.clone();
         pillmenu.on_hide_row(move || {
-            hide_pill_menus(&pm, &fly);
+            hide_pill_menus_tagged(&pm, &fly, "hide_row");
             if let Some(p) = pw.upgrade() {
                 let (mg0, uo0) = (p.get_mic_grow(), p.get_upper_op());
                 *mlock(&anim) = Some(FootAnim {
@@ -4324,7 +4429,7 @@ fn dock_hop(
         let state_menu = state.clone();
         let onboarding_menu = onboarding_menu.clone();
         pillmenu.on_settings_row(move || {
-            hide_pill_menus(&pm, &fly);
+            hide_pill_menus_tagged(&pm, &fly, "settings_row");
             if let Some(p) = pw.upgrade() {
                 let (mg0, uo0) = (p.get_mic_grow(), p.get_upper_op());
                 *mlock(&anim) = Some(FootAnim {
@@ -4432,7 +4537,7 @@ fn dock_hop(
             if has {
                 *mlock(&tb_full) = true;
                 *mlock(&tb_closed) = false;
-                hide_pill_menus(&pm, &fly);
+                hide_pill_menus_tagged(&pm, &fly, "history_row");
                 if let Some(p) = pw.upgrade() {
                     let (mg0, uo0) = (p.get_mic_grow(), p.get_upper_op());
                     *mlock(&anim) = Some(FootAnim {
@@ -4461,7 +4566,7 @@ fn dock_hop(
             if t.trim().is_empty() {
                 log_line("menu: nothing to paste yet");
             } else {
-                hide_pill_menus(&pm, &fly);
+                hide_pill_menus_tagged(&pm, &fly, "paste_row");
                 if let Some(p) = pw.upgrade() {
                     let (mg0, uo0) = (p.get_mic_grow(), p.get_upper_op());
                     *mlock(&anim) = Some(FootAnim {
@@ -4538,7 +4643,7 @@ fn dock_hop(
                 u.mode = SubMode::None;
                 u.rect = None;
             }
-            hide_pill_menus(&pm, &fly);
+            hide_pill_menus_tagged(&pm, &fly, "item_clicked");
             if let Some(p) = pw.upgrade() {
                 let (mg0, uo0) = (p.get_mic_grow(), p.get_upper_op());
                 *mlock(&anim) = Some(FootAnim {
@@ -4562,7 +4667,7 @@ fn dock_hop(
         let pin = menu_pin.clone();
         let ui = flyout_ui.clone();
         pillmenu.on_close_menu(move || {
-            hide_pill_menus(&pm, &fly);
+            hide_pill_menus_tagged(&pm, &fly, "close_menu(Esc)");
             *mlock(&pin) = None;
             if let Ok(mut u) = ui.lock() {
                 u.mode = SubMode::None;
@@ -5837,7 +5942,7 @@ fn dock_hop(
                     .map(|dd| dd.active)
                     .unwrap_or(false);
                 if dragging_now && menu_vis {
-                    hide_pill_menus(&pillmenu_w, &flyout_w);
+                    hide_pill_menus_tagged(&pillmenu_w, &flyout_w, "tick(pill drag)");
                     *mlock(&menu_pin_timer) = None;
                     if let Ok(mut u) = flyout_ui_timer.lock() {
                         u.mode = SubMode::None;
@@ -5868,7 +5973,13 @@ fn dock_hop(
                                     last_cursor = (x, y);
                                     (x, y, down)
                                 }
-                                None => (last_cursor.0, last_cursor.1, false),
+                                None => {
+                                    menu_trace_line(&format!(
+                                        "PF- pointer_state FAILED (X conn) -> reuse last ({},{})",
+                                        last_cursor.0, last_cursor.1
+                                    ));
+                                    (last_cursor.0, last_cursor.1, false)
+                                }
                             };
                         let in_band = |y0: i32, y1: i32| {
                             cx >= mpos.x
@@ -5950,6 +6061,14 @@ fn dock_hop(
                                 }
                             }
                             (None, _) if pinned.is_none() => {
+                                menu_trace_line(&format!(
+                                    "FH- tick want=None active={} -> hide flyout",
+                                    match active {
+                                        SubMode::Mic => "Mic",
+                                        SubMode::Model => "Model",
+                                        SubMode::None => "None",
+                                    }
+                                ));
                                 if let Some(f) = flyout_w.upgrade() {
                                     if f.window().is_visible() {
                                         let _ = f.hide();
@@ -6016,8 +6135,46 @@ fn dock_hop(
                             menu2_outside = None;
                         }
 
+                        // Pixel-level trace (10s after each menu open):
+                        // cursor, per-rect inside flags, the hover state
+                        // machine, and the timers — so a "menu vanished on
+                        // hover" report names the tick and the cause.
+                        if menu_trace_active() {
+                            let mode_name = |m: Option<SubMode>| match m {
+                                Some(SubMode::Mic) => "Mic",
+                                Some(SubMode::Model) => "Model",
+                                _ => "-",
+                            };
+                            let in_mic = in_band(PM_MIC_Y0, PM_MIC_Y1);
+                            let in_mod = in_band(PM_MOD_Y0, PM_MOD_Y1);
+                            menu_trace_line(&format!(
+                                "TT cur=({cx},{cy}) down={mouse_down} \
+                                 mpos=({},{}) scale={scale:.2} \
+                                 bandMic={in_mic} bandMod={in_mod} menu={in_menu} fly={in_fly} pill={in_pill} corr={in_corridor} \
+                                 want={} active={} pin={} fresh={fresh} click={clicked_outside} hoverFired={hover_outside_fired} \
+                                 outAge={} visM={} visF={}",
+                                mpos.x,
+                                mpos.y,
+                                mode_name(want),
+                                mode_name(Some(active)),
+                                mode_name(pinned),
+                                menu2_outside
+                                    .map(|at| at.elapsed().as_millis().to_string())
+                                    .unwrap_or_else(|| "-".to_string()),
+                                m.window().is_visible(),
+                                flyout_w
+                                    .upgrade()
+                                    .map(|f| f.window().is_visible())
+                                    .unwrap_or(false),
+                            ));
+                        }
+
                         if clicked_outside || hover_outside_fired {
-                            hide_pill_menus(&pillmenu_w, &flyout_w);
+                            hide_pill_menus_tagged(
+                                &pillmenu_w,
+                                &flyout_w,
+                                if clicked_outside { "tick(click outside)" } else { "tick(hover-leave 650ms)" },
+                            );
                             *mlock(&menu_pin_timer) = None;
                             if let Ok(mut u) = flyout_ui_timer.lock() {
                                 u.mode = SubMode::None;
@@ -6044,6 +6201,7 @@ fn dock_hop(
                         // Menu closed: flyout + pin follow it down.
                         if let Some(f) = flyout_w.upgrade() {
                             if f.window().is_visible() {
+                                menu_trace_line("FH- tick: menu not visible -> hide flyout");
                                 let _ = f.hide();
                             }
                         }
@@ -8174,6 +8332,10 @@ fn dock_hop(
             if let Ok(mut s) = state.lock() {
                 s.settings.ctrl_space_mode = v.clamp(0, 1) as u32;
                 let _ = s.settings.save_all();
+                log_line(&format!(
+                    "trigger mode set -> {}",
+                    if s.settings.ctrl_space_mode == 1 { "toggle" } else { "hold" }
+                ));
             }
         });
     }

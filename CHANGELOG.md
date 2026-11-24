@@ -1,5 +1,34 @@
 # Changelog
 
+## [2.0.0-alpha.42] — 2026-11-24
+
+Menu trace scaffold + menu re-creation churn removed; Trigger Mode hardening.
+
+### Fixed
+- **Linux: menu vanishing on hover — second round of root-cause removal.**
+  The pill menu itself was still calling the 120 ms `hide_show_cycle` (native
+  X window destroy + recreate) on *every* right-click open; it is now
+  first-presentation-only, same as the flyout. Every menu tear-down is now
+  caller-tagged in the new trace.
+- **Pixel-level menu trace (`quickstt-menu-trace.log`).** Every right-click
+  arms a 10-second trace that logs, per 50 ms tick: cursor `cur=(x,y)`,
+  held-button state, pointer-query failures, menu position/scale, all five
+  inside-rect flags (`in_menu`, `in_fly`, `in_pill`, `in_corridor`, both row
+  bands), `want`/`active`/`pin` hover state, both grace timers, both dismiss
+  decisions, and window-visibility — plus call-tagged hide/show/open events.
+  Reproduce once on Mint, then share the trace file; it names the exact tick
+  and cause.
+- **Trigger Mode (hold vs toggle): autorepeat guard + observability.** Repeat
+  `Pressed` events while the key is held are now ignored (in toggle mode a
+  repeat previously looked like a second press and instantly stopped the
+  session it had just started). The trigger mode is now printed in the
+  startup "settings restored" line and whenever the dashboard changes it, and
+  toggle starts are logged. Windows logs of the full hold-mode cycle were
+  reviewed — press/hold/release/transcribe/paste is intact.
+
+### Changed
+- Bump version to 2.0.0-alpha.42.
+
 ## [2.0.0-alpha.41] — 2026-11-24
 
 Menu hover/dismissal parity, outside-click on Linux, Groq cloud Whisper.
