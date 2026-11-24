@@ -3,8 +3,9 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-/// Represents a detected STT engine/backend
-/// v2.0: Cloud engine variant removed. Only local engines remain.
+/// Represents a detected STT engine/backend.
+/// Hosted API engines (Groq/OpenAI/DeepGram) speak
+/// HTTP-compatible transcription endpoints; local engines run workers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SttEngine {
     WhisperCpp,

@@ -517,8 +517,10 @@ pub fn all_descriptors() -> Vec<ModelDescriptor> {
             blurb: "Hosted Whisper Large v3 Turbo on Groq — no download, no local compute; needs a Groq API key (audio leaves the device)".into(),
             gpu_only: false,
         },
-        // OpenAI hosted Whisper Large v3 Turbo — the only OpenAI model. No
-        // local weights, needs an OpenAI API key.
+        // OpenAI's two hosted STT models. No local weights; both need an
+        // OpenAI API key. gpt-4o-transcribe is comparable accuracy to
+        // whisper-large-v3-turbo and faster; the 25 MB API file cap is
+        // fine for dictation-length turns.
         ModelDescriptor {
             name: "OpenAI Whisper Large v3 Turbo (API)".into(),
             engine_family: EngineFamily::OpenAi,
@@ -528,6 +530,17 @@ pub fn all_descriptors() -> Vec<ModelDescriptor> {
             accuracy: 96,
             speed: 90,
             blurb: "Hosted Whisper Large v3 Turbo on OpenAI — no download, no local compute; needs an OpenAI API key (audio leaves the device)".into(),
+            gpu_only: false,
+        },
+        ModelDescriptor {
+            name: "OpenAI GPT-4o Transcribe (API)".into(),
+            engine_family: EngineFamily::OpenAi,
+            model_dir: "openai/gpt-4o-transcribe".into(),
+            size_mb: 0,
+            widget_selectable: true,
+            accuracy: 97,
+            speed: 92,
+            blurb: "OpenAI GPT-4o Transcribe — fastest hosted STT, top-tier accuracy; needs an OpenAI API key (audio leaves the device)".into(),
             gpu_only: false,
         },
         // Deepgram's five flagship Nova models, all hosted. Model ids are the
@@ -1784,10 +1797,11 @@ mod tests {
                 assert!(matches!(p[0].kind, ParamKind::Text));
             }
         }
-        // Exactly one OpenAI entry (whisper-large-v3-turbo) and five DeepGram.
+        // Two OpenAI entries (whisper-large-v3-turbo, gpt-4o-transcribe)
+        // and five DeepGram.
         assert_eq!(
             all.iter().filter(|d| d.engine_family == EngineFamily::OpenAi).count(),
-            1
+            2
         );
         assert_eq!(
             all.iter().filter(|d| d.engine_family == EngineFamily::Deepgram).count(),

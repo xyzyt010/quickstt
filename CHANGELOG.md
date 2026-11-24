@@ -1,5 +1,34 @@
 # Changelog
 
+## [2.0.0-alpha.45] — 2026-11-25
+
+Worker orphan leak fixed; offload always eventually fires; UI text hierarchy.
+
+### Fixed
+- **Worker processes were orphaned and leaked memory.** `ParakeetSession`
+  held a raw `Child` with no `Drop` impl; every worker respawn (model
+  switch, params change) dropped the old session and detached the old
+  `nemotron_engine.exe` / `parakeet_engine.exe` / python worker — it kept
+  running with its model in RAM forever. That's the source of the stray
+  processes in Task Manager and the "Nemotron never offloads" / "local
+  models get slow" reports. The child is now terminated + reaped on drop
+  (root fix, covers every worker family). Your machine also has a leftover
+  `python3 (ppid=1)` orphan from an older build — safe to kill.
+- **Auto-offload now always eventually fires.** It previously anchored only
+  on turn ends, so a worker loaded by a path that never armed a turn end
+  (or a fresh boot) never unloaded even with the setting on. The anchor is
+  now boot-based as well, and re-sends are gated on `model_offloaded`.
+- **Custom phrases note removed** from Wakewords (the retired-phrases text
+  is gone; the Hey Jarvis / Alexa toggles remain).
+
+### Changed
+- Grey helper/hint text scaled up one step (10–11.5px → 11–12px) across the
+  dashboard — more readable while staying visually subordinate to 12.5–13px
+  body text. Stale "cloud engines removed" comment corrected in engine.rs.
+- **OpenAI catalog now has 2 STT models**: Whisper Large v3 Turbo and
+  GPT-4o Transcribe.
+- Bump version to 2.0.0-alpha.45.
+
 ## [2.0.0-alpha.44] — 2026-11-24
 
 Settings overhaul: API providers, hardware-fit recommendation, mic list fix,

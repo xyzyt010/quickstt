@@ -4952,7 +4952,10 @@ fn dock_hop(
     let mut frame_log_at: Option<std::time::Instant> = None;
     let mut dbl_pending = 0u32;
     // Idle model offload bookkeeping (dashboard autoOffload/offloadSeconds).
-    let mut last_turn_end: Option<std::time::Instant> = None;
+    // Anchored at boot so an idle machine also releases a worker that was
+    // loaded by a path that never arms a "turn end" (previously: no turn →
+    // no anchor → offload never fired even when enabled).
+    let mut last_turn_end: Option<std::time::Instant> = Some(std::time::Instant::now());
     let mut offload_sent = false;
     let timer = Timer::default();
     let pill_w = pill.as_weak();
@@ -6589,7 +6592,7 @@ fn dock_hop(
                 if live_session {
                     offload_sent = false;
                 }
-                if !offload_sent && !live_session && !transcribing {
+                if !offload_sent && !s.model_offloaded && !live_session && !transcribing {
                     if let Some(t0) = last_turn_end {
                         let wait = match s.settings.offload_seconds {
                             0 => std::time::Duration::from_millis(500),

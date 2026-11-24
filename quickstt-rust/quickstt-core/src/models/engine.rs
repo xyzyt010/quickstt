@@ -887,6 +887,20 @@ struct ParakeetSession {
     worker_args: Vec<String>,
 }
 
+/// The helper child MUST be terminated when its session is dropped.
+/// Dropping a `Child` only detaches it — every respawn
+/// (`*guard = Some(spawn_parakeet_session(...))`) previously orphaned the
+/// previous worker with its model still in RAM. Those orphaned processes
+/// are why Task Manager showed extra QuickSTT-y processes that never
+/// offloaded ('Nemotron sometimes doesn't unload', 'models get slow' —
+/// several hundred MB of stranded models thrashing the working set).
+impl Drop for ParakeetSession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 static PARAKEET_SESSION: Lazy<Mutex<Option<ParakeetSession>>> = Lazy::new(|| Mutex::new(None));
 
 /// PID of the live Parakeet helper (if any), for the UI watchdog: a hung

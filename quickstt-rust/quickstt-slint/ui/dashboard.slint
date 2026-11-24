@@ -1052,14 +1052,14 @@ export component DashboardWidget inherits Window {
                                 }
                                 if root.recommend-cleanup-note != "" : Text {
                                     text: root.recommend-cleanup-note;
-                                    font-size: 11px;
+                                    font-size: 12px;
                                     font-weight: 600;
                                     color: #7FB069;
                                     wrap: word-wrap;
                                 }
                                 Text {
                                     text: "FDT is an instant deletion-only tagger. The three normalizer engines also resolve self-corrections (\"no wait, thursday\") and write spoken numbers, dates and times in written form: S1-mini (0.6B, highest quality, slowest), SmolLM2 360M and Gemma 3 270M (llama.cpp, fast). Weights download on first use; the model loads only for the turn being cleaned, off the UI thread, and is dropped immediately after.";
-                                    font-size: 11px;
+                                    font-size: 12px;
                                     color: #9A9A9A;
                                     wrap: word-wrap;
                                 }
@@ -1110,7 +1110,7 @@ export component DashboardWidget inherits Window {
                                         animate background { duration: 130ms; easing: ease-out; }
                                         Text {
                                             text: root.recommend-installed ? "Use it" : ((root.is-downloading && root.recommend-size != "") ? (root.download-progress + "%") : ("Download " + root.recommend-size));
-                                            font-size: 11.5px;
+                                            font-size: 12px;
                                             font-weight: 700;
                                             color: #000000;
                                             horizontal-alignment: center;
@@ -1168,7 +1168,7 @@ export component DashboardWidget inherits Window {
                                 }
                                 Text {
                                     text: (root.download-bytes != "" && root.download-speed != "") ? (root.download-bytes + "  ·  " + root.download-speed) : root.download-bytes;
-                                    font-size: 11px;
+                                    font-size: 12px;
                                     color: #9A9A9A;
                                 }
                             }
@@ -1301,7 +1301,7 @@ export component DashboardWidget inherits Window {
 
                                     if param.hint != "" : Text {
                                         text: param.hint;
-                                        font-size: 11px;
+                                        font-size: 12px;
                                         color: #9A9A9A;
                                         wrap: word-wrap;
                                     }
@@ -1381,10 +1381,10 @@ export component DashboardWidget inherits Window {
                                                     Text { text: card.name; font-size: 13px; font-weight: 600; color: card.installed ? #FFFFFF : #9A9A9A; vertical-alignment: center; }
                                                     if card.badge != "" : Rectangle {
                                                         width: 76px; height: 18px; border-radius: 9px; background: #FFFFFF;
-                                                        Text { text: card.badge; font-size: 10px; font-weight: 700; color: #000000; horizontal-alignment: center; vertical-alignment: center; }
+                                                        Text { text: card.badge; font-size: 11px; font-weight: 700; color: #000000; horizontal-alignment: center; vertical-alignment: center; }
                                                     }
                                                 }
-                                                Text { text: card.langs + " · " + card.size; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
+                                                Text { text: card.langs + " · " + card.size; font-size: 12px; color: #9A9A9A; vertical-alignment: center; }
                                             }
                                             Rectangle { horizontal-stretch: 1; }
                                             // One primary action per card:
@@ -1400,7 +1400,7 @@ export component DashboardWidget inherits Window {
                                                 animate background { duration: 130ms; easing: ease-out; }
                                                 Text {
                                                     text: card.is-active ? "Active" : "Select";
-                                                    font-size: 11px;
+                                                    font-size: 12px;
                                                     font-weight: 700;
                                                     color: #FFFFFF;
                                                     horizontal-alignment: center;
@@ -1421,7 +1421,7 @@ export component DashboardWidget inherits Window {
                                                 animate background { duration: 130ms; easing: ease-out; }
                                                 Text {
                                                     text: card.is-active ? "Active" : "Use";
-                                                    font-size: 11px;
+                                                    font-size: 12px;
                                                     font-weight: 700;
                                                     color: #FFFFFF;
                                                     horizontal-alignment: center;
@@ -1440,7 +1440,7 @@ export component DashboardWidget inherits Window {
                                                 animate background { duration: 130ms; easing: ease-out; }
                                                 Text {
                                                     text: "Connect";
-                                                    font-size: 11px;
+                                                    font-size: 12px;
                                                     font-weight: 700;
                                                     color: #000000;
                                                     horizontal-alignment: center;
@@ -1459,7 +1459,7 @@ export component DashboardWidget inherits Window {
                                                 animate background { duration: 130ms; easing: ease-out; }
                                                 Text {
                                                     text: card.downloading ? (root.download-progress + "%") : "Download";
-                                                    font-size: 11px;
+                                                    font-size: 12px;
                                                     font-weight: 700;
                                                     color: #000000;
                                                     horizontal-alignment: center;
@@ -1479,7 +1479,7 @@ export component DashboardWidget inherits Window {
                                             padding-left: 8px;
                                             padding-right: 8px;
                                             spacing: 4px;
-                                            Text { text: "Enter your " + card.provider + " API key"; font-size: 11px; font-weight: 600; color: #FFFFFF; }
+                                            Text { text: "Enter your " + card.provider + " API key"; font-size: 12px; font-weight: 600; color: #FFFFFF; }
                                             LineEdit {
                                                 height: 32px;
                                                 text: card.connect-text;
@@ -1492,7 +1492,7 @@ export component DashboardWidget inherits Window {
                                                     : card.provider == "OpenAI"
                                                         ? "Get a key at https://platform.openai.com/api-keys."
                                                         : "Get a key at https://console.deepgram.com (Settings → API Keys).";
-                                                font-size: 11px;
+                                                font-size: 12px;
                                                 color: #9A9A9A;
                                                 wrap: word-wrap;
                                             }
@@ -1704,7 +1704,7 @@ export component DashboardWidget inherits Window {
                                     alignment: space-between;
                                     VerticalLayout {
                                         Text { text: "Hands-Free Wakeword Detection"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
-                                        Text { text: "When enabled, QuickSTT listens for wake phrases in the background (< 1 MB RAM)."; font-size: 11px; color: #9A9A9A; }
+                                        Text { text: "When enabled, QuickSTT listens for wake phrases in the background (< 1 MB RAM)."; font-size: 12px; color: #9A9A9A; }
                                     }
                                     CheckBox {
                                         height: 40px;
@@ -1729,7 +1729,7 @@ export component DashboardWidget inherits Window {
 
                                 Text { text: "Sensitivity & Noise Gate Tuning"; font-size: 14px; font-weight: 600; color: #FFFFFF; }
 
-                                Text { text: root.wakeword-threshold-text; font-size: 11px; color: #9A9A9A; wrap: word-wrap; }
+                                Text { text: root.wakeword-threshold-text; font-size: 12px; color: #9A9A9A; wrap: word-wrap; }
 
                                 HorizontalLayout {
                                     spacing: 12px;
@@ -1752,7 +1752,7 @@ export component DashboardWidget inherits Window {
                                 }
                                 Text {
                                     text: "Score bar for the phrases above — HIGHER (right) = triggers on quieter speech, LOWER (left) = needs louder, clearer speech. Too high answers TV and chatter; too low needs shouting. 50 is balanced.";
-                                    font-size: 11px;
+                                    font-size: 12px;
                                     color: #9A9A9A;
                                     wrap: word-wrap;
                                 }
@@ -1778,7 +1778,7 @@ export component DashboardWidget inherits Window {
                                 }
                                 Text {
                                     text: "Voice gate in front of the detector — HIGHER (right) = soft speech gets through, but so does more room noise. LOWER (left) = stricter; set too low, quiet phrases never reach the detector at all. Same direction as above: right = more sensitive. 50 is balanced.";
-                                    font-size: 11px;
+                                    font-size: 12px;
                                     color: #9A9A9A;
                                     wrap: word-wrap;
                                 }
@@ -1840,12 +1840,6 @@ export component DashboardWidget inherits Window {
                                     }
                                 }
 
-                                Text {
-                                    text: "Custom phrases (jarvis, agent, hem) are retired: their models answered ~0.5 to pure silence, so no threshold could ever separate them from nothing. They may return via retrained heads.";
-                                    font-size: 11px;
-                                    color: #9A9A9A;
-                                    wrap: word-wrap;
-                                }
                             }
                         }
 
@@ -1875,7 +1869,7 @@ export component DashboardWidget inherits Window {
                                 }
                                 Text {
                                     text: "One sharp hand clap triggers the action above. Isolated impulses only — speech and sustained noise are vetoed. Wakewords work independently.";
-                                    font-size: 11px;
+                                    font-size: 12px;
                                     color: #9A9A9A;
                                     wrap: word-wrap;
                                 }
@@ -1933,7 +1927,7 @@ export component DashboardWidget inherits Window {
                                                                 }
                                                                 Text {
                                                                     text: root.history-total == 0 ? "" : root.history-total + " turns";
-                                                                    font-size: 11px;
+                                                                    font-size: 12px;
                                                                     color: #8E8E8E;
                                                                     vertical-alignment: center;
                                                                 }
@@ -2088,7 +2082,7 @@ export component DashboardWidget inherits Window {
                                                                      }
                                                                      Text {
                                                                          text: "Hold Ctrl+Space and speak — every finished turn lands here with its audio.";
-                                                                         font-size: 11.5px;
+                                                                         font-size: 12px;
                                                                          color: #8E8E8E;
                                                                          horizontal-alignment: center;
                                                                          wrap: word-wrap;
@@ -2206,7 +2200,7 @@ export component DashboardWidget inherits Window {
 
                                                                         Text {
                                                                             text: item.when;
-                                                                            font-size: 11.5px;
+                                                                            font-size: 12px;
                                                                             color: #8E8E8E;
                                                                             vertical-alignment: center;
                                                                         }
@@ -2316,7 +2310,7 @@ export component DashboardWidget inherits Window {
                                                                             // Elapsed / total clock, right of the bar.
                                                                             Text {
                                                                                 text: item.playing ? (item.pos + " / " + item.dur) : item.dur;
-                                                                                font-size: 11px;
+                                                                                font-size: 12px;
                                                                                 color: item.playing ? #FFFFFF : #8E8E8E;
                                                                                 vertical-alignment: center;
                                                                                 min-width: 84px;
