@@ -177,8 +177,8 @@ fn install_model(desc: &ModelDescriptor, state: &SharedState) -> anyhow::Result<
             "Canary-Qwen needs an NVIDIA GPU, Python 3.10+ with CUDA torch, and: pip install \"nemo_toolkit[asr]\" — then select it and weights auto-download on first run"
         ),
         // Hosted API: nothing to download. Reached only if a UI path calls
-        // download explicitly; the card itself shows "Select" (installed).
-        EngineFamily::Groq => Ok(()),
+        // download explicitly; the card itself shows "Select"/"Use" (installed).
+        EngineFamily::Groq | EngineFamily::OpenAi | EngineFamily::Deepgram => Ok(()),
         _ => anyhow::bail!("No download source registered for {}", desc.name),
     }
 }

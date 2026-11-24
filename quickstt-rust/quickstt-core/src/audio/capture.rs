@@ -7,6 +7,37 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 use tokio::sync::mpsc;
 
+/// True when a device name looks like a real microphone (vs. monitor /
+/// loopback / virtual sinks that ALSA & PipeWire enumerate as "inputs").
+fn looks_like_mic(name: &str) -> bool {
+    let n = name.to_lowercase();
+    // Monitor sources, loopback cables, virtual/placeholder devices: never
+    // microphones. This is what made the Linux list look "completely
+    // unrelated" — PipeWire exposes every monitor source as an input.
+    const NON_MIC: &[&str] = &[
+        "monitor",
+        "loopback",
+        "echo-cancel",
+        "echo cancel",
+        "alsa",
+        "null",
+        "dummy",
+        "pulse",
+        "pipewire",
+        "tts",
+        "tts-input",
+        "cable input",
+        "virtual audio",
+        "virtual-audio",
+        "turtle",
+        "play valve",
+    ];
+    if NON_MIC.iter().any(|p| n.contains(p)) {
+        return false;
+    }
+    true
+}
+
 /// List OS input (microphone) device names in enumeration order.
 pub fn list_input_devices() -> Vec<String> {
     let host = cpal::default_host();
@@ -15,7 +46,7 @@ pub fn list_input_devices() -> Vec<String> {
         for d in devices {
             if let Ok(n) = d.name() {
                 let n = n.trim().to_string();
-                if !n.is_empty() && !names.contains(&n) {
+                if !n.is_empty() && !names.contains(&n) && looks_like_mic(&n) {
                     names.push(n);
                 }
             }

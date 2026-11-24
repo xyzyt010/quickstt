@@ -446,9 +446,11 @@ pub fn transcribe_with_language(
         EngineFamily::Canary => transcribe_canary(config, &model_dir, wav_path, language, descriptor),
         EngineFamily::Photon => transcribe_photon(config, descriptor, wav_path),
         EngineFamily::CanaryQwen => transcribe_canary_qwen(config, descriptor, wav_path),
-        // Groq is hosted: no local model_dir is used. The API key travels in
+        // Hosted APIs: no local model_dir is used. The API key travels in
         // the per-model params snapshot mirrored into LATEST_MODEL_PARAMS.
         EngineFamily::Groq => transcribe_groq(config, descriptor, wav_path, language),
+        EngineFamily::OpenAi => transcribe_openai(config, descriptor, wav_path, language),
+        EngineFamily::Deepgram => transcribe_deepgram(config, descriptor, wav_path, language),
         EngineFamily::SherpaOnnx | EngineFamily::NemoTransducer | EngineFamily::NemoCTC => {
             transcribe_sherpa_onnx(config, &model_dir, wav_path, &descriptor.engine_family, descriptor)
         }
@@ -490,25 +492,47 @@ fn push_multipart_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &
 }
 
 /// Groq-hosted Whisper Large v3 Turbo via the OpenAI-compatible transcriptions
-/// endpoint. This is the only cloud engine: no local weights, no runtime
-/// probing, no persistent process. The user's API key is stored with the
-/// model's params (Settings → Models → Model parameters) and mirrored into
-/// `LATEST_MODEL_PARAMS` before each transcription, so changing it in the UI
-/// takes effect on the very next utterance without a restart.
-fn transcribe_groq(
-    _config: &SttEngineConfig,
-    descriptor: &ModelDescriptor,
-    wav_path: &Path,
-    language: &str,
-) -> Result<String> {
+/// endpoint. No local weights, no runtime probing, no persistent process.
+/// The user's API key is stored with the model's params (Settings → Models →
+/// Model parameters) and mirrored into `LATEST_MODEL_PARAMS` before each
+/// transcription, so changing it in the UI takes effect on the very next
+/// utterance without a restart. Shared by Groq/OpenAI (OpenAI-compatible
+/// multipart) and adapted per-provider below.
+fn api_model_id(descriptor: &ModelDescriptor) -> String {
+    // model_dir "groq/whisper-large-v3-turbo" -> "whisper-large-v3-turbo".
+    descriptor
+        .model_dir
+        .rsplit('/')
+        .next()
+        .unwrap_or(&descriptor.model_dir)
+        .to_string()
+}
+
+/// Read the user's API key (empty if unset). Mirrored from settings as a
+/// per-model param before each transcription call, so edits apply instantly.
+fn api_key_of(descriptor: &ModelDescriptor, provider: &str) -> Result<String> {
     let api_key = param(descriptor, "api_key");
     let api_key = api_key.trim();
     if api_key.is_empty() {
         anyhow::bail!(
-            "Groq API key is empty — open Settings → Models, select Groq Whisper Large v3 Turbo and paste your key under Model parameters"
+            "{provider} API key is empty — open Models, select {} and paste your key there",
+            descriptor.name
         );
     }
+    Ok(api_key.to_string())
+}
 
+/// POST a WAV to an OpenAI-compatible transcriptions endpoint and return the
+/// `text` field of the JSON response. `LATEST_MODEL_PARAMS` was already
+/// mirrored by the orchestrator, so `api_key` is current.
+fn cloud_multipart_transcribe(
+    provider: &str,
+    url: &str,
+    api_key: &str,
+    model_id: &str,
+    wav_path: &Path,
+    language: &str,
+) -> Result<String> {
     let wav = std::fs::read(wav_path)
         .with_context(|| format!("read audio file {}", wav_path.display()))?;
 
@@ -522,7 +546,7 @@ fn transcribe_groq(
     );
 
     let mut body: Vec<u8> = Vec::with_capacity(wav.len() + 1024);
-    push_multipart_field(&mut body, &boundary, "model", "whisper-large-v3-turbo");
+    push_multipart_field(&mut body, &boundary, "model", model_id);
     push_multipart_field(&mut body, &boundary, "response_format", "json");
     if let Some(code) = groq_language_code(language) {
         push_multipart_field(&mut body, &boundary, "language", code);
@@ -538,23 +562,102 @@ fn transcribe_groq(
 
     let content_type = format!("multipart/form-data; boundary={boundary}");
     let authorization = format!("Bearer {api_key}");
-    let resp = ureq::post("https://api.groq.com/openai/v1/audio/transcriptions")
+    let resp = ureq::post(url)
         .set("Authorization", &authorization)
         .set("Content-Type", &content_type)
         .timeout(std::time::Duration::from_secs(120))
         .send_bytes(&body)
-        .map_err(|e| anyhow::anyhow!("Groq API request failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("{provider} API request failed: {e}"))?;
 
     let raw = resp
         .into_string()
-        .context("read Groq API response body")?;
-    let value: serde_json::Value =
-        serde_json::from_str(&raw).with_context(|| format!("Groq returned non-JSON: {raw}"))?;
+        .context("read cloud transcription response body")?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("{provider} returned non-JSON: {raw}"))?;
     let text = value
         .get("text")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Groq response has no text field: {raw}"))?;
-    info!("groq: transcribed {} bytes -> {} chars", wav.len(), text.len());
+        .ok_or_else(|| anyhow::anyhow!("{provider} response has no text field: {raw}"))?;
+    info!("{}: transcribed {} bytes -> {} chars", provider.to_lowercase(), wav.len(), text.len());
+    Ok(text.trim().to_string())
+}
+
+fn transcribe_groq(
+    _config: &SttEngineConfig,
+    descriptor: &ModelDescriptor,
+    wav_path: &Path,
+    language: &str,
+) -> Result<String> {
+    let api_key = api_key_of(descriptor, "Groq")?;
+    let model_id = api_model_id(descriptor);
+    cloud_multipart_transcribe(
+        "Groq",
+        "https://api.groq.com/openai/v1/audio/transcriptions",
+        &api_key,
+        &model_id,
+        wav_path,
+        language,
+    )
+}
+
+fn transcribe_openai(
+    _config: &SttEngineConfig,
+    descriptor: &ModelDescriptor,
+    wav_path: &Path,
+    language: &str,
+) -> Result<String> {
+    let api_key = api_key_of(descriptor, "OpenAI")?;
+    let model_id = api_model_id(descriptor);
+    cloud_multipart_transcribe(
+        "OpenAI",
+        "https://api.openai.com/v1/audio/transcriptions",
+        &api_key,
+        &model_id,
+        wav_path,
+        language,
+    )
+}
+
+/// Deepgram speaks a different wire format than OpenAI-compatible APIs:
+/// POST the raw WAV bytes to `/v1/listen` with `Authorization: Token <key>`.
+fn transcribe_deepgram(
+    _config: &SttEngineConfig,
+    descriptor: &ModelDescriptor,
+    wav_path: &Path,
+    language: &str,
+) -> Result<String> {
+    let api_key = api_key_of(descriptor, "DeepGram")?;
+    let model_id = api_model_id(descriptor);
+
+    let wav = std::fs::read(wav_path)
+        .with_context(|| format!("read audio file {}", wav_path.display()))?;
+
+    let mut url = format!(
+        "https://api.deepgram.com/v1/listen?model={}&smart_format=true&punctuate=true",
+        model_id
+    );
+    if let Some(code) = groq_language_code(language) {
+        url.push_str(&format!("&language={code}"));
+    }
+    let authorization = format!("Token {api_key}");
+    let resp = ureq::post(&url)
+        .set("Authorization", &authorization)
+        .set("Content-Type", "audio/wav")
+        .timeout(std::time::Duration::from_secs(120))
+        .send_bytes(&wav)
+        .map_err(|e| anyhow::anyhow!("DeepGram API request failed: {e}"))?;
+
+    let raw = resp
+        .into_string()
+        .context("read DeepGram response body")?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("DeepGram returned non-JSON: {raw}"))?;
+    // /v1/listen shape: results.channels[0].alternatives[0].transcript
+    let text = value
+        .pointer("/results/channels/0/alternatives/0/transcript")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("DeepGram response has no transcript: {raw}"))?;
+    info!("deepgram ({}): transcribed {} bytes -> {} chars", model_id, wav.len(), text.len());
     Ok(text.trim().to_string())
 }
 
@@ -680,8 +783,11 @@ fn should_run_deepfilter_for_model(descriptor: &ModelDescriptor) -> bool {
             | EngineFamily::Photon
             | EngineFamily::CanaryQwen
             | EngineFamily::Lfm3Audio
-            // Already denoised server-side by Groq; don't burn CPU locally.
+            // Already denoised server-side by the cloud provider; don't burn
+            // CPU locally.
             | EngineFamily::Groq
+            | EngineFamily::OpenAi
+            | EngineFamily::Deepgram
     )
 }
 

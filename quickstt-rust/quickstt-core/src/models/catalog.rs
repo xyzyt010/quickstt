@@ -45,10 +45,12 @@ impl ModelDescriptor {
             // knob through the app pipeline.
             CanaryQwen => vec![],
             Lfm3Audio => vec![threads_param(), lfm3_ctx_param()],
-            // Groq is a hosted API: no local weights / threads to tune. The
-            // only user-supplied knob is the API key (entered on the Models
-            // tab and persisted under this model's params).
-            Groq => vec![api_key_param()],
+            // Hosted APIs: no local weights / threads to tune. The only
+            // user-supplied knob is the API key (entered on the Models tab
+            // and persisted under this model's params).
+            Groq => vec![api_key_param_for("https://console.groq.com — click 'API Keys' and create one.")],
+            OpenAi => vec![api_key_param_for("https://platform.openai.com/api-keys — create or copy a secret key.")],
+            Deepgram => vec![api_key_param_for("https://console.deepgram.com — create an API key under Settings > API Keys.")],
         }
     }
 
@@ -127,13 +129,13 @@ fn lfm3_ctx_param() -> ParamSpec {
     }
 }
 
-fn api_key_param() -> ParamSpec {
+fn api_key_param_for(hint: &str) -> ParamSpec {
     ParamSpec {
         key: "api_key".into(),
-        label: "Groq API key".into(),
+        label: "API key".into(),
         kind: ParamKind::Text,
         default: "".into(),
-        hint: "Paste your Groq API key (console.groq.com). Stored locally in settings; audio is sent to Groq for transcription.".into(),
+        hint: format!("Paste your key ({hint}) Stored locally in settings; audio leaves the device for transcription."),
     }
 }
 
@@ -227,6 +229,33 @@ pub enum EngineFamily {
     /// the user's API key. Offline engines stay fully offline; this one is
     /// explicitly opt-in by selecting the card and entering a key.
     Groq,
+    /// OpenAI-hosted Whisper Large v3 Turbo (API). Same contract as Groq:
+    /// no local weights, key-required, opt-in by selection.
+    OpenAi,
+    /// Deepgram-hosted Nova models (API). Same contract as Groq: no local
+    /// weights, key-required, opt-in by selection. The API model id is the
+    /// last path component of `model_dir` (e.g. "deepgram/nova-3" → "nova-3").
+    Deepgram,
+}
+
+impl EngineFamily {
+    /// True when this family is a hosted API (no local weights).
+    pub fn is_api(&self) -> bool {
+        matches!(
+            self,
+            EngineFamily::Groq | EngineFamily::OpenAi | EngineFamily::Deepgram
+        )
+    }
+    /// Provider group name for the dashboard's provider dropdown. `provider`
+    /// filters are compared case-sensitively against this exact string.
+    pub fn provider(&self) -> &'static str {
+        match self {
+            EngineFamily::Groq => "Groq",
+            EngineFamily::OpenAi => "OpenAI",
+            EngineFamily::Deepgram => "DeepGram",
+            _ => "Local",
+        }
+    }
 }
 
 impl EngineFamily {
@@ -248,6 +277,8 @@ impl EngineFamily {
             EngineFamily::CanaryQwen => "canary-qwen",
             EngineFamily::Lfm3Audio => "lfm3-audio",
             EngineFamily::Groq => "groq-api",
+            EngineFamily::OpenAi => "openai-api",
+            EngineFamily::Deepgram => "deepgram-api",
         }
     }
 }
@@ -486,6 +517,76 @@ pub fn all_descriptors() -> Vec<ModelDescriptor> {
             blurb: "Hosted Whisper Large v3 Turbo on Groq — no download, no local compute; needs a Groq API key (audio leaves the device)".into(),
             gpu_only: false,
         },
+        // OpenAI hosted Whisper Large v3 Turbo — the only OpenAI model. No
+        // local weights, needs an OpenAI API key.
+        ModelDescriptor {
+            name: "OpenAI Whisper Large v3 Turbo (API)".into(),
+            engine_family: EngineFamily::OpenAi,
+            model_dir: "openai/whisper-large-v3-turbo".into(),
+            size_mb: 0,
+            widget_selectable: true,
+            accuracy: 96,
+            speed: 90,
+            blurb: "Hosted Whisper Large v3 Turbo on OpenAI — no download, no local compute; needs an OpenAI API key (audio leaves the device)".into(),
+            gpu_only: false,
+        },
+        // Deepgram's five flagship Nova models, all hosted. Model ids are the
+        // last path component of model_dir (nova-3, nova-2, ...).
+        ModelDescriptor {
+            name: "DeepGram Nova-3 (API)".into(),
+            engine_family: EngineFamily::Deepgram,
+            model_dir: "deepgram/nova-3".into(),
+            size_mb: 0,
+            widget_selectable: true,
+            accuracy: 97,
+            speed: 92,
+            blurb: "Deepgram Nova-3 — flagship accuracy, multilingual; needs an API key (audio leaves the device)".into(),
+            gpu_only: false,
+        },
+        ModelDescriptor {
+            name: "DeepGram Nova-3 Medical (API)".into(),
+            engine_family: EngineFamily::Deepgram,
+            model_dir: "deepgram/nova-3-medical".into(),
+            size_mb: 0,
+            widget_selectable: true,
+            accuracy: 96,
+            speed: 90,
+            blurb: "Deepgram Nova-3 Medical — tuned for medical dictation; needs an API key (audio leaves the device)".into(),
+            gpu_only: false,
+        },
+        ModelDescriptor {
+            name: "DeepGram Nova-3 Conversational (API)".into(),
+            engine_family: EngineFamily::Deepgram,
+            model_dir: "deepgram/nova-3-conversational-ai".into(),
+            size_mb: 0,
+            widget_selectable: true,
+            accuracy: 95,
+            speed: 91,
+            blurb: "Deepgram Nova-3 Conversational AI — best for chatty/projected voices; needs an API key (audio leaves the device)".into(),
+            gpu_only: false,
+        },
+        ModelDescriptor {
+            name: "DeepGram Nova-2 (API)".into(),
+            engine_family: EngineFamily::Deepgram,
+            model_dir: "deepgram/nova-2".into(),
+            size_mb: 0,
+            widget_selectable: true,
+            accuracy: 94,
+            speed: 90,
+            blurb: "Deepgram Nova-2 — proven workhorse, wide language coverage; needs an API key (audio leaves the device)".into(),
+            gpu_only: false,
+        },
+        ModelDescriptor {
+            name: "DeepGram Nova-2 Medical (API)".into(),
+            engine_family: EngineFamily::Deepgram,
+            model_dir: "deepgram/nova-2-medical".into(),
+            size_mb: 0,
+            widget_selectable: true,
+            accuracy: 94,
+            speed: 88,
+            blurb: "Deepgram Nova-2 Medical — clinical vocabulary; needs an API key (audio leaves the device)".into(),
+            gpu_only: false,
+        },
     ]
 }
 
@@ -535,8 +636,8 @@ pub fn is_model_installed(desc: &ModelDescriptor) -> bool {
     match desc.engine_family {
         // Hosted/cloud models have no local weights — always "installed"
         // so the card offers Select instead of Download. The API key check
-        // happens at transcription time in the Groq engine.
-        EngineFamily::Groq => true,
+        // happens at transcription time in the cloud engine.
+        EngineFamily::Groq | EngineFamily::OpenAi | EngineFamily::Deepgram => true,
         EngineFamily::WhisperCpp => {
             // Any ggml bin in the descriptor dir counts.
             if model_path.is_dir() {
@@ -954,7 +1055,7 @@ pub fn models_for_hardware(
                     || d.name.contains("Whistle")
                     || d.name.contains("LFM3-Audio")
                     // Cloud models run identically on GPU and CPU machines.
-                    || d.engine_family == EngineFamily::Groq
+                    || d.engine_family.is_api()
             } else {
                 !d.gpu_only
             }
@@ -1126,6 +1227,20 @@ pub fn recommend_model(
         if has_discrete_gpu && vram_mb > 0 && vram_mb >= d.size_mb as u64 {
             score += 4.0;
         }
+        // GPU-checkpoint fit: a big weights file on a small-VRAM card swaps
+        // every turn; when VRAM comfortably fits the model, prefer it.
+        if d.gpu_only {
+            if has_discrete_gpu && vram_mb >= 4096 {
+                score += 6.0;
+            } else if !(has_discrete_gpu && vram_mb > 0) {
+                score -= 30.0;
+            }
+        }
+        // RAM-thrash guard: weights beyond half the system RAM fight the OS
+        // and the page cache even when they technically fit.
+        if (d.size_mb as u64) > ((system_ram_gb * 1024) / 2) {
+            score -= 25.0;
+        }
         scored.push((d, score));
     }
     // Stable order: score desc, then smallest, then name (deterministic output).
@@ -1217,6 +1332,41 @@ pub fn recommend_model(
             alt_name: None,
             alt_reason: String::new(),
         },
+    }
+}
+
+/// Best-fit transcript-cleanup engine for the hardware (same fit philosophy
+/// as the STT recommendation: RAM-budgeted, accuracy-first within the budget).
+/// Indices match the dashboard ComboBox order:
+/// 0 = FDT 66M, 1 = S1-mini INT4, 2 = SmolLM2 360M, 3 = Gemma 3 270M.
+pub fn recommend_cleanup_engine(system_ram_gb: u64) -> (u32, String) {
+    // FDT (66 MB) always fits and is instant — it only wins by default.
+    // SmolLM2 (271 MB, fast) is the sweet spot on ordinary machines.
+    // S1-mini (375 MB, slowest but most accurate) needs room to breathe.
+    if system_ram_gb >= 8 {
+        (
+            1,
+            format!(
+                "Recommended for your {} GB RAM: S1-mini — best quality (self-corrections + numbers), slower but fits comfortably.",
+                system_ram_gb
+            ),
+        )
+    } else if system_ram_gb >= 3 {
+        (
+            2,
+            format!(
+                "Recommended for your {} GB RAM: SmolLM2 360M — fast, good self-correction quality, small footprint.",
+                system_ram_gb
+            ),
+        )
+    } else {
+        (
+            0,
+            format!(
+                "Recommended for your {} GB RAM: FDT 66M — instant, tiny; the bigger cleanup engines need more RAM.",
+                system_ram_gb
+            ),
+        )
     }
 }
 
@@ -1609,5 +1759,62 @@ mod tests {
                 .iter()
                 .any(|x| x.engine_family == EngineFamily::Groq));
         }
+    }
+
+    #[test]
+    fn api_providers_registered_on_all_hardware() {
+        let all = all_descriptors();
+        for fam in [
+            EngineFamily::OpenAi,
+            EngineFamily::Deepgram,
+        ] {
+            let ds: Vec<_> = all
+                .iter()
+                .filter(|d| d.engine_family == fam)
+                .collect();
+            assert!(!ds.is_empty(), "{fam:?} must have catalog entries");
+            for d in &ds {
+                assert!(d.engine_family.is_api());
+                assert!(is_model_installed(d), "{} must read installed", d.name);
+                assert!(!d.gpu_only);
+                assert_eq!(d.size_mb, 0);
+                let p = d.params();
+                assert_eq!(p.len(), 1);
+                assert_eq!(p[0].key, "api_key");
+                assert!(matches!(p[0].kind, ParamKind::Text));
+            }
+        }
+        // Exactly one OpenAI entry (whisper-large-v3-turbo) and five DeepGram.
+        assert_eq!(
+            all.iter().filter(|d| d.engine_family == EngineFamily::OpenAi).count(),
+            1
+        );
+        assert_eq!(
+            all.iter().filter(|d| d.engine_family == EngineFamily::Deepgram).count(),
+            5
+        );
+        let openai = all.iter().find(|d| d.engine_family == EngineFamily::OpenAi).unwrap();
+        assert_eq!(openai.model_dir, "openai/whisper-large-v3-turbo");
+        // Visible on both hardware paths.
+        for gpu in [false, true] {
+            let list = models_for_hardware(gpu);
+            assert!(list.iter().any(|x| x.engine_family == EngineFamily::OpenAi));
+            assert!(list.iter().any(|x| x.engine_family == EngineFamily::Deepgram));
+            assert!(list.iter().any(|x| x.engine_family == EngineFamily::Groq));
+        }
+        // Provider names are stable strings used by the dropdown filter.
+        assert_eq!(EngineFamily::OpenAi.provider(), "OpenAI");
+        assert_eq!(EngineFamily::Deepgram.provider(), "DeepGram");
+        assert_eq!(EngineFamily::Groq.provider(), "Groq");
+        assert_eq!(EngineFamily::WhisperCpp.provider(), "Local");
+    }
+
+    #[test]
+    fn cleanup_engine_fit_by_ram() {
+        assert_eq!(recommend_cleanup_engine(2).0, 0); // tiny RAM -> FDT
+        assert_eq!(recommend_cleanup_engine(4).0, 2); // ordinary -> SmolLM2
+        assert_eq!(recommend_cleanup_engine(8).0, 1); // roomy -> S1-mini
+        assert_eq!(recommend_cleanup_engine(16).0, 1);
+        assert!(!recommend_cleanup_engine(4).1.is_empty());
     }
 }

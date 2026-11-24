@@ -93,6 +93,18 @@ pub struct AppState {
     /// Non-zero keeps the turn non-settled until the last segment lands in
     /// `transcript_buffer`, so turn-end post-processing sees the whole text.
     pub pending_transcribes: u32,
+    /// Dashboard provider filter ("Local" / "Groq" / "OpenAI" / "DeepGram").
+    /// Filters the Model dropdown. Default "Local"; follows the provider of
+    /// the active model when the user picks one.
+    pub active_provider: String,
+    /// Last selected model name per provider (provider -> name), so picking
+    /// a provider restores the user's model for it instead of always
+    /// jumping to the first entry.
+    pub last_by_provider: std::collections::HashMap<String, String>,
+    /// model_dir whose inline API-key Connect box is open ("" = none).
+    pub connect_for: String,
+    /// Hardware-fit note for the cleanup engine (RAM-budgeted pick).
+    pub recommend_cleanup_note: String,
 }
 
 impl AppState {
@@ -135,6 +147,10 @@ impl AppState {
             history_seq: 0,
             history_push_ms: 0,
             pending_transcribes: 0,
+            active_provider: "Local".to_string(),
+            last_by_provider: std::collections::HashMap::new(),
+            connect_for: String::new(),
+            recommend_cleanup_note: String::new(),
         }
     }
 }
@@ -287,6 +303,9 @@ pub(crate) fn refresh_recommendation(s: &mut AppState) {
     s.recommended_model = rec
         .name
         .and_then(|n| s.model_entries.iter().position(|e| e.name == n));
+    // Same RAM-fit logic for the cleanup engine pick.
+    let (_, cleanup_note) = catalog::recommend_cleanup_engine(hw.system_ram_gb);
+    s.recommend_cleanup_note = cleanup_note;
 }
 
 /// Internal commands sent to the dedicated audio-control thread. The audio
@@ -1429,6 +1448,16 @@ impl AppOrchestrator {
                             langs.into_iter().next().unwrap_or_else(|| "Auto".to_string())
                         };
                         s.selected_language = resolved;
+                        // Provider tracking: the filter dropdown follows the
+                        // active model, and per-provider resume remembers the
+                        // user's model for each provider.
+                        let prov = catalog::all_descriptors()
+                            .into_iter()
+                            .find(|d| d.name == name)
+                            .map(|d| d.engine_family.provider().to_string())
+                            .unwrap_or_else(|| "Local".to_string());
+                        s.active_provider = prov.clone();
+                        s.last_by_provider.insert(prov, name.clone());
                         // Remember the resolved choice FOR THIS MODEL (the
                         // same Settings value the save path persists).
                         let resolved_now = s.selected_language.clone();

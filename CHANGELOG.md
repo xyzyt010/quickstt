@@ -1,5 +1,50 @@
 # Changelog
 
+## [2.0.0-alpha.44] — 2026-11-24
+
+Settings overhaul: API providers, hardware-fit recommendation, mic list fix,
+menu show/hide symmetry.
+
+### Fixed
+- **Microphone list on Linux no longer lists unrelated sources.** Monitor
+  sources, loopback cables, virtual/placeholder devices (PipeWire/ALSA
+  enumerate them as inputs) are filtered out; only real microphones remain,
+  with the OS default first.
+- **Tray Show/Hide vs pill menu symmetry.** Hiding the widget now also takes
+  the pill menu + flyout down; showing it (tray click, tray Show/Hide,
+  double-click, SNI) immediately re-opens the right-click menu anchored at
+  the pill — you land back on the menu you left instead of needing a second
+  right-click.
+- **Startup log trigger slot corrected** (`offload=false/300s trigger=hold|toggle`)
+  — shipped here from alpha.43's fix.
+
+### Added
+- **Providers: Groq / OpenAI / DeepGram.** A Provider dropdown (Local by
+  default) sits above the Model dropdown and filters the model list;
+  switching a provider activates its last-used model. API models: Groq
+  Whisper Large v3 Turbo, OpenAI Whisper Large v3 Turbo, and five DeepGram
+  Nova models (nova-3, nova-3-medical, nova-3-conversational-ai, nova-2,
+  nova-2-medical). The UI lists them in the catalog after the offline
+  models; with a key set they show **Use**, without one they show **Connect**
+  which expands an inline, themed API-key box with where to get the key.
+- **Catalog collapse.** The catalog header now has a chevron that rotates
+  (▼ open → ▲ closed); collapsed it shows just the rounded header. Missing
+  local models render their names in muted grey. Download / Select / Use /
+  Connect buttons are middle-aligned in their cards.
+- **Hardware-fit "Best fit" recommendation.** The old top banner is now a
+  RAM/VRAM/GPU-aware best-fit pick (same scoring as before, strengthened:
+  GPU-checkpoint fit vs VRAM, half-RAM thrash guard), with a long-form reason
+  naming the measured hardware. The same fit logic recommends the cleanup
+  engine (FDT / S1-mini / SmolLM2) by RAM with a green note under the
+  Cleanup model dropdown.
+- **System tray dropdown entry renamed Dashboard → Settings.**
+
+### Changed
+- Helper/hint text stepped up one size (10–10.5px → 11px) for readability
+  while staying visually subordinate to 12–13px body text; dead duplicate
+  text trimmed.
+- Bump version to 2.0.0-alpha.44.
+
 ## [2.0.0-alpha.43] — 2026-11-24
 
 Startup log line fix.

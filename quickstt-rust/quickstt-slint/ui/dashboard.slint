@@ -17,6 +17,14 @@ export struct ModelCard {
     visible: bool,
     index: int,
     downloading: bool,
+    // Provider group for this card ("Local" / "Groq" / "OpenAI" / "DeepGram").
+    provider: string,
+    // True when this is a hosted-API card and the user has a key set.
+    has-key: bool,
+    // Stable model_dir — the scoped key for its api_key param.
+    model-dir: string,
+    // Current API key text (mirrored back from settings for Connect boxes).
+    connect-text: string,
 }
 
 // Per-model user parameter row on the Models tab. `kind`:
@@ -365,6 +373,15 @@ export component DashboardWidget inherits Window {
     callback set-model-param-choice(string, string);
     /// Free-text parameter writeback (e.g. the Groq API key).
     callback set-model-param-text(string, string);
+    /// Provider group picker (above the Model dropdown). Filtering is a
+    /// view over the catalog; the active model is preserved when possible.
+    callback set-provider(string);
+    /// Toggle the catalog collapsed/expanded state.
+    callback toggle-catalog();
+    /// Open the inline API-key Connect box for a model_dir ("" = close all).
+    callback open-connect(string);
+    /// Save an API key for a specific model_dir (catalog Connect boxes).
+    callback set-api-key-for(string, string);
     callback browse-recording-dir();
     callback check-updates();
     /// Re-run the first-run onboarding tour from the top.
@@ -380,6 +397,19 @@ export component DashboardWidget inherits Window {
     /// Per-model parameter rows for the active model — every family has its
     /// own list (empty when the selected model can't be customised).
     in property <[ModelParamUi]> model-params: [];
+    // ── Provider filter (Local / Groq / OpenAI / DeepGram) ──
+    in property <string> active-provider: "Local";
+    in property <[string]> provider-options: ["Local", "Groq", "OpenAI", "DeepGram"];
+    // Index of the active provider in provider-options (keeps the ComboBox
+    // in sync with the provider of the active model).
+    in property <int> active-provider-index: 0;
+    // ── Catalog collapse state + inline Connect box ──
+    in-out property <bool> catalog-open: true;
+    // model_dir whose Connect box is currently open ("" = none).
+    in property <string> connect-for: "";
+    // ── Hardware-fit recommendation for the cleanup engine ──
+    in property <int> recommend-cleanup-engine: -1;
+    in property <string> recommend-cleanup-note: "";
 
     // Monitor scale factor (1.0 = 96 dpi, 1.25 = 125%, …), set from Rust via
     // GetDpiForWindow. Slint's winit-software backend renders at this scale but
@@ -1020,6 +1050,13 @@ export component DashboardWidget inherits Window {
                                         selected(v) => { root.set-disfluency-engine(self.current-index); }
                                     }
                                 }
+                                if root.recommend-cleanup-note != "" : Text {
+                                    text: root.recommend-cleanup-note;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: #7FB069;
+                                    wrap: word-wrap;
+                                }
                                 Text {
                                     text: "FDT is an instant deletion-only tagger. The three normalizer engines also resolve self-corrections (\"no wait, thursday\") and write spoken numbers, dates and times in written form: S1-mini (0.6B, highest quality, slowest), SmolLM2 360M and Gemma 3 270M (llama.cpp, fast). Weights download on first use; the model loads only for the turn being cleaned, off the UI thread, and is dropped immediately after.";
                                     font-size: 11px;
@@ -1047,8 +1084,7 @@ export component DashboardWidget inherits Window {
                             color: #FFFFFF;
                         }
 
-                        // ── Recommendation banner (the one action that matters) ──
-                        // ── Recommendation banner (the one action that matters) ──
+                        // ── Best-fit recommendation banner (the one action that matters) ──
                         if root.recommend-model != "" : Rectangle {
                             background: #141414;
                             border-radius: 10px;
@@ -1060,7 +1096,7 @@ export component DashboardWidget inherits Window {
                                 spacing: 8px;
                                 HorizontalLayout {
                                     spacing: 10px;
-                                    Text { text: "Recommended"; font-size: 12px; font-weight: 700; color: #9A9A9A; vertical-alignment: center; }
+                                    Text { text: "Best fit"; font-size: 12px; font-weight: 700; color: #9A9A9A; vertical-alignment: center; }
                                     Text { text: root.recommend-model; font-size: 13px; font-weight: 700; color: #FFFFFF; vertical-alignment: center; overflow: elide; }
                                     Rectangle { horizontal-stretch: 1; }
                                     // The recommended model's single action —
@@ -1132,7 +1168,7 @@ export component DashboardWidget inherits Window {
                                 }
                                 Text {
                                     text: (root.download-bytes != "" && root.download-speed != "") ? (root.download-bytes + "  ·  " + root.download-speed) : root.download-bytes;
-                                    font-size: 10.5px;
+                                    font-size: 11px;
                                     color: #9A9A9A;
                                 }
                             }
@@ -1150,6 +1186,17 @@ export component DashboardWidget inherits Window {
                                 spacing: 10px;
 
                                 Text { text: "Active model"; font-size: 13px; font-weight: 600; color: #FFFFFF; }
+
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text { text: "Provider"; font-size: 13px; color: #FFFFFF; vertical-alignment: center; min-width: 72px; }
+                                    ComboBox {
+                                        height: 40px;
+                                        model: root.provider-options;
+                                        current-index: root.active-provider-index;
+                                        selected(v) => { root.set-provider(v); }
+                                    }
+                                }
 
                                 HorizontalLayout {
                                     spacing: 10px;
@@ -1254,7 +1301,7 @@ export component DashboardWidget inherits Window {
 
                                     if param.hint != "" : Text {
                                         text: param.hint;
-                                        font-size: 10px;
+                                        font-size: 11px;
                                         color: #9A9A9A;
                                         wrap: word-wrap;
                                     }
@@ -1273,9 +1320,35 @@ export component DashboardWidget inherits Window {
                                 padding: 14px;
                                 spacing: 10px;
 
-                                Text { text: "Catalog"; font-size: 13px; font-weight: 600; color: #FFFFFF; }
+                                Rectangle {
+                                    height: 28px;
+                                    Rectangle {
+                                        width: parent.width;
+                                        height: parent.height;
+                                        background: transparent;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: center;
+                                        Text { text: "Catalog"; font-size: 13px; font-weight: 600; color: #FFFFFF; vertical-alignment: center; }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Text {
+                                            text: "▾";
+                                            font-size: 14px;
+                                            color: #FFFFFF;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            transform-rotation: root.catalog-open ? 0deg : 180deg;
+                                            animate transform-rotation { duration: 160ms; easing: ease-out; }
+                                        }
+                                    }
+                                    catalog_toggle := TouchArea {
+                                        clicked => { root.toggle-catalog(); }
+                                        mouse-cursor: pointer;
+                                    }
+                                }
 
-                                LineEdit {
+                                if root.catalog-open : LineEdit {
                                     height: 36px;
                                     text: root.catalog-search;
                                     placeholder-text: "Search models…";
@@ -1283,72 +1356,145 @@ export component DashboardWidget inherits Window {
                                 }
 
                                 for card in root.catalog : Rectangle {
-                                    visible: card.visible;
-                                    height: card.visible ? 66px : 0px;
+                                    visible: root.catalog-open && card.visible;
+                                    height: root.catalog-open && card.visible ? (root.connect-for == card.model-dir ? 138px : 66px) : 0px;
                                     border-radius: 8px;
                                     background: #141414;
                                     border-width: 1px;
                                     border-color: card.is-active ? #FFFFFF : #262626;
 
-                                    HorizontalLayout {
-                                        padding-left: 12px;
-                                        padding-right: 12px;
-                                        spacing: 12px;
+                                    VerticalLayout {
+                                        padding: 8px;
+                                        spacing: 6px;
 
-                                        VerticalLayout {
-                                            spacing: 2px;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            spacing: 12px;
                                             alignment: center;
-                                            HorizontalLayout {
-                                                spacing: 8px;
-                                                Text { text: card.name; font-size: 13px; font-weight: 600; color: #FFFFFF; vertical-alignment: center; }
-                                                if card.badge != "" : Rectangle {
-                                                    width: 76px; height: 18px; border-radius: 9px; background: #FFFFFF;
-                                                    Text { text: card.badge; font-size: 10px; font-weight: 700; color: #000000; horizontal-alignment: center; vertical-alignment: center; }
+
+                                            VerticalLayout {
+                                                spacing: 2px;
+                                                alignment: center;
+                                                HorizontalLayout {
+                                                    spacing: 8px;
+                                                    Text { text: card.name; font-size: 13px; font-weight: 600; color: card.installed ? #FFFFFF : #9A9A9A; vertical-alignment: center; }
+                                                    if card.badge != "" : Rectangle {
+                                                        width: 76px; height: 18px; border-radius: 9px; background: #FFFFFF;
+                                                        Text { text: card.badge; font-size: 10px; font-weight: 700; color: #000000; horizontal-alignment: center; vertical-alignment: center; }
+                                                    }
+                                                }
+                                                Text { text: card.langs + " · " + card.size; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            // One primary action per card:
+                                            // installed → Select · missing → Download
+                                            // (API cards: has-key → Use · no key → Connect)
+                                            if card.provider == "Local" && card.installed : Rectangle {
+                                                width: 96px;
+                                                height: 30px;
+                                                border-radius: 15px;
+                                                background: select_touch.has-hover ? #2A2A2A : transparent;
+                                                border-width: 1px;
+                                                border-color: #404040;
+                                                animate background { duration: 130ms; easing: ease-out; }
+                                                Text {
+                                                    text: card.is-active ? "Active" : "Select";
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: #FFFFFF;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                                select_touch := TouchArea {
+                                                    clicked => { root.select-catalog-model(card.index); }
+                                                    mouse-cursor: (card.is-active ? default : pointer);
                                                 }
                                             }
-                                            Text { text: card.langs + " · " + card.size; font-size: 11px; color: #9A9A9A; vertical-alignment: center; }
+                                            if card.provider != "Local" && card.has-key : Rectangle {
+                                                width: 96px;
+                                                height: 30px;
+                                                border-radius: 15px;
+                                                background: use_touch.has-hover ? #2A2A2A : transparent;
+                                                border-width: 1px;
+                                                border-color: card.is-active ? #FFFFFF : #404040;
+                                                animate background { duration: 130ms; easing: ease-out; }
+                                                Text {
+                                                    text: card.is-active ? "Active" : "Use";
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: #FFFFFF;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                                use_touch := TouchArea {
+                                                    clicked => { root.select-catalog-model(card.index); }
+                                                    mouse-cursor: (card.is-active ? default : pointer);
+                                                }
+                                            }
+                                            if card.provider != "Local" && !card.has-key : Rectangle {
+                                                width: 96px;
+                                                height: 30px;
+                                                border-radius: 15px;
+                                                background: conn_touch.has-hover ? #E4E4E4 : #FFFFFF;
+                                                animate background { duration: 130ms; easing: ease-out; }
+                                                Text {
+                                                    text: "Connect";
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: #000000;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                                conn_touch := TouchArea {
+                                                    clicked => { root.open-connect(card.model-dir); }
+                                                    mouse-cursor: pointer;
+                                                }
+                                            }
+                                            if !card.installed : Rectangle {
+                                                width: 96px;
+                                                height: 30px;
+                                                border-radius: 15px;
+                                                background: dl_touch.has-hover ? #E4E4E4 : #FFFFFF;
+                                                animate background { duration: 130ms; easing: ease-out; }
+                                                Text {
+                                                    text: card.downloading ? (root.download-progress + "%") : "Download";
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: #000000;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                                dl_touch := TouchArea {
+                                                    clicked => { if (!card.downloading) { root.download-catalog-model(card.index); } }
+                                                    mouse-cursor: pointer;
+                                                }
+                                            }
                                         }
-                                        Rectangle { horizontal-stretch: 1; }
-                                        // One primary action per card:
-                                        // installed → Select · missing → Download
-                                        if card.installed : Rectangle {
-                                            width: 96px;
-                                            height: 30px;
-                                            border-radius: 15px;
-                                            background: select_touch.has-hover ? #2A2A2A : transparent;
-                                            border-width: 1px;
-                                            border-color: #404040;
-                                            animate background { duration: 130ms; easing: ease-out; }
+
+                                        // Inline API-key Connect box. Same GUI
+                                        // language as the rest of Settings; appears
+                                        // out of the card without disturbing layout.
+                                        if root.connect-for == card.model-dir : VerticalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            spacing: 4px;
+                                            Text { text: "Enter your " + card.provider + " API key"; font-size: 11px; font-weight: 600; color: #FFFFFF; }
+                                            LineEdit {
+                                                height: 32px;
+                                                text: card.connect-text;
+                                                placeholder-text: "Paste API key…";
+                                                edited(t) => { root.set-api-key-for(card.model-dir, t); }
+                                            }
                                             Text {
-                                                text: card.is-active ? "Active" : "Select";
+                                                text: card.provider == "Groq"
+                                                    ? "Get a free key at https://console.groq.com (API Keys)."
+                                                    : card.provider == "OpenAI"
+                                                        ? "Get a key at https://platform.openai.com/api-keys."
+                                                        : "Get a key at https://console.deepgram.com (Settings → API Keys).";
                                                 font-size: 11px;
-                                                font-weight: 700;
-                                                color: #FFFFFF;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                            select_touch := TouchArea {
-                                                clicked => { root.select-catalog-model(card.index); }
-                                                mouse-cursor: (card.is-active ? default : pointer);
-                                            }
-                                        }
-                                        if !card.installed : Rectangle {
-                                            width: 96px;
-                                            height: 30px;
-                                            border-radius: 15px;
-                                            background: dl_touch.has-hover ? #E4E4E4 : #FFFFFF;
-                                            animate background { duration: 130ms; easing: ease-out; }
-                                            Text {
-                                                text: card.downloading ? (root.download-progress + "%") : "Download";
-                                                font-size: 11px;
-                                                font-weight: 700;
-                                                color: #000000;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                            dl_touch := TouchArea {
-                                                clicked => { if (!card.downloading) { root.download-catalog-model(card.index); } }
-                                                mouse-cursor: pointer;
+                                                color: #9A9A9A;
+                                                wrap: word-wrap;
                                             }
                                         }
                                     }

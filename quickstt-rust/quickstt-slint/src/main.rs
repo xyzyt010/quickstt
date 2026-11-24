@@ -267,6 +267,31 @@ fn toggle_pill_widget(
     }
 }
 
+/// Tray Show/Hide toggle that keeps the pill right-click menu reachable in
+/// both directions: after hiding, the menus are taken down (they floated
+/// with a hidden anchor before); after showing, the pill menu re-opens
+/// immediately anchored at the pill, so the user lands back on the menu
+/// they just left instead of having to right-click the pill again.
+fn toggle_pill_and_sync_menu<F: Fn(Option<(i32, i32, i32, i32)>)>(
+    pill: &slint::Weak<PillWidget>,
+    pillmenu: &slint::Weak<PillMenu>,
+    flyout: &slint::Weak<MenuFlyout>,
+    show_menu: &F,
+    state: &Arc<Mutex<quickstt_core::orchestration::AppState>>,
+    hide_until: &Arc<Mutex<Option<std::time::Instant>>>,
+    snooze_ptt_show: &Arc<Mutex<bool>>,
+    why: &str,
+) {
+    toggle_pill_widget(pill, state, hide_until, snooze_ptt_show, why);
+    let vis_now = pill.upgrade().map(|p| p.window().is_visible()).unwrap_or(false);
+    if vis_now {
+        log_line(&format!("tray {why}: widget shown -> re-open pill menu"));
+        show_menu(None);
+    } else {
+        hide_pill_menus_tagged(pillmenu, flyout, &format!("tray {why} hide"));
+    }
+}
+
 /// Current pill footprint (logical px) from expand + orientation flags.
 /// The window matches the content size at REST (exact hit-testing); during
 /// the morph it sits at the expanded footprint and jumps (invisibly —
@@ -2491,6 +2516,30 @@ fn set_model_param_text(state: &Arc<Mutex<AppState>>, key: &str, text: &str) {
         log_line(&format!("save_model_params FAILED: {e:#}"));
     }
     log_line(&format!("saved {} param '{}' ({} chars)", desc.name, key, text.len()));
+}
+
+/// Persist an API key for an ARBITRARY model_dir (catalog Connect boxes).
+/// Uses the same scoped param key as the per-model params screen, so the
+/// cloud engine sees it through LATEST_MODEL_PARAMS on the next utterance.
+fn set_api_key_for(
+    state: &Arc<Mutex<AppState>>,
+    model_dir: &str,
+    key: &str,
+) {
+    let mut s = match state.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if model_dir.trim().is_empty() {
+        return;
+    }
+    s.settings
+        .model_params
+        .insert(format!("{model_dir}|api_key"), key.to_string());
+    if let Err(e) = s.settings.save_model_params() {
+        log_line(&format!("save_model_params FAILED: {e:#}"));
+    }
+    log_line(&format!("API key saved for {} ({} chars)", model_dir, key.len()));
 }
 
 /// Tray icon: pre-baked PNG (has alpha), ICO fallback. (An SVG render path
@@ -5724,12 +5773,21 @@ fn dock_hop(
                                     if let Some(cmd) = show_native_tray_menu(hwnd, at.0, at.1) {
                                         match cmd {
                                             1 => {
-                                                log_line("tray native menu: Dashboard");
+                                                log_line("tray native menu: Settings");
                                                 menu_action(0, &dash_timer, &pill_w, &dash_visible_timer, &state_timer, &onboarding_w.clone().unwrap_or_default());
                                             }
                                             2 => {
                                                 log_line("tray native menu: Show/Hide Widget");
-                                                toggle_pill_widget(&pill_w, &state_timer, &hide_until_timer, &snooze_ptt_show_timer, "tray-native-menu");
+                                                toggle_pill_and_sync_menu(
+                                                    &pill_w,
+                                                    &pillmenu_w,
+                                                    &flyout_w,
+                                                    &*show_pillmenu_timer,
+                                                    &state_timer,
+                                                    &hide_until_timer,
+                                                    &snooze_ptt_show_timer,
+                                                    "tray-native-menu",
+                                                );
                                             }
                                             4 => {
                                                 log_line("tray native menu: Hide for 1 hour");
@@ -5775,8 +5833,11 @@ fn dock_hop(
                                     if let Some(t) = traymenu_w.upgrade() {
                                         let _ = t.hide();
                                     }
-                                    toggle_pill_widget(
+                                    toggle_pill_and_sync_menu(
                                         &pill_w,
+                                        &pillmenu_w,
+                                        &flyout_w,
+                                        &*show_pillmenu_timer,
                                         &state_timer,
                                         &hide_until_timer,
                                         &snooze_ptt_show_timer,
@@ -5802,8 +5863,11 @@ fn dock_hop(
                                 if let Some(t) = traymenu_w.upgrade() {
                                     let _ = t.hide();
                                 }
-                                toggle_pill_widget(
+                                toggle_pill_and_sync_menu(
                                     &pill_w,
+                                    &pillmenu_w,
+                                    &flyout_w,
+                                    &*show_pillmenu_timer,
                                     &state_timer,
                                     &hide_until_timer,
                                     &snooze_ptt_show_timer,
@@ -5845,7 +5909,16 @@ fn dock_hop(
             if let Some(t) = tray_pending_single {
                 if t.elapsed() > std::time::Duration::from_millis(350) {
                     tray_pending_single = None;
-                    toggle_pill_widget(&pill_w, &state_timer, &hide_until_timer, &snooze_ptt_show_timer, "left");
+                    toggle_pill_and_sync_menu(
+                        &pill_w,
+                        &pillmenu_w,
+                        &flyout_w,
+                        &*show_pillmenu_timer,
+                        &state_timer,
+                        &hide_until_timer,
+                        &snooze_ptt_show_timer,
+                        "left",
+                    );
                 }
             }
             // SNI tray clicks (Linux): same actions as the native menu rows.
@@ -5863,7 +5936,16 @@ fn dock_hop(
                             &state_timer,
                             &onboarding_w.clone().unwrap_or_default(),
                         ),
-                        ToggleWidget => toggle_pill_widget(&pill_w, &state_timer, &hide_until_timer, &snooze_ptt_show_timer, "sni-menu"),
+                        ToggleWidget => toggle_pill_and_sync_menu(
+                            &pill_w,
+                            &pillmenu_w,
+                            &flyout_w,
+                            &*show_pillmenu_timer,
+                            &state_timer,
+                            &hide_until_timer,
+                            &snooze_ptt_show_timer,
+                            "sni-menu",
+                        ),
                         Snooze => snooze_pill_1h(&pill_w, &hide_until_timer, &snooze_ptt_show_timer),
                         Quit => {
                             quit_app();
@@ -7028,13 +7110,60 @@ fn dock_hop(
                             .map(|v| v.to_string())
                             .collect()
                     }
-                    let names: Vec<String> =
-                        s.model_entries.iter().map(|e| e.name.clone()).collect();
+                    // ── Provider filter (Local / Groq / OpenAI / DeepGram) ──
+                    // The Model ComboBox shows only the active provider's
+                    // models; the catalog cards below stay unfiltered.
+                    // Provider is resolved via the catalog descriptor (the
+                    // ModelEntry only carries the engine-family name string).
+                    let provider_of = |entry_name: &str| -> &'static str {
+                        quickstt_core::models::catalog::all_descriptors()
+                            .into_iter()
+                            .find(|x| x.name == entry_name)
+                            .map(|x| x.engine_family.provider())
+                            .unwrap_or("Local")
+                    };
+                    let active_provider: String = s.active_provider.clone();
+                    let filtered_indices: Vec<usize> = s
+                        .model_entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| provider_of(&e.name) == active_provider)
+                        .map(|(i, _)| i)
+                        .collect();
+                    let names: Vec<String> = if filtered_indices.is_empty() {
+                        s.model_entries.iter().map(|e| e.name.clone()).collect()
+                    } else {
+                        filtered_indices
+                            .iter()
+                            .map(|&i| s.model_entries[i].name.clone())
+                            .collect()
+                    };
                     if cur_str(&d.get_models()) != names {
                         d.set_models(rc_str(&names));
                     }
-                    if d.get_selected_model() != s.selected_model as i32 {
-                        d.set_selected_model(s.selected_model as i32);
+                    let filtered_selected = filtered_indices
+                        .iter()
+                        .position(|&i| i == s.selected_model)
+                        .unwrap_or(0) as i32;
+                    if d.get_selected_model() != filtered_selected {
+                        d.set_selected_model(filtered_selected);
+                    }
+                    if d.get_active_provider().as_str() != active_provider.as_str() {
+                        d.set_active_provider(active_provider.clone().into());
+                    }
+                    let opts = d.get_provider_options();
+                    let active_idx = (0..opts.row_count())
+                        .find(|i| {
+                            opts.row_data(*i)
+                                .map(|v| {
+                                    let t = v.to_string();
+                                    t.as_str() == active_provider.as_str()
+                                })
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(0) as i32;
+                    if d.get_active_provider_index() != active_idx {
+                        d.set_active_provider_index(active_idx);
                     }
                     if let Some(e) = s.model_entries.get(s.selected_model) {
                         if cur_str(&d.get_languages()) != e.languages {
@@ -7103,12 +7232,35 @@ fn dock_hop(
                             let badge = if is_active {
                                 "Active"
                             } else if is_rec {
-                                "Recommended"
+                                "Best fit"
                             } else {
                                 ""
                             };
                             let downloading =
                                 s.is_downloading && s.download_name == e.name;
+                            // API cards: resolve provider + key state from the
+                            // descriptor so the card can show Use / Connect and
+                            // the inline Connect box can mirror the key.
+                            let (provider, model_dir, has_key, connect_text) = {
+                                let desc = quickstt_core::models::catalog::all_descriptors()
+                                    .into_iter()
+                                    .find(|x| x.name == e.name);
+                                match desc {
+                                    Some(x) if x.engine_family.is_api() => {
+                                        let key = x
+                                            .param_value(&s.settings.model_params, "api_key")
+                                            .unwrap_or_default();
+                                        (
+                                            x.engine_family.provider().to_string(),
+                                            x.model_dir.clone(),
+                                            !key.trim().is_empty(),
+                                            key,
+                                        )
+                                    }
+                                    Some(x) => (x.engine_family.provider().to_string(), x.model_dir.clone(), false, String::new()),
+                                    None => ("Local".to_string(), String::new(), false, String::new()),
+                                }
+                            };
                             cards.push(ModelCard {
                                 name: e.name.clone().into(),
                                 blurb: e.blurb.clone().into(),
@@ -7122,6 +7274,10 @@ fn dock_hop(
                                 visible: matches,
                                 index: idx as i32,
                                 downloading,
+                                provider: provider.into(),
+                                has_key,
+                                model_dir: model_dir.into(),
+                                connect_text: connect_text.into(),
                             });
                         }
                         let cur_n = d.get_catalog().row_count();
@@ -7136,6 +7292,10 @@ fn dock_hop(
                                         || cur.visible != c.visible
                                         || cur.index != c.index
                                         || cur.downloading != c.downloading
+                                        || cur.provider != c.provider
+                                        || cur.has_key != c.has_key
+                                        || cur.model_dir != c.model_dir
+                                        || cur.connect_text != c.connect_text
                                     {
                                         same = false;
                                         break;
@@ -7151,6 +7311,16 @@ fn dock_hop(
                         }
                         if d.get_catalog_search().as_str() != s.catalog_search.as_str() {
                             d.set_catalog_search(s.catalog_search.clone().into());
+                        }
+                        if d.get_connect_for().as_str() != s.connect_for.as_str() {
+                            d.set_connect_for(s.connect_for.clone().into());
+                        }
+                        if d.get_recommend_cleanup_note().as_str()
+                            != s.recommend_cleanup_note.as_str()
+                        {
+                            d.set_recommend_cleanup_note(
+                                s.recommend_cleanup_note.clone().into(),
+                            );
                         }
                         // ── Per-model parameter rows for the ACTIVE model ──
                         {
@@ -8193,6 +8363,75 @@ fn dock_hop(
         let state_3 = state.clone();
         dashboard.on_set_model_param_text(move |key: slint::SharedString, text: slint::SharedString| {
             set_model_param_text(&state_3, key.as_str(), text.as_str());
+        });
+        let state_4 = state.clone();
+        dashboard.on_set_api_key_for(move |dir: slint::SharedString, key: slint::SharedString| {
+            set_api_key_for(&state_4, dir.as_str(), key.as_str());
+        });
+    }
+    {
+        // Provider dropdown (above the Model dropdown): switching moves the
+        // active model to this provider's last-used (or first) model via the
+        // normal SelectModel command path, so everything else stays in sync.
+        let tx = tx_cmd.clone();
+        let state_open_c = state.clone();
+        let state_prov = state.clone();
+        dashboard.on_set_provider(move |p: slint::SharedString| {
+            let provider = p.as_str().to_string();
+            let idx = match state_prov.lock() {
+                Ok(s) => {
+                    let descs = quickstt_core::models::catalog::all_descriptors();
+                    let provider_of = |entry_name: &str| {
+                        descs
+                            .iter()
+                            .find(|x| x.name == entry_name)
+                            .map(|x| x.engine_family.provider())
+                            .unwrap_or("Local")
+                    };
+                    let in_provider: Vec<usize> = s
+                        .model_entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| provider_of(&e.name) == provider)
+                        .map(|(i, _)| i)
+                        .collect();
+                    if in_provider.is_empty() {
+                        None
+                    } else if in_provider.contains(&s.selected_model) {
+                        Some(s.selected_model)
+                    } else {
+                        // Last-used model for this provider when we have one.
+                        let last = s.last_by_provider.get(&provider).cloned();
+                        last.and_then(|n| {
+                            in_provider
+                                .iter()
+                                .copied()
+                                .find(|&i| s.model_entries[i].name == n)
+                        })
+                        .or(Some(in_provider[0]))
+                    }
+                }
+                Err(_) => None,
+            };
+            if let Some(i) = idx {
+                let _ = tx.try_send(OrchestratorCommand::SelectModel(i));
+                log_line(&format!("provider -> {provider} (model entries[{i}])"));
+            }
+        });
+        dashboard.on_open_connect(move |dir: slint::SharedString| {
+            if let Ok(mut s) = state_open_c.lock() {
+                if s.connect_for == dir.as_str() {
+                    s.connect_for.clear();
+                } else {
+                    s.connect_for = dir.to_string();
+                }
+            }
+        });
+        let dash_w = dashboard.as_weak();
+        dashboard.on_toggle_catalog(move || {
+            if let Some(d) = dash_w.upgrade() {
+                d.set_catalog_open(!d.get_catalog_open());
+            }
         });
     }
     {
