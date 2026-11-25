@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.0.0-alpha.54] — 2026-11-25
+
+Selected-model identification, keyed-provider visibility, hold watchdog.
+
+### Fixed
+- **Right-click Model shows who is active.** The selected row is now
+  bold + bright background + an "ACTIVE" pill (the old tick was easy to
+  miss), and every Model open logs the exact rows + selected name.
+- **Keyed providers show on every machine where the key lives.** Groq's
+  key is stored per-machine (Windows registry / Linux TOML): it appears
+  on the machine where you entered it, on the next menu open. Mint has
+  no key saved yet — enter it once in Settings → Models → Connect there
+  and Groq appears.
+- **Hold (Push-to-Talk) now stops on release, permanently.** A physical
+  Ctrl+Space watchdog in the 50ms tick stops the session 250ms after
+  the keys are really up, even if the OS Released event is lost. Toggle
+  mode is unaffected. (Windows logs already showed Released arriving, so
+  this covers the cases where it does not, e.g. focus grabs on Linux.)
+
 ## [2.0.0-alpha.53] — 2026-11-25
 
 Mint menu hover geometry, mic dedupe, no-red deletes (user interactive test next).

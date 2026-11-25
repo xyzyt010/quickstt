@@ -263,7 +263,7 @@ export component MenuFlyout inherits Window {
             for i in item_count: Rectangle {
                 height: 32px;
                 border-radius: 7px;
-                background: fi.has-hover ? #2A2A2C : (i == selected_idx ? #333336 : transparent);
+                background: fi.has-hover ? #3A3A3E : (i == selected_idx ? #454545 : transparent);
                 animate background { duration: 100ms; }
                 fi := TouchArea {
                     clicked => { item_clicked(i); }
@@ -276,16 +276,18 @@ export component MenuFlyout inherits Window {
                     text: items[i];
                     color: #FFFFFF;
                     font-size: 14px;
+                    font-weight: i == selected_idx ? 700 : 400;
                     vertical-alignment: center;
                     overflow: elide;
                 }
                 if i == selected_idx: Text {
-                    x: 212px;
-                    width: 30px;
+                    x: 206px;
+                    width: 36px;
                     height: 32px;
-                    text: "✓";
+                    text: "ACTIVE";
                     color: #FFFFFF;
-                    font-size: 15px;
+                    font-size: 12px;
+                    font-weight: 700;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }

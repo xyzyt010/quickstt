@@ -1069,7 +1069,20 @@ fn open_submenu(
     };
     if items.is_empty() {
         menu_trace_line("OB- open_submenu: NO items -> None");
+        log_line("flyout: NO items (nothing downloaded / no keyed providers)");
         return None;
+    }
+    if mode == SubMode::Model {
+        log_line(&format!(
+            "flyout Model n={} selected={} items={:?}",
+            items.len(),
+            if sel >= 0 {
+                items.get(sel as usize).map(|s| s.as_str()).unwrap_or("?")
+            } else {
+                "NONE"
+            },
+            items
+        ));
     }
     let scale = widget_platform::window_scale(p.window()).max(0.5);
     let mpos = m.window().position();
@@ -4919,6 +4932,11 @@ fn dock_hop(
     let mut tick: u32 = 0;
     let mut prev_transcribing = false;
     let mut was_live = false;
+    // Hold-mode watchdog debounce: first tick the keys are seen up waits
+    // this long before forcing stop (one 50ms X query hiccup must not cut
+    // a dictation mid-sentence).
+    let mut ptt_up_since: Option<std::time::Instant> = None;
+    let mut ptt_watch_fired = false;
     // Microphone the background wakeword listener is currently bound to.
     let mut last_wakeword_mic = String::new();
     // False until the (possibly lazily spawned) wakeword listener has been
@@ -6493,6 +6511,37 @@ fn dock_hop(
                     || cleanup_busy_timer.load(Ordering::Relaxed);
                 // PTT held + mic capsule ON both count as live for display.
                 let ptt = *mlock(&ptt_held_timer);
+                // Hold-mode watchdog: the OS Released event can be lost
+                // (focus grab, X grab loss), leaving hold sessions running
+                // until the next press — exactly "Settings say Push-to-Talk
+                // but releasing does not stop". Poll the PHYSICAL key state
+                // and stop the session once the keys are really up.
+                if s.settings.ctrl_space_mode != 1 && ptt && recording && !ptt_watch_fired {
+                    match widget_platform::ctrl_space_down() {
+                        Some(true) => ptt_up_since = None,
+                        Some(false) => match ptt_up_since {
+                            Some(at) if at.elapsed()
+                                > std::time::Duration::from_millis(250) =>
+                            {
+                                ptt_up_since = None;
+                                ptt_watch_fired = true;
+                                *mlock(&ptt_held_timer) = false;
+                                log_line("PTT hold watchdog: keys up, stopping session");
+                                let _ = tx_cmd_timer
+                                    .try_send(OrchestratorCommand::StopListening);
+                            }
+                            Some(_) => {}
+                            None => {
+                                ptt_up_since = Some(std::time::Instant::now());
+                            }
+                        },
+                        None => {}
+                    }
+                }
+                if !recording {
+                    ptt_watch_fired = false;
+                    ptt_up_since = None;
+                }
                 let mut mic_on = *mlock(&mic_live_timer);
                 if mic_on
                     && !s.mic_open

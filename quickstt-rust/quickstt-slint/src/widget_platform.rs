@@ -1172,6 +1172,27 @@ pub fn pointer_state() -> Option<(i32, i32, bool)> {
     }
 }
 
+/// Physical Ctrl+Space state for the hold-mode watchdog: the OS hotkey
+/// hook can swallow a Released event (focus grabs, X grab loss), which
+/// left hold-mode sessions running until the next press. The 50ms tick
+/// polls this and stops the session once the keys are really up.
+/// `None` = unknown (query failed) — the watchdog stays idle then.
+pub fn ctrl_space_down() -> Option<bool> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_CONTROL, VK_SPACE,
+        };
+        let ctrl = GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0;
+        let space = GetAsyncKeyState(VK_SPACE.0 as i32) as u16 & 0x8000 != 0;
+        Some(ctrl && space)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        x11q::ctrl_space_down()
+    }
+}
+
 /// Logical (DIP) scale of the monitor hosting this window.
 pub fn window_scale(window: &slint::Window) -> f32 {
     #[cfg(target_os = "windows")]
@@ -1700,6 +1721,21 @@ mod x11q {
 
     pub fn cursor_pos() -> Option<(i32, i32)> {
         pointer_state().map(|(x, y, _)| (x, y))
+    }
+
+    /// Physical Ctrl+Space via the X keymap bitmask: keycode 105 = Right
+    /// Ctrl, 37 = Left Ctrl, 65 = Space. One XQueryKeymap reply.
+    pub fn ctrl_space_down() -> Option<bool> {
+        with_conn(|conn, _root| {
+            let km = conn.query_keymap().ok()?.reply().ok()?;
+            let bits: Vec<u8> = km.keys.to_vec();
+            let bit = |code: u32| -> bool {
+                bits.get((code / 8) as usize)
+                    .map(|b| (b >> (code % 8)) & 1 != 0)
+                    .unwrap_or(false)
+            };
+            Some((bit(37) || bit(105)) && bit(65))
+        })
     }
 
     /// Union of all enabled CRTCs (multi-display); root geometry fallback.
