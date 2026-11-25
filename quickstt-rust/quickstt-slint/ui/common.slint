@@ -46,24 +46,23 @@ export component ToggleRow inherits Rectangle {
     animate background { duration: 130ms; easing: ease-out; }
     animate border-color { duration: 130ms; easing: ease-out; }
 
-    HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
-        spacing: 8px;
-        IconSym {
-            glyph: root.glyph;
-            size: 18px;
-            tint: root.on ? #FFFFFF : #8E8E8E;
-            y: (parent.height - self.height) / 2;
-        }
-        Text {
-            text: root.label;
-            font-size: 14px;
-            font-weight: root.on ? 600 : 500;
-            color: root.on ? #FFFFFF : #B9B9B9;
-            vertical-alignment: center;
-            overflow: elide;
-        }
+    IconSym {
+        glyph: root.glyph;
+        size: 18px;
+        tint: root.on ? #FFFFFF : #8E8E8E;
+        x: 10px;
+        y: (parent.height - self.height) / 2;
+    }
+    Text {
+        text: root.label;
+        x: 36px;
+        width: parent.width - 46px;
+        height: parent.height;
+        font-size: 14px;
+        font-weight: root.on ? 600 : 500;
+        color: root.on ? #FFFFFF : #B9B9B9;
+        vertical-alignment: center;
+        overflow: elide;
     }
 
     hit := TouchArea {

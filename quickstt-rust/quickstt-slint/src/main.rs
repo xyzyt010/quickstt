@@ -983,15 +983,44 @@ fn mic_menu_items(state: &Arc<Mutex<AppState>>) -> (Vec<String>, i32) {
     (names, idx)
 }
 
-/// Model submenu rows: ONLY the models downloaded on this device, with the
-/// selected index and the row→entries mapping (callers need it to turn a
-/// clicked row into the global selected_model index).
+/// Model submenu rows for the right-click menu, rebuilt on EVERY open so
+/// the list is always current ("smart, auto-updatable"):
+/// - Local models: only the ones actually downloaded on this device.
+/// - Hosted API models (Groq/OpenAI/DeepGram): only when that PROVIDER
+///   has an API key entered — a provider counts as configured when any
+///   of its models carries a non-empty scoped `api_key`. Providers
+///   without a key contribute no rows at all.
+/// The dashboard catalog remains the place to discover/download/connect
+/// everything else. Returns rows, selected row, and the row→entries map
+/// (callers need it to turn a clicked row into the global model index).
 fn model_menu_items(state: &Arc<Mutex<AppState>>) -> (Vec<String>, i32, Vec<usize>) {
     if let Ok(s) = state.lock() {
+        use std::collections::HashSet;
+        let descs = quickstt_core::models::catalog::all_descriptors();
+        // Providers with a configured key (any of their models has one).
+        let mut keyed_providers: HashSet<&str> = HashSet::new();
+        for d in &descs {
+            if d.engine_family.is_api() {
+                let key = d
+                    .param_value(&s.settings.model_params, "api_key")
+                    .unwrap_or_default();
+                if !key.trim().is_empty() {
+                    keyed_providers.insert(d.engine_family.provider());
+                }
+            }
+        }
         let mut names = Vec::new();
         let mut idx_map = Vec::new();
         for (i, e) in s.model_entries.iter().enumerate() {
-            if e.installed {
+            let desc = descs.iter().find(|d| d.name == e.name);
+            let visible = match desc {
+                Some(d) if d.engine_family.is_api() => {
+                    keyed_providers.contains(d.engine_family.provider())
+                }
+                // Local (or unknown): downloaded models only.
+                _ => e.installed,
+            };
+            if visible {
                 names.push(e.name.clone());
                 idx_map.push(i);
             }
@@ -1225,7 +1254,8 @@ fn spawn_ipc_listener(
                             )),
                         }
                     }
-                    c if c.starts_with("DASHSCROLL")
+                    c if c.starts_with("DASHSIDEBAR")
+                        || c.starts_with("DASHSCROLL")
                         || c.starts_with("DASHTAB")
                         || c.starts_with("DASHSIZE")
                         || c.starts_with("HISTPLAY")
@@ -5581,6 +5611,24 @@ fn dock_hop(
                         d.window().set_size(slint::LogicalSize::new(w.max(320.0), h.max(240.0)));
                         log_line(&format!("dashsize {w}x{h}"));
                     }
+                } else if cmd.starts_with("DASHSIDEBAR") {
+                    // Screenshot-verification hook: collapse (1) / expand (0)
+                    // the dashboard sidebar through the real callback path
+                    // (expand also grows a narrow window via the handler).
+                    let on = cmd
+                        .split_whitespace()
+                        .nth(1)
+                        .map(|v| v != "0")
+                        .unwrap_or(true);
+                    if let Some(d) = dash_timer.upgrade() {
+                        widget_platform::show_app_window(d.window());
+                        if let Ok(mut v) = dash_visible_timer.lock() {
+                            *v = true;
+                        }
+                        d.set_sidebar_force_open(!on);
+                        d.invoke_set_sidebar_collapsed(on);
+                        log_line(&format!("dashsidebar collapsed={on}"));
+                    }
                 } else if cmd.starts_with("DASHSCROLL") {
                     // Screenshot-verification hook: scroll dashboard content
                     // (negative = down) so the catalog can be captured.
@@ -5716,12 +5764,15 @@ fn dock_hop(
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(-1);
                     let y = match n {
-                        0 => 23.0,
-                        1 => 57.0,
-                        2 => 100.0,
-                        3 => 134.0,
-                        4 => 177.0,
-                        5 => 211.0,
+                        // 40px rows (alpha.46 menu growth): Hide 26,
+                        // Settings 66, Mic 115, Model 155, History 204,
+                        // Paste 244.
+                        0 => 26.0,
+                        1 => 66.0,
+                        2 => 115.0,
+                        3 => 155.0,
+                        4 => 204.0,
+                        5 => 244.0,
                         _ => -1.0,
                     };
                     if y > 0.0 {
@@ -8767,6 +8818,22 @@ fn dock_hop(
             // Apply instantly — the chevron must never wait for a sync tick.
             if let Some(d) = dash_w.upgrade() {
                 d.set_sidebar_collapsed(on);
+                if !on {
+                    // Expanding must visibly work even at a narrow window:
+                    // grow the window so the full sidebar + content fit
+                    // (the Mint "side menu does not expand at all" report:
+                    // the adaptive rail swallowed the toggle at <820 DIP).
+                    let w = d.window();
+                    let scale = widget_platform::window_scale(w).max(0.5);
+                    let cur_w = w.size().width as f32 / scale;
+                    let cur_h = w.size().height as f32 / scale;
+                    if cur_w < 960.0 {
+                        w.set_size(slint::LogicalSize::new(960.0, cur_h.max(640.0)));
+                        log_line(&format!(
+                            "sidebar expand: window {cur_w:.0} -> 960 logical"
+                        ));
+                    }
+                }
             }
         });
     }
@@ -9656,15 +9723,10 @@ fn dock_hop(
                             when: quickstt_core::history::display_label(it.created_ms, now_ms).into(),
                             dur: quickstt_core::history::fmt_dur(it.duration_ms).into(),
                             pos: quickstt_core::history::fmt_dur((shown * 1000.0) as u64).into(),
-                            text: if it.text.chars().count() > 240 {
-                                // Keep rows compact with 100 turns in the list;
-                                // the full text lives in the copy/export paths.
-                                let mut t: String = it.text.chars().take(237).collect();
-                                t.push('…');
-                                t.into()
-                            } else {
-                                it.text.clone().into()
-                            },
+                            // Full transcript: the row's bottom transcript
+                            // viewport scrolls when it does not fit, so no
+                            // truncation is needed here anymore.
+                            text: it.text.clone().into(),
                             has_audio: !it.audio_file.is_empty(),
                             menu_open: menu_i == i as i32,
                             playing: is_playing,

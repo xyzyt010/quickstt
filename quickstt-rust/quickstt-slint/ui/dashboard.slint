@@ -66,30 +66,26 @@ export struct HistRow {
 // exactly centred in both axes. kind: 0 = copy (flips to a green tick while
 // "copied"), 1 = delete (red trash SVG from the supplied artwork),
 // 2 = more (vertical dots).
+// Row action button, minimal: bare icon (30px target), no permanent plate —
+// only hover/active shows a soft highlight. kind: 0 = copy (flips to a green
+// tick while "copied"), 1 = delete (white trash artwork), 2 = more (dots).
 component HistButton inherits Rectangle {
     in property <int> kind: 0;
     in property <bool> copied: false;
     in property <bool> active: false;
-    in property <color> rest-plate: #131313;
-    in property <color> hover-plate: #232323;
-    in property <color> rest-tint: #9A9A9A;
-    in property <color> hover-tint: #FFFFFF;
     callback clicked();
 
-    width: 44px;
-    height: 44px;
+    width: 30px;
+    height: 30px;
 
-    // The plate shrinks slightly while pressed — instant tactile feedback.
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: bt.pressed ? 33px : 38px;
-        height: bt.pressed ? 33px : 38px;
-        border-radius: 11px;
-        background: root.copied ? #14301F : ((bt.has-hover || root.active) ? root.hover-plate : root.rest-plate);
-        animate background { duration: 130ms; easing: ease-out; }
-        animate width { duration: 90ms; easing: ease-out; }
-        animate height { duration: 90ms; easing: ease-out; }
+        width: 28px;
+        height: 28px;
+        border-radius: 9px;
+        background: root.copied ? #14301F : ((bt.has-hover || root.active) ? #262626 : transparent);
+        animate background { duration: 120ms; easing: ease-out; }
     }
 
     IconSym {
@@ -97,8 +93,8 @@ component HistButton inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         visible: root.kind == 0 && !root.copied;
-        tint: (bt.has-hover || root.active) ? root.hover-tint : root.rest-tint;
-        size: 20px;
+        tint: (bt.has-hover || root.active) ? #FFFFFF : #B9B9B9;
+        size: 16px;
     }
     IconSym {
         glyph: "\u{E5CA}";
@@ -106,15 +102,14 @@ component HistButton inherits Rectangle {
         y: (parent.height - self.height) / 2;
         visible: root.kind == 0 && root.copied;
         tint: #4ADE80;
-        size: 20px;
+        size: 16px;
     }
-    // Delete: the supplied trash artwork, recoloured red, centred.
     Image {
-        source: @image-url("../../assets/delete_red.svg");
+        source: @image-url("../../assets/delete_white.svg");
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 21px;
-        height: 21px;
+        width: 16px;
+        height: 16px;
         visible: root.kind == 1;
         image-fit: contain;
     }
@@ -123,8 +118,8 @@ component HistButton inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         visible: root.kind == 2;
-        tint: (bt.has-hover || root.active) ? root.hover-tint : root.rest-tint;
-        size: 20px;
+        tint: (bt.has-hover || root.active) ? #FFFFFF : #B9B9B9;
+        size: 16px;
     }
 
     bt := TouchArea {
@@ -132,6 +127,7 @@ component HistButton inherits Rectangle {
         mouse-cursor: pointer;
     }
 }
+
 
 // Menu entry: same glyphs + label. kind: 0 = copy/✓, 1 = download,
 // 2 = delete (danger red trash artwork).
@@ -150,7 +146,7 @@ component HistMenuItem inherits Rectangle {
     IconSym { glyph: "\u{E14D}"; x: 10px; y: (parent.height - self.height) / 2; visible: root.kind == 0 && !root.copied; tint: root.danger ? #FF8A8A : #B9B9B9; size: 19px; }
     IconSym { glyph: "\u{E5CA}"; x: 10px; y: (parent.height - self.height) / 2; visible: root.kind == 0 && root.copied; tint: #4ADE80; size: 19px; }
     IconSym { glyph: "\u{E171}"; x: 10px; y: (parent.height - self.height) / 2; visible: root.kind == 1; size: 19px; }
-    Image { source: @image-url("../../assets/delete_red.svg"); x: 10px; y: (parent.height - self.height) / 2; width: 19px; height: 19px; visible: root.kind == 2; image-fit: contain; }
+    Image { source: @image-url("../../assets/delete_white.svg"); x: 10px; y: (parent.height - self.height) / 2; width: 19px; height: 19px; visible: root.kind == 2; image-fit: contain; }
 
     Text {
         x: 40px;
@@ -196,7 +192,11 @@ export component DashboardWidget inherits Window {
     in-out property <bool> rail-mode: false;
     // What the sidebar actually shows: the icon rail when the user collapsed
     // it OR when the window is too narrow for the full panel.
-    out property <bool> rail-active: root.sidebar-collapsed || root.rail-mode;
+    // The user's explicit expand always wins over the adaptive rail:
+    // at a narrow window the rail used to swallow the toggle entirely
+    // (the "side menu does not expand at all" report on Mint).
+    in-out property <bool> sidebar-force-open: false;
+    out property <bool> rail-active: root.sidebar-collapsed || (root.rail-mode && !root.sidebar-force-open);
     // Minimum fingertip target. Touchscreen-first on Android, and touch-capable
     // Windows/Linux convertibles get the same hit areas.
     out property <length> tap-size: 44px;
@@ -478,7 +478,7 @@ export component DashboardWidget inherits Window {
                             // E5D2 = menu (hamburger, 3 lines), E5CD = close X.
                             // Expanded sidebar shows X (click to collapse);
                             // collapsed rail shows hamburger (click to expand).
-                            glyph: root.sidebar-collapsed ? "\u{E5D2}" : "\u{E5CD}";
+                            glyph: root.rail-active ? "\u{E5D2}" : "\u{E5CD}";
                             tint: chev_touch.has-hover ? #FFFFFF : #9A9A9A;
                             size: 22px;
                             x: root.rail-active ? (parent.width - self.width) / 2 : 12px;
@@ -486,8 +486,15 @@ export component DashboardWidget inherits Window {
                         }
                         chev_touch := TouchArea {
                             clicked => {
-                                root.sidebar-collapsed = !root.sidebar-collapsed;
-                                root.set-sidebar-collapsed(root.sidebar-collapsed);
+                                if (root.rail-active) {
+                                    root.sidebar-collapsed = false;
+                                    root.sidebar-force-open = true;
+                                    root.set-sidebar-collapsed(false);
+                                } else {
+                                    root.sidebar-collapsed = true;
+                                    root.sidebar-force-open = false;
+                                    root.set-sidebar-collapsed(true);
+                                }
                             }
                             mouse-cursor: pointer;
                         }
@@ -508,25 +515,23 @@ export component DashboardWidget inherits Window {
                             x: (parent.width - 22px) / 2;
                             y: (parent.height - 22px) / 2;
                         }
-                        if !root.rail-active : HorizontalLayout {
-                            padding-left: 12px;
-                            spacing: 10px;
-                            alignment: start;
-                            IconSym {
-                                glyph: "\u{E8B8}";
-                                tint: root.active-tab == 0 ? #FFFFFF : #9A9A9A;
-                                size: 22px;
-                                y: (parent.height - 22px) / 2;
-                            }
-                            Text {
-                                text: "General";
-
-                                font-size: 15px;
-                                overflow: elide;
-                                font-weight: root.active-tab == 0 ? 700 : 500;
-                                color: root.active-tab == 0 ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
-                            }
+                        if !root.rail-active : IconSym {
+                            glyph: "\u{E8B8}";
+                            tint: root.active-tab == 0 ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: 12px;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        if !root.rail-active : Text {
+                            text: "General";
+                            x: 44px;
+                            width: parent.width - 56px;
+                            height: parent.height;
+                            font-size: 15px;
+                            font-weight: root.active-tab == 0 ? 700 : 500;
+                            color: root.active-tab == 0 ? #FFFFFF : #9A9A9A;
+                            vertical-alignment: center;
+                            overflow: elide;
                         }
                         tab0_touch := TouchArea {
                             clicked => { root.active-tab = 0; }
@@ -549,25 +554,23 @@ export component DashboardWidget inherits Window {
                             x: (parent.width - 22px) / 2;
                             y: (parent.height - 22px) / 2;
                         }
-                        if !root.rail-active : HorizontalLayout {
-                            padding-left: 12px;
-                            spacing: 10px;
-                            alignment: start;
-                            IconSym {
-                                glyph: "\u{E1B8}";
-                                tint: root.active-tab == 1 ? #FFFFFF : #9A9A9A;
-                                size: 22px;
-                                y: (parent.height - 22px) / 2;
-                            }
-                            Text {
-                                text: "Speech Models";
-
-                                font-size: 15px;
-                                overflow: elide;
-                                font-weight: root.active-tab == 1 ? 700 : 500;
-                                color: root.active-tab == 1 ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
-                            }
+                        if !root.rail-active : IconSym {
+                            glyph: "\u{E1B8}";
+                            tint: root.active-tab == 1 ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: 12px;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        if !root.rail-active : Text {
+                            text: "Speech Models";
+                            x: 44px;
+                            width: parent.width - 56px;
+                            height: parent.height;
+                            font-size: 15px;
+                            font-weight: root.active-tab == 1 ? 700 : 500;
+                            color: root.active-tab == 1 ? #FFFFFF : #9A9A9A;
+                            vertical-alignment: center;
+                            overflow: elide;
                         }
                         tab1_touch := TouchArea {
                             clicked => { root.active-tab = 1; }
@@ -590,25 +593,23 @@ export component DashboardWidget inherits Window {
                             x: (parent.width - 22px) / 2;
                             y: (parent.height - 22px) / 2;
                         }
-                        if !root.rail-active : HorizontalLayout {
-                            padding-left: 12px;
-                            spacing: 10px;
-                            alignment: start;
-                            IconSym {
-                                glyph: "\u{E3B7}";
-                                tint: root.active-tab == 2 ? #FFFFFF : #9A9A9A;
-                                size: 22px;
-                                y: (parent.height - 22px) / 2;
-                            }
-                            Text {
-                                text: "Widget Style";
-
-                                font-size: 15px;
-                                overflow: elide;
-                                font-weight: root.active-tab == 2 ? 700 : 500;
-                                color: root.active-tab == 2 ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
-                            }
+                        if !root.rail-active : IconSym {
+                            glyph: "\u{E3B7}";
+                            tint: root.active-tab == 2 ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: 12px;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        if !root.rail-active : Text {
+                            text: "Widget Style";
+                            x: 44px;
+                            width: parent.width - 56px;
+                            height: parent.height;
+                            font-size: 15px;
+                            font-weight: root.active-tab == 2 ? 700 : 500;
+                            color: root.active-tab == 2 ? #FFFFFF : #9A9A9A;
+                            vertical-alignment: center;
+                            overflow: elide;
                         }
                         tab2_touch := TouchArea {
                             clicked => { root.active-tab = 2; }
@@ -631,25 +632,23 @@ export component DashboardWidget inherits Window {
                             x: (parent.width - 22px) / 2;
                             y: (parent.height - 22px) / 2;
                         }
-                        if !root.rail-active : HorizontalLayout {
-                            padding-left: 12px;
-                            spacing: 10px;
-                            alignment: start;
-                            IconSym {
-                                glyph: "\u{E023}";
-                                tint: root.active-tab == 3 ? #FFFFFF : #9A9A9A;
-                                size: 22px;
-                                y: (parent.height - 22px) / 2;
-                            }
-                            Text {
-                                text: "Wake Words & VAD";
-
-                                font-size: 15px;
-                                overflow: elide;
-                                font-weight: root.active-tab == 3 ? 700 : 500;
-                                color: root.active-tab == 3 ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
-                            }
+                        if !root.rail-active : IconSym {
+                            glyph: "\u{E023}";
+                            tint: root.active-tab == 3 ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: 12px;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        if !root.rail-active : Text {
+                            text: "Wake Words & VAD";
+                            x: 44px;
+                            width: parent.width - 56px;
+                            height: parent.height;
+                            font-size: 15px;
+                            font-weight: root.active-tab == 3 ? 700 : 500;
+                            color: root.active-tab == 3 ? #FFFFFF : #9A9A9A;
+                            vertical-alignment: center;
+                            overflow: elide;
                         }
                         tab3_touch := TouchArea {
                             clicked => { root.active-tab = 3; }
@@ -672,25 +671,23 @@ export component DashboardWidget inherits Window {
                             x: (parent.width - 22px) / 2;
                             y: (parent.height - 22px) / 2;
                         }
-                        if !root.rail-active : HorizontalLayout {
-                            padding-left: 12px;
-                            spacing: 10px;
-                            alignment: start;
-                            IconSym {
-                                glyph: "\u{E30A}";
-                                tint: root.active-tab == 4 ? #FFFFFF : #9A9A9A;
-                                size: 22px;
-                                y: (parent.height - 22px) / 2;
-                            }
-                            Text {
-                                text: "System & Info";
-
-                                font-size: 15px;
-                                overflow: elide;
-                                font-weight: root.active-tab == 4 ? 700 : 500;
-                                color: root.active-tab == 4 ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
-                            }
+                        if !root.rail-active : IconSym {
+                            glyph: "\u{E30A}";
+                            tint: root.active-tab == 4 ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: 12px;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        if !root.rail-active : Text {
+                            text: "System & Info";
+                            x: 44px;
+                            width: parent.width - 56px;
+                            height: parent.height;
+                            font-size: 15px;
+                            font-weight: root.active-tab == 4 ? 700 : 500;
+                            color: root.active-tab == 4 ? #FFFFFF : #9A9A9A;
+                            vertical-alignment: center;
+                            overflow: elide;
                         }
                         tab4_touch := TouchArea {
                             clicked => { root.active-tab = 4; }
@@ -713,25 +710,23 @@ export component DashboardWidget inherits Window {
                             x: (parent.width - 22px) / 2;
                             y: (parent.height - 22px) / 2;
                         }
-                        if !root.rail-active : HorizontalLayout {
-                            padding-left: 12px;
-                            spacing: 10px;
-                            alignment: start;
-                            IconSym {
-                                glyph: "\u{E28E}";
-                                tint: root.active-tab == 5 ? #FFFFFF : #9A9A9A;
-                                size: 22px;
-                                y: (parent.height - 22px) / 2;
-                            }
-                            Text {
-                                text: "History";
-
-                                font-size: 15px;
-                                overflow: elide;
-                                font-weight: root.active-tab == 5 ? 700 : 500;
-                                color: root.active-tab == 5 ? #FFFFFF : #9A9A9A;
-                                vertical-alignment: center;
-                            }
+                        if !root.rail-active : IconSym {
+                            glyph: "\u{E28E}";
+                            tint: root.active-tab == 5 ? #FFFFFF : #9A9A9A;
+                            size: 22px;
+                            x: 12px;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        if !root.rail-active : Text {
+                            text: "History";
+                            x: 44px;
+                            width: parent.width - 56px;
+                            height: parent.height;
+                            font-size: 15px;
+                            font-weight: root.active-tab == 5 ? 700 : 500;
+                            color: root.active-tab == 5 ? #FFFFFF : #9A9A9A;
+                            vertical-alignment: center;
+                            overflow: elide;
                         }
                         tab5_touch := TouchArea {
                             clicked => { root.active-tab = 5; }
@@ -2031,8 +2026,8 @@ export component DashboardWidget inherits Window {
                                                                      toggled(v) => { root.history-set-selecting(v); }
                                                                  }
                                                                 Rectangle {
-                                                                    width: root.delete-all-armed ? 214px : 172px;
-                                                                    height: 44px;
+                                                                    width: root.delete-all-armed ? 196px : 138px;
+                                                                    height: 40px;
                                                                     border-radius: 8px;
                                                                     background: root.delete-all-armed ? #3A1414 : (del_all_touch.has-hover ? #2A1414 : #161616);
                                                                     border-width: 1px;
@@ -2040,12 +2035,13 @@ export component DashboardWidget inherits Window {
                                                                     animate background { duration: 130ms; easing: ease-out; }
                                                                     animate border-color { duration: 130ms; easing: ease-out; }
                                                                     HorizontalLayout {
+                                                                        y: (parent.height - self.height) / 2;
                                                                         alignment: center;
                                                                         spacing: 8px;
                                                                         Image {
-                                                                            source: @image-url("../../assets/delete_red.svg");
-                                                                            width: 19px;
-                                                                            height: 19px;
+                                                                            source: @image-url("../../assets/delete_white.svg");
+                                                                            width: 17px;
+                                                                            height: 17px;
                                                                             visible: !root.delete-all-armed;
                                                                             image-fit: contain;
                                                                             }
@@ -2116,6 +2112,7 @@ export component DashboardWidget inherits Window {
                                                                     border-color: #303030;
                                                                     animate background { duration: 130ms; easing: ease-out; }
                                                                     HorizontalLayout {
+                                                                        y: (parent.height - self.height) / 2;
                                                                         alignment: center;
                                                                         spacing: 8px;
                                                                         IconSym { glyph: "\u{E171}"; size: 19px; tint: #E6E6E6; }
@@ -2140,9 +2137,10 @@ export component DashboardWidget inherits Window {
                                                                     border-color: #3A2020;
                                                                     animate background { duration: 130ms; easing: ease-out; }
                                                                     HorizontalLayout {
+                                                                        y: (parent.height - self.height) / 2;
                                                                         alignment: center;
                                                                         spacing: 8px;
-                                                                        Image { source: @image-url("../../assets/delete_red.svg"); width: 19px; height: 19px; image-fit: contain; }
+                                                                        Image { source: @image-url("../../assets/delete_white.svg"); width: 19px; height: 19px; image-fit: contain; }
                                                                         Text {
                                                                             text: "Delete selected";
                                                                             font-size: 14.5px;
@@ -2189,127 +2187,31 @@ export component DashboardWidget inherits Window {
                                                                 border-radius: 10px;
                                                                 border-width: 1px;
                                                                 border-color: #1C1C1C;
-
-                                                                // No whole-card TouchArea: it stole drag-pan from the ScrollView (laggy scrollbar).
-
+                                                                
                                                                 VerticalLayout {
                                                                     padding: 12px;
-                                                                    spacing: 9px;
-
-                                                                    // ── Line 1: play · when ───────── actions ──
+                                                                    spacing: 8px;
+                                                                    
+                                                                    // Line 1: when ............ minimal actions (copy · trash · ⋮)
                                                                     HorizontalLayout {
-                                                                        spacing: 9px;
-
-                                                                        // ── Selection checkbox ──
-                                                                        // Sits exactly where the play circle
-                                                                        // sits (selection mode swaps them),
-                                                                        // so enabling selection never shifts
-                                                                        // the transcript or the timeline.
-                                                                        if root.history-selecting : Rectangle {
-                                                                            width: root.tap-size;
-                                                                            height: root.tap-size;
-
-                                                                            Rectangle {
-                                                                                x: (parent.width - self.width) / 2;
-                                                                                y: (parent.height - self.height) / 2;
-                                                                                width: sel_touch.pressed ? 24px : 28px;
-                                                                                height: sel_touch.pressed ? 24px : 28px;
-                                                                                border-radius: 8px;
-                                                                                background: item.selected ? #FFFFFF : (sel_touch.has-hover ? #202020 : #141414);
-                                                                                border-width: 1px;
-                                                                                border-color: item.selected ? #FFFFFF : (sel_touch.has-hover ? #303030 : #202020);
-                                                                                animate background { duration: 120ms; easing: ease-out; }
-                                                                                animate border-color { duration: 120ms; easing: ease-out; }
-                                                                                 // Drawn check (the same Path tick as the copy
-                                                                                 // flash) - no font glyph, identical on every OS.
-                                                                                 IconSym {
-                                                                                      visible: item.selected;
-                                                                                      width: 22px;
-                                                                                      height: 22px;
-                                                                                      x: (parent.width - self.width) / 2;
-                                                                                      y: (parent.height - self.height) / 2;
-                                                                                      glyph: "\u{E5CA}";
-                                                                                      tint: #000000;
-                                                                                      size: 20px;
-                                                                                  }
-                                                                            }
-                                                                            sel_touch := TouchArea {
-                                                                                clicked => { root.history-set-selected(i, !item.selected); }
-                                                                                mouse-cursor: pointer;
-                                                                            }
-                                                                        }
-
-                                                                        // Play / pause — the primary control.
-                                                                        // 44x44 fingertip target with a 36px
-                                                                        // visual circle (was 32x32).
-                                                                        if !root.history-selecting : Rectangle {
-                                                                            width: root.tap-size;
-                                                                            height: root.tap-size;
-                                                                            opacity: item.has_audio ? 1.0 : 0.4;
-
-                                                                            Rectangle {
-                                                                                x: (parent.width - self.width) / 2;
-                                                                                y: (parent.height - self.height) / 2;
-                                                                                width: play_touch.pressed ? 31px : 36px;
-                                                                                height: play_touch.pressed ? 31px : 36px;
-                                                                                border-radius: 18px;
-                                                                                background: item.playing ? #FFFFFF : (play_touch.has-hover ? #202020 : #141414);
-                                                                                border-width: 1px;
-                                                                                border-color: item.playing ? #FFFFFF : (play_touch.has-hover ? #303030 : #202020);
-                                                                                animate background { duration: 130ms; easing: ease-out; }
-                                                                                animate border-color { duration: 130ms; easing: ease-out; }
-                                                                                animate width { duration: 90ms; easing: ease-out; }
-                                                                                animate height { duration: 90ms; easing: ease-out; }
-                                                                            }
-                                                                            IconSym {
-                                                                                x: (parent.width - self.width) / 2;
-                                                                                y: (parent.height - self.height) / 2;
-                                                                                visible: !item.playing;
-                                                                                glyph: "\u{E037}";
-                                                                                tint: play_touch.has-hover ? #FFFFFF : #E6E6E6;
-                                                                                size: 20px;
-                                                                            }
-                                                                            IconSym {
-                                                                                x: (parent.width - self.width) / 2;
-                                                                                y: (parent.height - self.height) / 2;
-                                                                                visible: item.playing;
-                                                                                glyph: "\u{E034}";
-                                                                                tint: #000000;
-                                                                                size: 20px;
-                                                                            }
-                                                                            play_touch := TouchArea {
-                                                                                enabled: item.has_audio;
-                                                                                clicked => { root.history-play(i); }
-                                                                                mouse-cursor: item.has_audio ? pointer : default;
-                                                                            }
-                                                                        }
-
+                                                                        height: 30px;
+                                                                        spacing: 4px;
                                                                         Text {
                                                                             text: item.when;
                                                                             font-size: 14px;
                                                                             color: #8E8E8E;
-                                                                            }
-
+                                                                            vertical-alignment: center;
+                                                                        }
                                                                         Rectangle { horizontal-stretch: 1; }
-
-                                                                        // Copy transcript — flips to a green ✓ for a beat.
                                                                         if !root.history-selecting : HistButton {
                                                                             kind: 0;
                                                                             copied: item.copied;
                                                                             clicked => { root.history-copy(i); }
                                                                         }
-
-                                                                        // Delete turn (instant; the ⋮ menu repeats it).
                                                                         HistButton {
                                                                             kind: 1;
-                                                                            rest-plate: #131313;
-                                                                            hover-plate: #2A1414;
-                                                                            rest-tint: #9A9A9A;
-                                                                            hover-tint: #FF9A9A;
                                                                             clicked => { root.history-delete(i); }
                                                                         }
-
-                                                                        // ⋮ — opens the floating action menu.
                                                                         if !root.history-selecting : more_btn := HistButton {
                                                                             kind: 2;
                                                                             active: root.history-menu-idx == i;
@@ -2327,79 +2229,141 @@ export component DashboardWidget inherits Window {
                                                                             }
                                                                         }
                                                                     }
-
-                                                                    // ── Lines 2 & 3: transcript + timeline ──
-                                                                    VerticalLayout {
-                                                                        padding-left: 0px;
-                                                                        spacing: 9px;
-
+                                                                    
+                                                                    // Line 2: play/pause (morphs) · seek slider · clock — the play
+                                                                    // control lives in the timeline row, using the free width.
+                                                                    HorizontalLayout {
+                                                                        height: 32px;
+                                                                        spacing: 10px;
+                                                                        if root.history-selecting : Rectangle {
+                                                                            width: 30px;
+                                                                            height: 30px;
+                                                                            Rectangle {
+                                                                                x: (parent.width - self.width) / 2;
+                                                                                y: (parent.height - self.height) / 2;
+                                                                                width: 22px;
+                                                                                height: 22px;
+                                                                                border-radius: 7px;
+                                                                                background: item.selected ? #FFFFFF : (sel_touch.has-hover ? #262626 : transparent);
+                                                                                border-width: 1px;
+                                                                                border-color: item.selected ? #FFFFFF : #3A3A3A;
+                                                                                IconSym {
+                                                                                    visible: item.selected;
+                                                                                    x: (parent.width - self.width) / 2;
+                                                                                    y: (parent.height - self.height) / 2;
+                                                                                    glyph: "\u{E5CA}";
+                                                                                    tint: #000000;
+                                                                                    size: 16px;
+                                                                                }
+                                                                            }
+                                                                            sel_touch := TouchArea {
+                                                                                clicked => { root.history-set-selected(i, !item.selected); }
+                                                                                mouse-cursor: pointer;
+                                                                            }
+                                                                        }
+                                                                        if !root.history-selecting : Rectangle {
+                                                                            width: 30px;
+                                                                            height: 30px;
+                                                                            opacity: item.has_audio ? 1.0 : 0.4;
+                                                                            Rectangle {
+                                                                                x: (parent.width - self.width) / 2;
+                                                                                y: (parent.height - self.height) / 2;
+                                                                                width: 28px;
+                                                                                height: 28px;
+                                                                                border-radius: 14px;
+                                                                                background: item.playing ? #262626 : (play_touch.has-hover ? #262626 : transparent);
+                                                                                animate background { duration: 120ms; easing: ease-out; }
+                                                                            }
+                                                                            IconSym {
+                                                                                glyph: "\u{E037}";
+                                                                                size: 20px;
+                                                                                tint: #FFFFFF;
+                                                                                x: (parent.width - self.width) / 2;
+                                                                                y: (parent.height - self.height) / 2;
+                                                                                opacity: item.playing ? 0.0 : 1.0;
+                                                                                animate opacity { duration: 120ms; easing: ease-out; }
+                                                                            }
+                                                                            IconSym {
+                                                                                glyph: "\u{E034}";
+                                                                                size: 20px;
+                                                                                tint: #FFFFFF;
+                                                                                x: (parent.width - self.width) / 2;
+                                                                                y: (parent.height - self.height) / 2;
+                                                                                opacity: item.playing ? 1.0 : 0.0;
+                                                                                animate opacity { duration: 120ms; easing: ease-out; }
+                                                                            }
+                                                                            play_touch := TouchArea {
+                                                                                enabled: item.has_audio;
+                                                                                clicked => { root.history-play(i); }
+                                                                                mouse-cursor: item.has_audio ? pointer : default;
+                                                                            }
+                                                                        }
+                                                                        Rectangle {
+                                                                            horizontal-stretch: 1;
+                                                                            height: 32px;
+                                                                            Rectangle {
+                                                                                x: 0px;
+                                                                                y: (parent.height - self.height) / 2;
+                                                                                width: parent.width;
+                                                                                height: seek_touch.has-hover || item.playing ? 6px : 4px;
+                                                                                border-radius: seek_touch.has-hover || item.playing ? 3px : 2px;
+                                                                                background: #242424;
+                                                                                Rectangle {
+                                                                                    x: 0px;
+                                                                                    y: 0px;
+                                                                                    width: parent.width * item.progress;
+                                                                                    height: parent.height;
+                                                                                    border-radius: parent.border-radius;
+                                                                                    background: #FFFFFF;
+                                                                                }
+                                                                                Rectangle {
+                                                                                    x: clamp(parent.width * item.progress - 7px, 0px, parent.width - 14px);
+                                                                                    y: (parent.height - self.height) / 2;
+                                                                                    width: 14px;
+                                                                                    height: 14px;
+                                                                                    border-radius: 7px;
+                                                                                    background: #FFFFFF;
+                                                                                    visible: item.has_audio && (item.progress > 0.001 || item.playing);
+                                                                                    opacity: seek_touch.has-hover || item.playing ? 1.0 : 0.0;
+                                                                                    animate opacity { duration: 120ms; easing: ease-out; }
+                                                                                }
+                                                                            }
+                                                                            seek_touch := TouchArea {
+                                                                                enabled: item.has_audio;
+                                                                                clicked => { root.history-seek(i, clamp(self.mouse-x / self.width, 0.0, 1.0)); }
+                                                                                moved => {
+                                                                                    if (self.pressed) {
+                                                                                        root.history-seek(i, clamp(self.mouse-x / self.width, 0.0, 1.0));
+                                                                                    }
+                                                                                }
+                                                                                mouse-cursor: item.has_audio ? pointer : default;
+                                                                            }
+                                                                        }
                                                                         Text {
+                                                                            text: item.playing ? (item.pos + " / " + item.dur) : item.dur;
+                                                                            font-size: 14px;
+                                                                            color: item.playing ? #FFFFFF : #8E8E8E;
+                                                                            vertical-alignment: center;
+                                                                            min-width: 96px;
+                                                                            horizontal-alignment: right;
+                                                                            animate color { duration: 150ms; }
+                                                                        }
+                                                                    }
+                                                                    
+                                                                    // Line 3 (bottom): transcript — full text, scrolls inside a
+                                                                    // capped viewport when it does not fit (no truncation).
+                                                                    tflick := Flickable {
+                                                                        height: min(transcript.preferred-height, 86px);
+                                                                        viewport-width: self.width;
+                                                                        viewport-height: transcript.preferred-height;
+                                                                        transcript := Text {
+                                                                            x: 0px;
+                                                                            y: 0px;
+                                                                            width: tflick.width;
                                                                             text: item.text;
                                                                             font-size: 14.5px;
                                                                             color: #EDEDED;
                                                                             wrap: word-wrap;
-                                                                        }
-
-                                                                        HorizontalLayout {
-                                                                            spacing: 10px;
-
-                                                                            // Drag-to-seek timeline: 20px grab area,
-                                                                            // 4px track that thickens on hover with a
-                                                                            // round handle; the played part is white.
-                                                                            Rectangle {
-                                                                                horizontal-stretch: 1;
-                                                                                height: 34px;
-
-                                                                                Rectangle {
-                                                                                    x: 0px;
-                                                                                    y: (parent.height - self.height) / 2;
-                                                                                    width: parent.width;
-                                                                                    height: seek_touch.has-hover || item.playing ? 6px : 4px;
-                                                                                    border-radius: seek_touch.has-hover || item.playing ? 3px : 2px;
-                                                                                    background: #242424;
-
-                                                                                    Rectangle {
-                                                                                        x: 0px;
-                                                                                        y: 0px;
-                                                                                        width: parent.width * item.progress;
-                                                                                        height: parent.height;
-                                                                                        border-radius: parent.border-radius;
-                                                                                        background: #FFFFFF;
-                                                                                    }
-
-                                                                                    Rectangle {
-                                                                                        x: clamp(parent.width * item.progress - 7px, 0px, parent.width - 14px);
-                                                                                        y: (parent.height - self.height) / 2;
-                                                                                        width: 14px;
-                                                                                        height: 14px;
-                                                                                        border-radius: 7px;
-                                                                                        background: #FFFFFF;
-                                                                                        visible: item.has_audio && (item.progress > 0.001 || item.playing);
-                                                                                        opacity: seek_touch.has-hover || item.playing ? 1.0 : 0.0;
-                                                                                        animate opacity { duration: 120ms; easing: ease-out; }
-                                                                                    }
-                                                                                }
-                                                                                seek_touch := TouchArea {
-                                                                                    enabled: item.has_audio;
-                                                                                    clicked => { root.history-seek(i, clamp(self.mouse-x / self.width, 0.0, 1.0)); }
-                                                                                    moved => {
-                                                                                        if (self.pressed) {
-                                                                                            root.history-seek(i, clamp(self.mouse-x / self.width, 0.0, 1.0));
-                                                                                        }
-                                                                                    }
-                                                                                    mouse-cursor: item.has_audio ? pointer : default;
-                                                                                }
-                                                                            }
-
-                                                                            // Elapsed / total clock, right of the bar.
-                                                                            Text {
-                                                                                text: item.playing ? (item.pos + " / " + item.dur) : item.dur;
-                                                                                font-size: 14px;
-                                                                                color: item.playing ? #FFFFFF : #8E8E8E;
-                                                                                        min-width: 110px;
-                                                                                horizontal-alignment: right;
-                                                                                animate color { duration: 150ms; }
-                                                                            }
                                                                         }
                                                                     }
                                                                 }
@@ -2544,6 +2508,7 @@ export component DashboardWidget inherits Window {
                                     border-color: #303030;
                                     animate background { duration: 130ms; easing: ease-out; }
                                     HorizontalLayout {
+                                        y: (parent.height - self.height) / 2;
                                         padding-left: 12px;
                                         spacing: 10px;
                                         Text {

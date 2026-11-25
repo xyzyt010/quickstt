@@ -1,5 +1,42 @@
 # Changelog
 
+## [2.0.0-alpha.49] — 2026-11-25
+
+Right-click Model menu filtering, sidebar expand, button alignment audit.
+
+### Fixed
+- **Right-click → Model menu now lists only usable models.** Rebuilt on
+  every open from live state: Local models appear only when actually
+  downloaded; hosted API models (Groq/OpenAI/DeepGram) appear only when
+  that provider has an API key entered (any of its models carrying a
+  non-empty key counts the provider as configured). Providers without a
+  key contribute no rows. Entering a key or finishing a download updates
+  the menu on its next open — no restart. The dashboard catalog remains
+  the place to discover, download and connect everything else.
+- **Sidebar expands again at narrow windows (Mint report).** The adaptive
+  rail (`rail-mode` below 820 DIP) swallowed the expand toggle: it flipped
+  `sidebar-collapsed` but the rail stayed. An explicit expand now wins
+  over the adaptive rail (`sidebar-force-open`), the toggle glyph follows
+  the actual rail state, and expanding at a narrow window grows the
+  window to 960 DIP so sidebar + content both fit.
+- **Delete all was oversized and top-aligned.** It is now a slim 138×40
+  pill (196px armed) matching the neighbouring toggles' height, with its
+  icon + label vertically centred; Export/Delete-selected pills got the
+  same centring.
+- **Sidebar nav text ("Wake Words & VAD" etc.) is pixel-centred** in its
+  button: icon and label are absolutely centred vertically instead of
+  layout-placed, identical at rest and on hover (all six nav items;
+  `ToggleRow` got the same treatment).
+- **History rows redesigned to minimal chrome.** No permanent grey plates:
+  the copy/trash/⋮ actions are bare 16px icons (30px targets) with a soft
+  highlight only on hover/active; the trash artwork is now white. The
+  play/pause control moved into the timeline row, left of the slider
+  (using the previously empty width), and morphs play→pause with a
+  crossfade — again no permanent circle, just a hover/playing highlight.
+  The transcript now sits at the bottom of the block, in full (the
+  240-char truncation is gone), scrolling inside an 86px-capped viewport
+  when it does not fit.
+
 ## [2.0.0-alpha.48] — 2026-11-25
 
 Screenshot-loop fixes from Mint verification of alpha.47.
