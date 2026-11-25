@@ -1225,7 +1225,10 @@ fn spawn_ipc_listener(
                             )),
                         }
                     }
-                    c if c.starts_with("PRESS")
+                    c if c.starts_with("DASHTAB")
+                        || c.starts_with("DASHSIZE")
+                        || c.starts_with("HISTPLAY")
+                        || c.starts_with("PRESS")
                         || c.starts_with("MOVE")
                         || c.starts_with("RELEASE")
                         || c.starts_with("MENUROW")
@@ -5544,6 +5547,50 @@ fn dock_hop(
                             *v = true;
                         }
                     }
+                } else if cmd.starts_with("DASHTAB") {
+                    // Screenshot-verification hook (Mint loop): open the
+                    // dashboard on a given tab without any mouse input.
+                    let n: i32 = cmd
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    if let Some(d) = dash_timer.upgrade() {
+                        widget_platform::show_app_window(d.window());
+                        if let Ok(mut v) = dash_visible_timer.lock() {
+                            *v = true;
+                        }
+                        d.set_active_tab(n.clamp(0, 5));
+                        log_line(&format!("dashtab {n}"));
+                    }
+                } else if cmd.starts_with("DASHSIZE") {
+                    // Screenshot-verification hook: resize the dashboard to
+                    // an exact logical size (fullscreen / small-window loop).
+                    let mut it = cmd
+                        .split_whitespace()
+                        .skip(1)
+                        .filter_map(|v| v.parse::<f32>().ok());
+                    let (w, h) = (it.next().unwrap_or(940.0), it.next().unwrap_or(700.0));
+                    if let Some(d) = dash_timer.upgrade() {
+                        widget_platform::show_app_window(d.window());
+                        if let Ok(mut v) = dash_visible_timer.lock() {
+                            *v = true;
+                        }
+                        d.window().set_size(slint::LogicalSize::new(w.max(320.0), h.max(240.0)));
+                        log_line(&format!("dashsize {w}x{h}"));
+                    }
+                } else if cmd.starts_with("HISTPLAY") {
+                    // Screenshot/audio-verification hook: play a history row
+                    // through the real dashboard callback path.
+                    let n: i32 = cmd
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    if let Some(d) = dash_timer.upgrade() {
+                        d.invoke_history_play(n);
+                        log_line(&format!("histplay {n}"));
+                    }
                 } else if cmd == "DASHGEOM" {
                     if let Some(d) = dash_timer.upgrade() {
                         let w = d.window();
@@ -8683,7 +8730,7 @@ fn dock_hop(
         let state = state.clone();
         let dash_w = dashboard.as_weak();
         dashboard.on_set_sidebar_width(move |v: f32| {
-            let px = (v.round() as i64).clamp(150, 280) as u32;
+            let px = (v.round() as i64).clamp(240, 320) as u32;
             if let Ok(mut s) = state.lock() {
                 s.settings.dash_sidebar_width = px;
                 let _ = s.settings.save_all();
@@ -9500,7 +9547,7 @@ fn dock_hop(
             dashboard.set_ctrl_space_output(s.settings.ctrl_space_output as i32);
             dashboard.set_clean_disfluencies(s.settings.clean_disfluencies);
             dashboard.set_disfluency_engine(s.settings.disfluency_engine.clamp(0, 3) as i32);
-            dashboard.set_sidebar_width(s.settings.dash_sidebar_width.clamp(150, 280) as i32);
+            dashboard.set_sidebar_width(s.settings.dash_sidebar_width.clamp(240, 320) as i32);
             dashboard.set_sidebar_collapsed(s.settings.dash_sidebar_collapsed);
             dashboard.set_history_enabled(s.settings.history_enabled);
 

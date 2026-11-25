@@ -1501,7 +1501,9 @@ mod tests {
             .map(|d| d.name)
             .collect();
         assert!(!cpu.iter().any(|n| n.contains("Canary-Qwen")));
-        assert!(!cpu.iter().any(|n| n.contains("Large v3 Turbo")));
+        // The LOCAL Large v3 Turbo (GGML) is GPU-only; the hosted API names
+        // that also contain "Large v3 Turbo" are visible everywhere by design.
+        assert!(!cpu.iter().any(|n| n == "Whisper Large v3 Turbo Q8_0 (GGML)"));
     }
 
     #[test]
@@ -1660,17 +1662,21 @@ mod tests {
             .unwrap();
         let large = all_descriptors()
             .into_iter()
-            .find(|d| d.name.contains("Whisper Large"))
+            .find(|d| d.name == "Whisper Large v3 Turbo Q8_0 (GGML)")
             .unwrap();
         let pool = [whistle.clone(), large.clone()];
+        // Large is a GPU-only checkpoint: on a CPU-only box it is correctly
+        // never recommended (it is not even in the hardware pool), so the
+        // priority comparison runs on a discrete-GPU machine where both
+        // candidates are genuinely eligible.
         let fast =
-            recommend_model(&pool, false, "", "", 0, 32, "Auto", RecommendPriority::Fastest);
+            recommend_model(&pool, true, "NVIDIA", "Test GPU", 8192, 32, "Auto", RecommendPriority::Fastest);
         let accurate = recommend_model(
             &pool,
-            false,
-            "",
-            "",
-            0,
+            true,
+            "NVIDIA",
+            "Test GPU",
+            8192,
             32,
             "Auto",
             RecommendPriority::MostAccurate,

@@ -1,5 +1,44 @@
 # Changelog
 
+## [2.0.0-alpha.47] — 2026-11-25
+
+Catalog/sidebar/history alignment, discoverable offload, terminating offload.
+
+### Fixed
+- **Catalog cards are now deterministically middle-aligned.** The card row
+  is a fixed 64px zone: the model name + languages/size sit on the LEFT,
+  vertically centred, and the Active/Select/Use/Connect/Download button sits
+  on the RIGHT, vertically centred (`y = (64 − 34) / 2`) — absolute centring
+  instead of layout cross-axis defaults, so it holds at every window size.
+- **Sidebar highlight can no longer be smaller than its label.** With the
+  +2px text, "Wake Words & VAD" could reach past the nav highlight at the
+  old 150–280px sidebar range. The sidebar minimum is now 240px (default
+  240, drag clamp 240–320, persisted values re-clamped on sync) and nav
+  labels elide inside the highlight instead of overflowing it.
+- **History header no longer overflows small windows.** Title/count and the
+  Select/Delete-all/Backup controls are stacked in two rows, transcript and
+  timeline are flush-left (the 53px gutter made the left side emptier than
+  the right), the ⋮ menu grew to fit its 48px items, and the copy toast is
+  wide enough for its text.
+- **Offload now TERMINATES the worker process.** A polite JSON "unload"
+  only helps if the helper truly frees its model context — unverifiable.
+  `parakeet/nemotron/canary/photon/canary-qwen_unload()` now kill + reap
+  the child (via new `Drop` impls for Photon/Canary-Qwen, which previously
+  could be orphaned like Parakeet was), so after the configured idle the
+  helper (e.g. `nemotron_engine`) is gone from the process list and its
+  RAM is provably released. The next turn respawns + reloads lazily.
+  Your setting was already ON at 5s (verified in the startup log:
+  `offload=true/5s`) — the release mechanism itself is what changed.
+
+### Added
+- **Model offloading controls on the Models tab** (same Auto-offload toggle
+  + delay slider as General → Memory Management, with a plain-language
+  status line), because that is where users look for it. General keeps its
+  card too, now with the same status line.
+- Mint screenshot-verification IPC: `DASHTAB n`, `DASHSIZE w h`,
+  `HISTPLAY n` (open dashboard on a tab / at an exact size / play a history
+  row) so GUI verification runs over SSH with `scrot`, no mouse input.
+
 ## [2.0.0-alpha.46] — 2026-11-25
 
 Settings rename, +2 text everywhere, History rebuild (icons, playback, scroll).

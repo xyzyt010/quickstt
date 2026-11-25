@@ -918,31 +918,17 @@ pub fn parakeet_child_pid() -> Option<u32> {
 /// (callers only invoke it settled). Next transcribe reloads on demand via
 /// the loaded_model_dir check in transcribe_parakeet_rust.
 pub fn parakeet_unload() {
+    // Offload TERMINATES the worker: a JSON "unload" only helps if the
+    // helper really frees its GGUF/ONNX context, which is not observable
+    // from here. Killing the child guarantees the model RAM is released
+    // (the `Drop` impl reaps it); the next turn respawns + reloads lazily.
     let mut guard = match PARAKEET_SESSION.lock() {
         Ok(g) => g,
         Err(_) => return,
     };
-    let session = match guard.as_mut() {
-        Some(s) => s,
-        None => return,
-    };
-    if session.loaded_model_dir.is_none() {
-        return;
-    }
-    // Dead child: drop the session; a later transcribe respawns cleanly.
-    if matches!(session.child.try_wait(), Ok(Some(_))) {
-        *guard = None;
-        return;
-    }
-    match parakeet_request(session, json!({ "action": "unload" })) {
-        Ok(resp) => match ensure_parakeet_ok(resp, "unload") {
-            Ok(_) => {
-                session.loaded_model_dir = None;
-                info!("Parakeet model unloaded (idle offload)");
-            }
-            Err(e) => warn!("Parakeet unload rejected: {e:#}"),
-        },
-        Err(e) => warn!("Parakeet unload failed: {e:#}"),
+    if let Some(s) = guard.take() {
+        info!("Parakeet worker terminated (idle offload, pid={})", s.child.id());
+        drop(s);
     }
 }
 
@@ -1200,6 +1186,15 @@ struct PhotonSession {
 
 static PHOTON_SESSION: Lazy<Mutex<Option<PhotonSession>>> = Lazy::new(|| Mutex::new(None));
 
+/// Same rule as `ParakeetSession`: dropping must terminate the helper,
+/// never detach it with its model resident.
+impl Drop for PhotonSession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 fn transcribe_photon(
     config: &SttEngineConfig,
     descriptor: &ModelDescriptor,
@@ -1363,27 +1358,9 @@ pub fn photon_unload() {
         Ok(g) => g,
         Err(_) => return,
     };
-    let session = match guard.as_mut() {
-        Some(s) => s,
-        None => return,
-    };
-    if session.loaded_repo.is_none() {
-        return;
-    }
-    // Dead child: drop the session; a later transcribe respawns cleanly.
-    if matches!(session.child.try_wait(), Ok(Some(_))) {
-        *guard = None;
-        return;
-    }
-    match photon_request(session, json!({ "action": "unload" })) {
-        Ok(resp) => match ensure_photon_ok(resp, "unload") {
-            Ok(_) => {
-                session.loaded_repo = None;
-                info!("Photon model unloaded (idle offload)");
-            }
-            Err(e) => warn!("Photon unload rejected: {e:#}"),
-        },
-        Err(e) => warn!("Photon unload failed: {e:#}"),
+    if let Some(s) = guard.take() {
+        info!("Photon worker terminated (idle offload, pid={})", s.child.id());
+        drop(s);
     }
 }
 
@@ -1405,6 +1382,15 @@ struct CanaryQwenSession {
 }
 
 static CANARY_QWEN_SESSION: Lazy<Mutex<Option<CanaryQwenSession>>> = Lazy::new(|| Mutex::new(None));
+
+/// Same rule as `ParakeetSession`: dropping must terminate the helper,
+/// never detach it with its model resident.
+impl Drop for CanaryQwenSession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
 
 /// HF repo for Canary-Qwen checkpoints. Only the stock repo today.
 pub fn canary_repo_id(model_dir: &str) -> Option<&'static str> {
@@ -1589,26 +1575,9 @@ pub fn canary_qwen_unload() {
         Ok(g) => g,
         Err(_) => return,
     };
-    let session = match guard.as_mut() {
-        Some(s) => s,
-        None => return,
-    };
-    if session.loaded_repo.is_none() {
-        return;
-    }
-    if matches!(session.child.try_wait(), Ok(Some(_))) {
-        *guard = None;
-        return;
-    }
-    match canary_request(session, json!({ "action": "unload" })) {
-        Ok(resp) => match ensure_canary_ok(resp, "unload") {
-            Ok(_) => {
-                session.loaded_repo = None;
-                info!("Canary model unloaded (idle offload)");
-            }
-            Err(e) => warn!("Canary unload rejected: {e:#}"),
-        },
-        Err(e) => warn!("Canary unload failed: {e:#}"),
+    if let Some(s) = guard.take() {
+        info!("Canary-Qwen worker terminated (idle offload, pid={})", s.child.id());
+        drop(s);
     }
 }
 
@@ -2097,30 +2066,16 @@ fn transcribe_vosk_native(_model_dir: &Path, _wav_path: &Path) -> Result<String>
 static NEMOTRON_SESSION: Lazy<Mutex<Option<ParakeetSession>>> = Lazy::new(|| Mutex::new(None));
 
 pub fn nemotron_unload() {
+    // Terminate, don't politely "unload": killing the child is the only
+    // release whose effect (worker gone, model RAM freed) is verifiable
+    // in the process list. Next Nemotron/Qwen3 turn respawns it lazily.
     let mut guard = match NEMOTRON_SESSION.lock() {
         Ok(g) => g,
         Err(_) => return,
     };
-    let session = match guard.as_mut() {
-        Some(s) => s,
-        None => return,
-    };
-    if session.loaded_model_dir.is_none() {
-        return;
-    }
-    if matches!(session.child.try_wait(), Ok(Some(_))) {
-        *guard = None;
-        return;
-    }
-    match parakeet_request(session, json!({ "action": "unload" })) {
-        Ok(resp) => match ensure_parakeet_ok(resp, "unload") {
-            Ok(_) => {
-                session.loaded_model_dir = None;
-                info!("Nemotron model unloaded (idle offload)");
-            }
-            Err(e) => warn!("Nemotron unload rejected: {e:#}"),
-        },
-        Err(e) => warn!("Nemotron unload failed: {e:#}"),
+    if let Some(s) = guard.take() {
+        info!("Nemotron worker terminated (idle offload, pid={})", s.child.id());
+        drop(s);
     }
 }
 
@@ -2732,26 +2687,9 @@ pub fn canary_unload() {
         Ok(g) => g,
         Err(_) => return,
     };
-    let session = match guard.as_mut() {
-        Some(s) => s,
-        None => return,
-    };
-    if session.loaded_model_dir.is_none() {
-        return;
-    }
-    if matches!(session.child.try_wait(), Ok(Some(_))) {
-        *guard = None;
-        return;
-    }
-    match parakeet_request(session, json!({ "action": "unload" })) {
-        Ok(resp) => match ensure_parakeet_ok(resp, "unload") {
-            Ok(_) => {
-                session.loaded_model_dir = None;
-                info!("Canary model unloaded (idle offload)");
-            }
-            Err(e) => warn!("Canary unload rejected: {e:#}"),
-        },
-        Err(e) => warn!("Canary unload failed: {e:#}"),
+    if let Some(s) = guard.take() {
+        info!("Canary worker terminated (idle offload, pid={})", s.child.id());
+        drop(s);
     }
 }
 

@@ -213,15 +213,15 @@ pub struct AppOrchestrator {
     audio_tx: mpsc::Sender<Vec<i16>>,
 }
 
-/// Release every persistent STT worker's model.
-/// if it frees the model you were just using (the Nemotron report: the
-/// selected engine's worker was deliberately kept resident, so the setting
-/// appeared to do nothing at all). Each unload is a fast JSON round-trip that
-/// no-ops when its worker was never started or is already unloaded, and every
-/// engine re-arms itself on the next turn through its `loaded_model_dir` /
-/// `loaded_repo` guard, so the reload cost is paid lazily instead of leaking
-/// RAM forever. The worker PROCESSES survive (only their models are dropped),
-/// which keeps the next turn's load fast — no respawn penalty.
+/// Release every persistent STT worker — including the active engine's
+/// (the Nemotron report: the selected engine's worker was deliberately
+/// kept resident, so the setting appeared to do nothing at all). Each
+/// `*_unload` now TERMINATES its worker process (kill + reap via the
+/// session `Drop` impls), so the model RAM is provably released — the
+/// helper disappears from the process list instead of merely claiming
+/// to have freed its context. Every engine re-arms itself lazily on the
+/// next turn through its `loaded_model_dir` / `loaded_repo` guard
+/// (respawn + reload), so no RAM leaks between turns.
 fn unload_all_workers() {
     crate::models::engine::parakeet_unload();
     crate::models::engine::nemotron_unload();
