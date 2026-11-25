@@ -37,6 +37,25 @@ const CLEANUP_PASTE_GRACE_MS: u64 = 200;
 /// Hard cap on the grace so a single slow turn can never wedge delivery.
 const CLEANUP_PASTE_GRACE_MAX_MS: u64 = 1500;
 
+/// HARD SAFETY FLOORS — these are not settings and cannot be turned
+/// off in the dashboard. They exist because a mic or a model left
+/// resident "forever" is a privacy + cost + RAM leak: on API engines a
+/// never-ending session keeps transcribing (paid per minute), on
+/// downloaded engines (Nemotron/Parakeet/…) the worker parks gigabytes
+/// in RAM, and an open mic is a live microphone. The user's own
+/// settings (auto-stop on silence, auto-offload + delay) still apply
+/// BELOW these ceilings and normally fire long before them.
+/// A triggered dictation session with no transcript growth for this
+/// long ends, even when "auto-stop on silence" is OFF.
+const HARD_SILENCE_STOP_SECS: u64 = 120;
+/// A single triggered session may never run longer than this, even
+/// with continuous speech growth resetting the silence clock.
+const HARD_SESSION_CAP_SECS: u64 = 600;
+/// The STT worker is released after this much idle time even when
+/// "auto-offload" is OFF. Fast onload is preserved: the next turn
+/// reloads the engine on demand, exactly as an offload+reload does.
+const HARD_IDLE_OFFLOAD_SECS: u64 = 900;
+
 /// Don't bother compacting the transcript buffer below this size — the
 /// `clear()` itself costs a page write, and small buffers are never the
 /// problem. Only a genuinely accumulated transcript (hours of dictation) is
@@ -691,7 +710,7 @@ fn show_native_tray_menu(hwnd: windows::Win32::Foundation::HWND, x: i32, y: i32)
 
     // (command id, label). Separator carries id 0 + sentinel item data.
     const ITEMS: &[(u32, &str)] = &[
-        (1, "Dashboard"),
+        (1, "Settings"),
         (2, "Show/Hide Widget"),
         (4, "Hide for 1 hour"),
         (0, ""),
@@ -2384,7 +2403,7 @@ mod sni_tray {
         }
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
             vec![
-                row(&self.tx, "Open Dashboard", SniClick::Dashboard),
+                row(&self.tx, "Settings", SniClick::Dashboard),
                 row(&self.tx, "Show / Hide Widget", SniClick::ToggleWidget),
                 row(&self.tx, "Hide for 1 hour", SniClick::Snooze),
                 row(&self.tx, "Quit QuickSTT", SniClick::Quit),
@@ -6540,6 +6559,29 @@ fn dock_hop(
                     log_line("session auto-closed on silence (setting)");
                     let _ = tx_cmd_timer.try_send(OrchestratorCommand::StopListening);
                 }
+                // HARD SAFETY FLOOR (not a setting — see HARD_* consts):
+                // a triggered session can never hold the mic forever,
+                // even with auto-stop OFF. No growth for
+                // HARD_SILENCE_STOP_SECS, or HARD_SESSION_CAP_SECS total,
+                // ends it for every engine: downloaded models stop
+                // burning CPU/RAM, API engines stop billing minutes.
+                // Held PTT / deliberate mic-on are the user's own hand
+                // on the switch and stay exempt.
+                if sess_triggered
+                    && recording
+                    && !transcribing
+                    && !ptt
+                    && !mic_on
+                    && (now.duration_since(sess_last_growth)
+                        > std::time::Duration::from_secs(HARD_SILENCE_STOP_SECS)
+                        || now.duration_since(sess_start_t)
+                            > std::time::Duration::from_secs(HARD_SESSION_CAP_SECS))
+                {
+                    log_line(
+                        "session auto-closed (hard safety floor: mic released)",
+                    );
+                    let _ = tx_cmd_timer.try_send(OrchestratorCommand::StopListening);
+                }
                 if live_session {
                     sess_peak = sess_peak.max(s.audio_level as u32);
                     if now.duration_since(sess_start_t)
@@ -6598,8 +6640,21 @@ fn dock_hop(
                             0 => std::time::Duration::from_millis(500),
                             secs => std::time::Duration::from_secs(secs as u64),
                         };
-                        if s.settings.auto_offload && now.duration_since(t0) >= wait
-                        {
+                        // The setting governs the normal delay. Above
+                        // it sits the HARD ceiling (not a setting): with
+                        // auto-offload OFF the worker is still released
+                        // after HARD_IDLE_OFFLOAD_SECS, so a downloaded
+                        // engine can never park in RAM indefinitely.
+                        // Reload on the next turn is the existing lazy
+                        // onload, so this costs one engine load, never
+                        // a lost turn.
+                        let due = if s.settings.auto_offload {
+                            now.duration_since(t0) >= wait
+                        } else {
+                            now.duration_since(t0)
+                                >= std::time::Duration::from_secs(HARD_IDLE_OFFLOAD_SECS)
+                        };
+                        if due {
                             if tx_cmd_timer
                                 .try_send(OrchestratorCommand::OffloadModel)
                                 .is_ok()
@@ -7039,15 +7094,15 @@ fn dock_hop(
                 // Bottom 90..200, side 90..196, transcribing >=150 so the
                 // label+dots never clip.
                 // Idle hint is two runs (grey "Dictate" + white
-                // "Ctrl + Space" at 15px, 8px gap, generous side margins):
+                // "Ctrl + Space" at 17px, 8px gap, generous side margins):
                 // measure both so the roomy (+40%) pill shrink-wraps exactly
                 // (~184px: ~150 text + 34 padding).
                 let meas = if phase == 0 {
-                    widget_platform::measure_text(p.window(), "Dictate", 15.0, false)
-                        + widget_platform::measure_text(p.window(), "Ctrl + Space", 15.0, true)
+                    widget_platform::measure_text(p.window(), "Dictate", 17.0, false)
+                        + widget_platform::measure_text(p.window(), "Ctrl + Space", 17.0, true)
                         + 32.0
                 } else if phase == 2 {
-                    widget_platform::measure_text(p.window(), "Transcribing…", 12.0, true) + 24.0
+                    widget_platform::measure_text(p.window(), "Transcribing…", 14.0, true) + 24.0
                 } else {
                     120.0
                 };
@@ -9518,6 +9573,10 @@ fn dock_hop(
                     0.0
                 };
                 let now_ms = quickstt_core::history::now_ms();
+                // Hoisted out of the per-row closure: cloning the selection
+                // set once per sync instead of once per row (60 clones/s → 10).
+                let selected_ids = mlock(&hist_selected).clone();
+                let player_dur = history_player::duration_s();
                 let rows: Vec<HistRow> = s
                     .history
                     .iter()
@@ -9527,10 +9586,10 @@ fn dock_hop(
                         let dur_s = it.duration_ms as f32 / 1000.0;
                         let is_playing = play_i == i as i32 && playing_now;
                         let shown = if is_playing { pos_s } else { 0.0 };
-                        // Bulk-selection mirror (ids → rows). Rebuilt every
-                        // sync, so a delete that shifts rows keeps the right
-                        // boxes ticked.
-                        let selected_ids = mlock(&hist_selected).clone();
+                        // Progress/clock use the decoder's true length while
+                        // the clip is playing (history.json durations can
+                        // be stale/0); otherwise fall back to the stored one.
+                        let eff_dur = if is_playing && player_dur > 0.0 { player_dur } else { dur_s };
                         HistRow {
                             index: i as i32,
                             when: quickstt_core::history::display_label(it.created_ms, now_ms).into(),
@@ -9550,8 +9609,8 @@ fn dock_hop(
                             playing: is_playing,
                             copied: copied_i == i as i32,
                             selected: selected_ids.contains(&it.id),
-                            progress: if dur_s > 0.0 {
-                                (shown / dur_s).clamp(0.0, 1.0)
+                            progress: if eff_dur > 0.0 {
+                                (shown / eff_dur).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             },
