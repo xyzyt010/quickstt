@@ -105,6 +105,11 @@ pub struct AppState {
     pub connect_for: String,
     /// Hardware-fit note for the cleanup engine (RAM-budgeted pick).
     pub recommend_cleanup_note: String,
+    /// Retrigger guard: after an explicit StopListening, background
+    /// wakeword/clap triggers are ignored for a short window so a leftover
+    /// sound cannot instantly reopen the session the user just closed
+    /// ("keeps trying to turn transcription back on").
+    pub trigger_cooldown_until: Option<std::time::Instant>,
 }
 
 impl AppState {
@@ -151,6 +156,7 @@ impl AppState {
             last_by_provider: std::collections::HashMap::new(),
             connect_for: String::new(),
             recommend_cleanup_note: String::new(),
+            trigger_cooldown_until: None,
         }
     }
 }
@@ -1283,6 +1289,8 @@ impl AppOrchestrator {
                         s.status_message = "Ready".into();
                     }
                     s.session_saw_speech = false;
+                    s.trigger_cooldown_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
                     info!("Mode → {:?}", s.mode);
                 }
                 OrchestratorCommand::AudioLevel(level) => {
@@ -1379,6 +1387,17 @@ impl AppOrchestrator {
                         );
                         continue;
                     }
+                    {
+                        let s = state.lock().unwrap();
+                        if s
+                            .trigger_cooldown_until
+                            .map(|t| std::time::Instant::now() < t)
+                            .unwrap_or(false)
+                        {
+                            info!("Wakeword trigger ignored — inside post-stop cooldown (retrigger guard)");
+                            continue;
+                        }
+                    }
                     #[cfg(feature = "audio-capture")]
                     {
                         let _ = audio_control_tx.send(AudioControlCommand::Open {
@@ -1416,6 +1435,17 @@ impl AppOrchestrator {
                             kind
                         );
                         continue;
+                    }
+                    {
+                        let s = state.lock().unwrap();
+                        if s
+                            .trigger_cooldown_until
+                            .map(|t| std::time::Instant::now() < t)
+                            .unwrap_or(false)
+                        {
+                            info!("Acoustic {} ignored — inside post-stop cooldown (retrigger guard)", kind);
+                            continue;
+                        }
                     }
                     #[cfg(feature = "audio-capture")]
                     {

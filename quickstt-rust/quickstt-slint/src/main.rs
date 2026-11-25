@@ -695,6 +695,42 @@ unsafe extern "system" fn tray_menu_subclass_proc(
 }
 
 #[cfg(target_os = "windows")]
+fn tray_owner_hwnd() -> windows::Win32::Foundation::HWND {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, WINDOW_EX_STYLE, WINDOW_STYLE,
+    };
+    use windows::core::PCWSTR;
+    static OWNER: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
+    let mut guard = match OWNER.lock() {
+        Ok(g) => g,
+        Err(_) => return HWND(0),
+    };
+    if let Some(raw) = *guard {
+        return HWND(raw as _);
+    }
+    // Hidden floating owner so the tray popup always has a valid HWND —
+    // the pill's HWND is destroyed on hide (DESTROY_ON_HIDE), and passing
+    // it made the native menu silently never appear after Hide Widget.
+    let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+    unsafe {
+        let h = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR(class.as_ptr()),
+            PCWSTR(std::ptr::null()),
+            WINDOW_STYLE(0),
+            0, 0, 0, 0,
+            HWND(0),
+            windows::Win32::UI::WindowsAndMessaging::HMENU(0),
+            None,
+            None,
+        );
+        *guard = Some(h.0 as usize);
+        h
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn show_native_tray_menu(hwnd: windows::Win32::Foundation::HWND, x: i32, y: i32) -> Option<u32> {
     use windows::Win32::Foundation::COLORREF;
     use windows::Win32::Graphics::Gdi::{
@@ -3562,7 +3598,6 @@ fn dock_hop(
                                         .map(|s| {
                                             s.mode == AppMode::Recording
                                                 || s.mode == AppMode::Transcribing
-                                                || s.mode == AppMode::WakewordListening
                                                 || s.pending_transcribes > 0
                                                 || s.mic_open
                                         })
@@ -3696,7 +3731,6 @@ fn dock_hop(
                 .map(|s| {
                     s.mode == AppMode::Recording
                         || s.mode == AppMode::Transcribing
-                        || s.mode == AppMode::WakewordListening
                         || s.pending_transcribes > 0
                 })
                 .unwrap_or(false);
@@ -5961,8 +5995,11 @@ fn dock_hop(
                                 log_line(&format!("tray right-click @ {:?} -> show native dark menu", at));
                                 #[cfg(target_os = "windows")]
                                 {
-                                    let hwnd_raw = widget_platform::hwnd_of(p.window()).unwrap_or(0);
-                                    let hwnd = windows::Win32::Foundation::HWND(hwnd_raw as _);
+                                    // Always use a persistent owner window:
+                                    // the pill HWND is destroyed on hide, so
+                                    // the native menu silently failed after
+                                    // "Hide Widget" (unreachable tray menu).
+                                    let hwnd = tray_owner_hwnd();
                                     if let Some(cmd) = show_native_tray_menu(hwnd, at.0, at.1) {
                                         match cmd {
                                             1 => {
@@ -6820,7 +6857,7 @@ fn dock_hop(
                         .trim()
                         .to_string();
                     if grown == 0 && sess_peak < 10 {
-                        alert_msg = "Nothing detected — speak up".to_string();
+                        alert_msg = "Silent!".to_string();
                         alert_until = now + std::time::Duration::from_millis(2500);
                         log_line("alert: nothing detected");
                     }

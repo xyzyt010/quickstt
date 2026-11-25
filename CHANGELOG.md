@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.0.0-alpha.55] — 2026-11-25
+
+Tray reachable hidden, mic/toggle single-press, "Silent!" pill, retrigger guard.
+
+### Fixed
+- **Tray right-click menu works after hiding the widget.** The native
+  menu used the pill's HWND as owner — destroyed on hide — so TrackPopup
+  silently never appeared. It now uses a persistent hidden owner window.
+  The Show/Hide toggle from the tray restores/hides the widget as expected.
+- **Mic tap and toggle-Press stop/start on ONE press.** Idle-armed
+  `WakewordListening` (the post-turn state) was counted as "live", so taps
+  sent no-op `StopListening` and the dismiss-tap path never ran. It now
+  counts as idle: one tap dismisses a finished turn or starts a new one.
+- **Silent room shows exactly "Silent!" once.** The old long message
+  ("Nothing detected — speak up") was elided in the narrow pill.
+- **No instant retrigger after stop.** Wakeword/clap triggers are ignored
+  for 1.5s after any `StopListening`, so a leftover sound cannot reopen a
+  session the user just closed.
+
 ## [2.0.0-alpha.54] — 2026-11-25
 
 Selected-model identification, keyed-provider visibility, hold watchdog.
