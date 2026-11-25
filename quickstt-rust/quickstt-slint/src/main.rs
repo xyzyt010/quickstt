@@ -8833,7 +8833,7 @@ fn dock_hop(
         let state = state.clone();
         let dash_w = dashboard.as_weak();
         dashboard.on_set_sidebar_width(move |v: f32| {
-            let px = (v.round() as i64).clamp(205, 280) as u32;
+            let px = (v.round() as i64).clamp(225, 280) as u32;
             if let Ok(mut s) = state.lock() {
                 s.settings.dash_sidebar_width = px;
                 let _ = s.settings.save_all();
@@ -9666,7 +9666,7 @@ fn dock_hop(
             dashboard.set_ctrl_space_output(s.settings.ctrl_space_output as i32);
             dashboard.set_clean_disfluencies(s.settings.clean_disfluencies);
             dashboard.set_disfluency_engine(s.settings.disfluency_engine.clamp(0, 3) as i32);
-            dashboard.set_sidebar_width(s.settings.dash_sidebar_width.clamp(205, 280) as i32);
+            dashboard.set_sidebar_width(s.settings.dash_sidebar_width.clamp(225, 280) as i32);
             dashboard.set_sidebar_collapsed(s.settings.dash_sidebar_collapsed);
             dashboard.set_history_enabled(s.settings.history_enabled);
 

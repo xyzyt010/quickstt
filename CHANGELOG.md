@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.0.0-alpha.51] — 2026-11-25
+
+Sidebar minimum corrected (audit loop caught a truncation).
+
+### Fixed
+- **Sidebar minimum 205 → 225px.** At 205px the longest nav label,
+  "Wake Words & VAD", ellipsised to "Wake Words & …" in the Mint
+  screenshot. 225px fits it fully with margin — still slimmer than the
+  original 240px. Nav hover boxes stay 48px.
+
 ## [2.0.0-alpha.50] — 2026-11-25
 
 Verification hooks, slimmer sidebar, tour row centre (from the Mint audit loop).
