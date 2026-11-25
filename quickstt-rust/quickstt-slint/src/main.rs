@@ -1255,6 +1255,8 @@ fn spawn_ipc_listener(
                         }
                     }
                     c if c.starts_with("DASHSIDEBAR")
+                        || c.starts_with("DASHMOVE")
+                        || c.starts_with("FLYOUTMODEL")
                         || c.starts_with("DASHSCROLL")
                         || c.starts_with("DASHTAB")
                         || c.starts_with("DASHSIZE")
@@ -5629,6 +5631,42 @@ fn dock_hop(
                         d.invoke_set_sidebar_collapsed(on);
                         log_line(&format!("dashsidebar collapsed={on}"));
                     }
+                } else if cmd.starts_with("DASHMOVE") {
+                    // Hover-verification hook: move the Slint cursor over the
+                    // dashboard window (Delete-all / nav text hover states)
+                    // without any physical mouse input.
+                    let mut it = cmd.split_whitespace().skip(1).filter_map(|v| v.parse::<f32>().ok());
+                    let (x, y) = (it.next().unwrap_or(300.0), it.next().unwrap_or(200.0));
+                    if let Some(d) = dash_timer.upgrade() {
+                        use slint::platform::WindowEvent;
+                        d.window().dispatch_event(WindowEvent::PointerMoved {
+                            position: slint::LogicalPosition::new(x, y),
+                        });
+                        log_line(&format!("dashmove {x},{y}"));
+                    }
+                } else if cmd == "FLYOUTMODEL" {
+                    show_pillmenu_timer(None);
+                    let (names, sel, _idx_map) = model_menu_items(&state_timer);
+                    log_line(&format!(
+                        "flyout-model items n={} sel={} names={:?}",
+                        names.len(), sel, names
+                    ));
+                    if let Some((items, rect, idx)) = open_submenu(
+                        &flyout_w,
+                        &pillmenu_w,
+                        &pill_w,
+                        &state_timer,
+                        SubMode::Model,
+                    ) {
+                        if let Ok(mut u) = flyout_ui_timer.lock() {
+                            u.mode = SubMode::Model;
+                            u.items = items;
+                            u.idx_map = idx;
+                            u.rect = Some(rect);
+                        }
+                        *mlock(&menu_pin_timer) = Some(SubMode::Model);
+                    }
+                    log_line("flyoutmodel shown");
                 } else if cmd.starts_with("DASHSCROLL") {
                     // Screenshot-verification hook: scroll dashboard content
                     // (negative = down) so the catalog can be captured.
@@ -8795,7 +8833,7 @@ fn dock_hop(
         let state = state.clone();
         let dash_w = dashboard.as_weak();
         dashboard.on_set_sidebar_width(move |v: f32| {
-            let px = (v.round() as i64).clamp(240, 320) as u32;
+            let px = (v.round() as i64).clamp(205, 280) as u32;
             if let Ok(mut s) = state.lock() {
                 s.settings.dash_sidebar_width = px;
                 let _ = s.settings.save_all();
@@ -9628,7 +9666,7 @@ fn dock_hop(
             dashboard.set_ctrl_space_output(s.settings.ctrl_space_output as i32);
             dashboard.set_clean_disfluencies(s.settings.clean_disfluencies);
             dashboard.set_disfluency_engine(s.settings.disfluency_engine.clamp(0, 3) as i32);
-            dashboard.set_sidebar_width(s.settings.dash_sidebar_width.clamp(240, 320) as i32);
+            dashboard.set_sidebar_width(s.settings.dash_sidebar_width.clamp(205, 280) as i32);
             dashboard.set_sidebar_collapsed(s.settings.dash_sidebar_collapsed);
             dashboard.set_history_enabled(s.settings.history_enabled);
 

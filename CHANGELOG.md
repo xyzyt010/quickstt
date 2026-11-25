@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.0.0-alpha.50] — 2026-11-25
+
+Verification hooks, slimmer sidebar, tour row centre (from the Mint audit loop).
+
+### Fixed
+- **"Show the intro tour again" row is truly centred** — its layout now
+  fills the 40px pill height so the text sits dead-centre (it rode high).
+- **Sidebar slimmed back down.** The 240px minimum overcompensated for the
+  +2px text: it is 205px everywhere (default, drag and persisted clamps
+  205–280), and nav hover boxes are 48px (was 54px), chevron 36px. The
+  largest label ("Wake Words & VAD") still fits with margin, and the
+  expanded sidebar no longer dominates smaller windows. The 56px rail and
+  the 820-DIP adaptive threshold are unchanged, so narrow windows still
+  collapse to the minimal rail instead of breaking.
+
+### Added
+- `FLYOUTMODEL` / `DASHMOVE` Mint verification IPC: deterministic Model
+  flyout photo (logs the exact row list) and cursor-free hover proof for
+  Delete-all / sidebar text without any physical mouse input.
+
 ## [2.0.0-alpha.49] — 2026-11-25
 
 Right-click Model menu filtering, sidebar expand, button alignment audit.

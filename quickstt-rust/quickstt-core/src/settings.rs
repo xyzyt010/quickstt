@@ -176,7 +176,7 @@ fn default_silence_duration() -> u32 { 8 }
 fn default_clean_disfluencies() -> bool { true }
 fn default_disfluency_engine() -> u32 { 0 }
 fn default_dash_sidebar_collapsed() -> bool { false }
-fn default_dash_sidebar_width() -> u32 { 240 }
+fn default_dash_sidebar_width() -> u32 { 205 }
 fn default_history_enabled() -> bool { true }
 fn default_lrc_enabled() -> bool { true }
 fn default_ww_phrase_enabled() -> bool { true }
@@ -249,7 +249,7 @@ impl Default for Settings {
             clean_disfluencies: true,
             disfluency_engine: 0,
             dash_sidebar_collapsed: false,
-            dash_sidebar_width: 240,
+            dash_sidebar_width: 205,
             history_enabled: true,
             lrc_enabled: true,
             ww_hey_jarvis: true,
@@ -955,7 +955,7 @@ impl Settings {
             let _ = write_str("cleanDisfluencies", if self.clean_disfluencies { "true" } else { "false" });
             let _ = write_dword("disfluencyEngine", self.disfluency_engine.min(3));
             let _ = write_str("dashSidebarCollapsed", if self.dash_sidebar_collapsed { "true" } else { "false" });
-            let _ = write_dword("dashSidebarWidth", self.dash_sidebar_width.clamp(240, 320));
+            let _ = write_dword("dashSidebarWidth", self.dash_sidebar_width.clamp(205, 280));
             let _ = write_str("historyEnabled", if self.history_enabled { "true" } else { "false" });
             let _ = write_str("lrcEnabled", if self.lrc_enabled { "true" } else { "false" });
             let _ = write_str("wwHeyJarvis", if self.ww_hey_jarvis { "true" } else { "false" });

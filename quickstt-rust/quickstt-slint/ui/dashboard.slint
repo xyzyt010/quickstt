@@ -454,7 +454,7 @@ export component DashboardWidget inherits Window {
             // the collapsed rail is a fixed icon strip, so there is nothing to
             // drag and re-expanding should not jump the layout.
             side-panel := Rectangle {
-                width: root.rail-active ? 56px : max(root.sidebar-width * 1px, 240px);
+                width: root.rail-active ? 56px : max(root.sidebar-width * 1px, 205px);
                 background: #050505;
                 border-width: 1px;
                 border-color: #1A1A1A;
@@ -469,7 +469,7 @@ export component DashboardWidget inherits Window {
                     // does it. Left-aligned in expanded mode (matches the nav
                     // items), centered in the collapsed rail.
                     Rectangle {
-                        height: root.rail-active ? 44px : 40px;
+                        height: root.rail-active ? 40px : 36px;
                         border-radius: 8px;
                         background: chev_touch.has-hover ? #161616 : transparent;
                         border-width: chev_touch.has-hover ? 1px : 0px;
@@ -502,7 +502,7 @@ export component DashboardWidget inherits Window {
 
                     // Navigation Item 0: General
                     Rectangle {
-                        height: 54px;
+                        height: 48px;
                         border-radius: 8px;
                         background: root.active-tab == 0 ? #1A1A1A : (tab0_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 0 ? 1px : 0px;
@@ -541,7 +541,7 @@ export component DashboardWidget inherits Window {
 
                     // Navigation Item 1: Models
                     Rectangle {
-                        height: 54px;
+                        height: 48px;
                         border-radius: 8px;
                         background: root.active-tab == 1 ? #1A1A1A : (tab1_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 1 ? 1px : 0px;
@@ -580,7 +580,7 @@ export component DashboardWidget inherits Window {
 
                     // Navigation Item 2: Style
                     Rectangle {
-                        height: 54px;
+                        height: 48px;
                         border-radius: 8px;
                         background: root.active-tab == 2 ? #1A1A1A : (tab2_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 2 ? 1px : 0px;
@@ -619,7 +619,7 @@ export component DashboardWidget inherits Window {
 
                     // Navigation Item 3: Wakewords
                     Rectangle {
-                        height: 54px;
+                        height: 48px;
                         border-radius: 8px;
                         background: root.active-tab == 3 ? #1A1A1A : (tab3_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 3 ? 1px : 0px;
@@ -658,7 +658,7 @@ export component DashboardWidget inherits Window {
 
                     // Navigation Item 4: System & Updates
                     Rectangle {
-                        height: 54px;
+                        height: 48px;
                         border-radius: 8px;
                         background: root.active-tab == 4 ? #1A1A1A : (tab4_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 4 ? 1px : 0px;
@@ -697,7 +697,7 @@ export component DashboardWidget inherits Window {
 
                     // Navigation Item 5: History (all transcriptions + audio)
                     Rectangle {
-                        height: 54px;
+                        height: 48px;
                         border-radius: 8px;
                         background: root.active-tab == 5 ? #1A1A1A : (tab5_touch.has-hover ? #0E0E0E : transparent);
                         border-width: root.active-tab == 5 ? 1px : 0px;
@@ -755,7 +755,7 @@ export component DashboardWidget inherits Window {
                     }
                     moved => {
                         if (self.pressed) {
-                            root.sidebar-width = clamp(root.sidebar-drag-start + round((self.mouse-x - self.pressed-x) / 1px), 240, 320);
+                            root.sidebar-width = clamp(root.sidebar-drag-start + round((self.mouse-x - self.pressed-x) / 1px), 205, 280);
                             root.set-sidebar-width(root.sidebar-width * 1px);
                         }
                     }
@@ -1628,7 +1628,7 @@ export component DashboardWidget inherits Window {
                                         // Rendered Pill mirroring radius + opacity
                                         Rectangle {
                                             width: 250px;
-                                            height: 54px;
+                                            height: 48px;
                                             border-radius: (root.ui-pill-radius * 48px / 50);
                                             background: #111111;
                                             border-width: 1px;
@@ -2508,7 +2508,7 @@ export component DashboardWidget inherits Window {
                                     border-color: #303030;
                                     animate background { duration: 130ms; easing: ease-out; }
                                     HorizontalLayout {
-                                        y: (parent.height - self.height) / 2;
+                                        height: parent.height;
                                         padding-left: 12px;
                                         spacing: 10px;
                                         Text {
