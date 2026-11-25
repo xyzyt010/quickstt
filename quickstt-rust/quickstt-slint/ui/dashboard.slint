@@ -419,6 +419,9 @@ export component DashboardWidget inherits Window {
     // the surface by the scale factor. Laying the whole UI out in DIP units
     // (physical / scale) makes the scaled render land exactly on the window.
     in-out property <float> ui-scale: 1.0;
+    // Screenshot-verification hook: programmatic content scroll (IPC
+    // DASHSCROLL) so the catalog can be captured on Mint without a mouse.
+    in-out property <length> dash-scroll-y: 0px;
     // Layout probes (read over IPC by DASHGEOM).
     out property <length> probe-root-w: root.width;
     out property <length> probe-box-w: layout-box.width;
@@ -773,6 +776,7 @@ export component DashboardWidget inherits Window {
                 background: #000000;
 
                 ScrollView {
+                    viewport-y: root.dash-scroll-y;
                     // Touch: drag anywhere on the page to pan (Windows/Linux
                     // touchscreens + precision touchpads), wheel still works.
                     mouse-drag-pan-enabled: true;
@@ -2201,10 +2205,9 @@ export component DashboardWidget inherits Window {
                                                                         // sits (selection mode swaps them),
                                                                         // so enabling selection never shifts
                                                                         // the transcript or the timeline.
-                                                                        Rectangle {
+                                                                        if root.history-selecting : Rectangle {
                                                                             width: root.tap-size;
                                                                             height: root.tap-size;
-                                                                            visible: root.history-selecting;
 
                                                                             Rectangle {
                                                                                 x: (parent.width - self.width) / 2;
@@ -2239,10 +2242,9 @@ export component DashboardWidget inherits Window {
                                                                         // Play / pause — the primary control.
                                                                         // 44x44 fingertip target with a 36px
                                                                         // visual circle (was 32x32).
-                                                                        Rectangle {
+                                                                        if !root.history-selecting : Rectangle {
                                                                             width: root.tap-size;
                                                                             height: root.tap-size;
-                                                                            visible: !root.history-selecting;
                                                                             opacity: item.has_audio ? 1.0 : 0.4;
 
                                                                             Rectangle {
@@ -2291,10 +2293,9 @@ export component DashboardWidget inherits Window {
                                                                         Rectangle { horizontal-stretch: 1; }
 
                                                                         // Copy transcript — flips to a green ✓ for a beat.
-                                                                        HistButton {
+                                                                        if !root.history-selecting : HistButton {
                                                                             kind: 0;
                                                                             copied: item.copied;
-                                                                            visible: !root.history-selecting;
                                                                             clicked => { root.history-copy(i); }
                                                                         }
 
@@ -2309,10 +2310,9 @@ export component DashboardWidget inherits Window {
                                                                         }
 
                                                                         // ⋮ — opens the floating action menu.
-                                                                        more_btn := HistButton {
+                                                                        if !root.history-selecting : more_btn := HistButton {
                                                                             kind: 2;
                                                                             active: root.history-menu-idx == i;
-                                                                            visible: !root.history-selecting;
                                                                             clicked => {
                                                                                 if (root.history-menu-idx == i) {
                                                                                     root.history-menu(i, false);

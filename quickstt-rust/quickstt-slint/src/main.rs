@@ -1225,7 +1225,8 @@ fn spawn_ipc_listener(
                             )),
                         }
                     }
-                    c if c.starts_with("DASHTAB")
+                    c if c.starts_with("DASHSCROLL")
+                        || c.starts_with("DASHTAB")
                         || c.starts_with("DASHSIZE")
                         || c.starts_with("HISTPLAY")
                         || c.starts_with("PRESS")
@@ -5561,6 +5562,7 @@ fn dock_hop(
                             *v = true;
                         }
                         d.set_active_tab(n.clamp(0, 5));
+                        d.set_dash_scroll_y(0.0);
                         log_line(&format!("dashtab {n}"));
                     }
                 } else if cmd.starts_with("DASHSIZE") {
@@ -5578,6 +5580,18 @@ fn dock_hop(
                         }
                         d.window().set_size(slint::LogicalSize::new(w.max(320.0), h.max(240.0)));
                         log_line(&format!("dashsize {w}x{h}"));
+                    }
+                } else if cmd.starts_with("DASHSCROLL") {
+                    // Screenshot-verification hook: scroll dashboard content
+                    // (negative = down) so the catalog can be captured.
+                    let px: f32 = cmd
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0.0);
+                    if let Some(d) = dash_timer.upgrade() {
+                        d.set_dash_scroll_y(px);
+                        log_line(&format!("dashscroll {px}"));
                     }
                 } else if cmd.starts_with("HISTPLAY") {
                     // Screenshot/audio-verification hook: play a history row

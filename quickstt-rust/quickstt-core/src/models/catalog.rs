@@ -1173,6 +1173,18 @@ pub fn recommend_model(
             alt_reason: String::new(),
         };
     }
+    // Hosted API models are never the "Best fit" for this machine: they
+    // have no local footprint (size 0 scores a perfect footprint) and
+    // top-tier paper accuracy, so they outscored every local model and
+    // the banner recommended e.g. DeepGram on a machine asking what to
+    // DOWNLOAD and run locally. The recommendation is a hardware-fit
+    // pick over local engines only.
+    let local: Vec<ModelDescriptor> = candidates
+        .iter()
+        .filter(|d| !d.engine_family.is_api())
+        .cloned()
+        .collect();
+    let candidates = if local.is_empty() { candidates } else { &local[..] };
     let lang_wanted = !selected_language.trim().is_empty()
         && !selected_language.eq_ignore_ascii_case("English")
         && !selected_language.eq_ignore_ascii_case("Auto");
@@ -1650,6 +1662,25 @@ mod tests {
         assert_eq!(nemotron_locale_code("Japanese"), "ja-JP");
         // Unknown/unsupported falls back to in-model detection.
         assert_eq!(nemotron_locale_code("Klingon"), "auto");
+    }
+
+    #[test]
+    fn api_models_are_never_the_best_fit() {
+        // A hosted API entry (size 0, accuracy 97) must not outscore a
+        // local model in the hardware recommendation.
+        let api = all_descriptors()
+            .into_iter()
+            .find(|d| d.engine_family.is_api())
+            .expect("an API descriptor is registered");
+        let whistle = all_descriptors()
+            .into_iter()
+            .find(|d| matches!(d.engine_family, EngineFamily::Whistle))
+            .unwrap();
+        let pool = [api, whistle];
+        let rec = recommend_model(
+            &pool, false, "", "", 0, 32, "Auto", RecommendPriority::Balanced,
+        );
+        assert_eq!(rec.name.as_deref(), Some("Cactus Whistle 16M (CACT)"));
     }
 
     #[test]

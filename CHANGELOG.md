@@ -1,5 +1,28 @@
 # Changelog
 
+## [2.0.0-alpha.48] — 2026-11-25
+
+Screenshot-loop fixes from Mint verification of alpha.47.
+
+### Fixed
+- **History rows: the left-side empty space is gone.** The selection
+  checkbox and play circle (and the copy/⋮ buttons) were swapped with
+  `visible:` — an invisible element still reserves its layout slot, so
+  the play button sat 53px in from the row's left edge while the right
+  side was flush. They are now conditional (`if`) elements that occupy
+  no space when absent; play, transcript and timeline share one left
+  edge. Verified in Mint screenshots at small and large sizes.
+- **"Best fit" no longer recommends a hosted API model.** API entries
+  (size 0, top paper accuracy) outscored every local model, so the
+  banner recommended DeepGram Nova-3 as the hardware fit. The
+  recommendation now scores local engines only (regression test
+  `api_models_are_never_the_best_fit`; 34 core tests pass).
+
+### Added
+- `DASHSCROLL px` Mint verification IPC (programmatic dashboard scroll)
+  so the model catalog can be screenshot-verified without a mouse;
+  `DASHTAB` resets the scroll.
+
 ## [2.0.0-alpha.47] — 2026-11-25
 
 Catalog/sidebar/history alignment, discoverable offload, terminating offload.
