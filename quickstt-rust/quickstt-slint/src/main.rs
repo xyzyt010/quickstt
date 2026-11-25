@@ -342,13 +342,16 @@ fn dock_gap(expanded: &Arc<Mutex<bool>>) -> i32 {
     }
 }
 
-/// Dark pill-menu (left-tap) metrics, LOGICAL px — must match menu.slint.
+/// Dark pill-menu geometry, LOGICAL px — must match menu.slint
+/// (VerticalLayout x6 y6, 40px rows, 9px separators):
+/// Hide 6..46, Settings 46..86, sep 86..95, Mic 95..135, Model 135..175,
+/// sep 175..184, History 184..224, Paste 224..264.
 const PM_W: i32 = 248;
-const PM_H: i32 = 234;
-const PM_MIC_Y0: i32 = 83;
-const PM_MIC_Y1: i32 = 117;
-const PM_MOD_Y0: i32 = 117;
-const PM_MOD_Y1: i32 = 151;
+const PM_H: i32 = 264;
+const PM_MIC_Y0: i32 = 95;
+const PM_MIC_Y1: i32 = 135;
+const PM_MOD_Y0: i32 = 135;
+const PM_MOD_Y1: i32 = 175;
 /// Flyout metrics: 264 wide, 38px header block + 32px rows + 6px pad.
 const FLY_W: i32 = 264;
 const FLY_BASE_H: i32 = 44;

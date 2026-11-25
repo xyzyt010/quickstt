@@ -1,5 +1,48 @@
 # Changelog
 
+## [2.0.0-alpha.53] — 2026-11-25
+
+Mint menu hover geometry, mic dedupe, no-red deletes (user interactive test next).
+
+### Fixed
+- **Delete all is no longer red** (from alpha.52 round, sharing this binary).
+  Neutral grey/white pill + label, armed state white/black; Delete-selected
+  and ⋮ delete neutral too; trash icon truly centred via fill layouts.
+- **Mic list drops playback-only devices + duplicates** (alpha.52 denylist
+  plus): HDMI/surround/digital/output/camera/V4L2/MIDI and bare
+  default/pulse duplicates filtered; "(hw…)" duplicates and the double
+  "Analog" naming collapse to one real mic row.
+
+### Fixed
+- **Right-click Microphone/Model hover bands match the real 40px menu.**
+  The Rust hover bands were still the old 34px numbers (Mic 83–117,
+  Model 117–151) while menu.slint rows are 40px (Mic 95–135, Model
+  135–175, menu height 264). Hover over Model fell outside the band,
+  so the flyout spawned then immediately lost its "want" and the main
+  menu appeared to vanish — the "menu within menu, main disappears"
+  glitch. Bands + menu height now match the actual layout exactly,
+  so submenus open and track hover like on Windows.
+- **Mic list deduped further.** ALSA shows one card once per "(hw…)"
+  suffix and once per naming scheme; entries sharing a stripped name
+  collapse to one, and the single analog mic keeps one row. Mint goes
+  from 11 fake rows to the real input only (+ System default).
+
+## [2.0.0-alpha.52] — 2026-11-25
+
+No-red deletes + centred icons, tighter mic list (background audit loop).
+
+### Fixed
+- **Delete all is no longer red.** The pill and its label are neutral
+  grey/white (armed state inverts to white + black text with a black trash
+  icon); Delete-selected and the ⋮-menu delete row went neutral too — no
+  red anywhere in the delete UI. The trash glyph that rode the top edge
+  is now truly centred: the icon+label layouts fill the pill and centre
+  both axes (the old `y = (parent − self)/2` math left them top-aligned).
+- **Mic list drops playback-only devices.** HDMI/surround/digital/output/
+  camera/V4L2/MIDI names (which ALSA enumerates as inputs) and bare
+  default/pulse/pipewire duplicates are filtered, so Mint lists only real
+  microphone inputs.
+
 ## [2.0.0-alpha.51] — 2026-11-25
 
 Sidebar minimum corrected (audit loop caught a truncation).

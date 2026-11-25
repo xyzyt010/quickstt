@@ -8,7 +8,8 @@ use cpal::{SampleFormat, Stream, StreamConfig};
 use tokio::sync::mpsc;
 
 /// True when a device name looks like a real microphone (vs. monitor /
-/// loopback / virtual sinks that ALSA & PipeWire enumerate as "inputs").
+/// loopback / virtual sinks and playback-only cards that ALSA enumerates
+/// as "inputs").
 fn looks_like_mic(name: &str) -> bool {
     let n = name.to_lowercase();
     // Monitor sources, loopback cables, virtual/placeholder devices: never
@@ -19,11 +20,8 @@ fn looks_like_mic(name: &str) -> bool {
         "loopback",
         "echo-cancel",
         "echo cancel",
-        "alsa",
         "null",
         "dummy",
-        "pulse",
-        "pipewire",
         "tts",
         "tts-input",
         "cable input",
@@ -31,8 +29,28 @@ fn looks_like_mic(name: &str) -> bool {
         "virtual-audio",
         "turtle",
         "play valve",
+        // Playback-only cards/devices ALSA still lists as capture-capable.
+        // A real mic is an analog input ("analog"), never a digital
+        // surround/HDMI output. "default" duplicates the System Default row
+        // the menus add themselves — never list it as its own entry.
+        "hdmi",
+        "surround",
+        "digital",
+        "playback",
+        "output",
+        "speaker",
+        "headphone",
+        "headset",
+        "camera",
+        "v4l2",
+        "video",
+        "midi",
+        "bridge",
     ];
     if NON_MIC.iter().any(|p| n.contains(p)) {
+        return false;
+    }
+    if n.trim() == "default" || n.trim() == "pulse" || n.trim() == "pipewire" {
         return false;
     }
     true
@@ -46,11 +64,39 @@ pub fn list_input_devices() -> Vec<String> {
         for d in devices {
             if let Ok(n) = d.name() {
                 let n = n.trim().to_string();
-                if !n.is_empty() && !names.contains(&n) && looks_like_mic(&n) {
+                if !n.is_empty() && looks_like_mic(&n) {
+                    // ALSA enumerates the same card once per (device, sample
+                    // format, rate) — e.g. "HDA Intel PCH: ALC236 Analog
+                    // (hw:0,0)" and "... (hw:0,1)" are the one mic seen
+                    // twice. Dedupe on the name stripped of its "(hw…)"
+                    // suffix so the menu shows the mic once.
+                    let key: String = n
+                        .split('(')
+                        .next()
+                        .unwrap_or(&n)
+                        .trim()
+                        .to_lowercase();
+                    if names.iter().any(|e: &String| {
+                        e.split('(')
+                            .next()
+                            .unwrap_or(e)
+                            .trim()
+                            .to_lowercase()
+                            == key
+                    }) {
+                        continue;
+                    }
                     names.push(n);
                 }
             }
         }
+    }
+    // One physical analog mic seen under several ALSA names ("… Analog
+    // (hw…)" + "Built-in Audio Analog Stereo") is still one mic: keep a
+    // single analog entry so the menu does not list it twice.
+    if let Some(first_entry) = names.iter().find(|n| n.to_lowercase().contains("analog")) {
+        let keep = first_entry.clone();
+        names.retain(|n| n == &keep || !n.to_lowercase().contains("analog"));
     }
     // OS default first (when present) so "System default" ~= names[0].
     if let Some(def) = host.default_input_device() {

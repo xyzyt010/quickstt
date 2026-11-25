@@ -140,10 +140,10 @@ component HistMenuItem inherits Rectangle {
 
     height: 54px;
     border-radius: 8px;
-    background: hit.has-hover ? (root.danger ? #2A1414 : #242424) : transparent;
+    background: hit.has-hover ? #242424 : transparent;
     animate background { duration: 110ms; easing: ease-out; }
 
-    IconSym { glyph: "\u{E14D}"; x: 10px; y: (parent.height - self.height) / 2; visible: root.kind == 0 && !root.copied; tint: root.danger ? #FF8A8A : #B9B9B9; size: 19px; }
+    IconSym { glyph: "\u{E14D}"; x: 10px; y: (parent.height - self.height) / 2; visible: root.kind == 0 && !root.copied; tint: #B9B9B9; size: 19px; }
     IconSym { glyph: "\u{E5CA}"; x: 10px; y: (parent.height - self.height) / 2; visible: root.kind == 0 && root.copied; tint: #4ADE80; size: 19px; }
     IconSym { glyph: "\u{E171}"; x: 10px; y: (parent.height - self.height) / 2; visible: root.kind == 1; size: 19px; }
     Image { source: @image-url("../../assets/delete_white.svg"); x: 10px; y: (parent.height - self.height) / 2; width: 19px; height: 19px; visible: root.kind == 2; image-fit: contain; }
@@ -155,7 +155,7 @@ component HistMenuItem inherits Rectangle {
         height: parent.height;
         text: root.label;
         font-size: 15.5px;
-        color: root.danger ? #FF9A9A : #E8E8E8;
+        color: #E8E8E8;
         vertical-alignment: center;
         overflow: elide;
     }
@@ -2029,27 +2029,30 @@ export component DashboardWidget inherits Window {
                                                                     width: root.delete-all-armed ? 196px : 138px;
                                                                     height: 40px;
                                                                     border-radius: 8px;
-                                                                    background: root.delete-all-armed ? #3A1414 : (del_all_touch.has-hover ? #2A1414 : #161616);
+                                                                    background: root.delete-all-armed ? #FFFFFF : (del_all_touch.has-hover ? #242424 : #161616);
                                                                     border-width: 1px;
-                                                                    border-color: root.delete-all-armed ? #FF6A6A : #3A2020;
+                                                                    border-color: root.delete-all-armed ? #FFFFFF : #303030;
                                                                     animate background { duration: 130ms; easing: ease-out; }
                                                                     animate border-color { duration: 130ms; easing: ease-out; }
                                                                     HorizontalLayout {
-                                                                        y: (parent.height - self.height) / 2;
+                                                                        x: 0px;
+                                                                        y: 0px;
+                                                                        width: parent.width;
+                                                                        height: parent.height;
                                                                         alignment: center;
                                                                         spacing: 8px;
                                                                         Image {
-                                                                            source: @image-url("../../assets/delete_white.svg");
-                                                                            width: 17px;
-                                                                            height: 17px;
-                                                                            visible: !root.delete-all-armed;
+                                                                            source: root.delete-all-armed ? @image-url("../../assets/delete_dark.svg") : @image-url("../../assets/delete_white.svg");
+                                                                            width: 18px;
+                                                                            height: 18px;
                                                                             image-fit: contain;
                                                                             }
                                                                         Text {
                                                                             text: root.delete-all-armed ? "Tap again to confirm" : "Delete all";
                                                                             font-size: 14.5px;
                                                                             font-weight: 700;
-                                                                            color: #FF9A9A;
+                                                                            color: root.delete-all-armed ? #000000 : #E8E8E8;
+                                                                            vertical-alignment: center;
                                                                                 overflow: elide;
                                                                         }
                                                                     }
@@ -2112,7 +2115,10 @@ export component DashboardWidget inherits Window {
                                                                     border-color: #303030;
                                                                     animate background { duration: 130ms; easing: ease-out; }
                                                                     HorizontalLayout {
-                                                                        y: (parent.height - self.height) / 2;
+                                                                        x: 0px;
+                                                                        y: 0px;
+                                                                        width: parent.width;
+                                                                        height: parent.height;
                                                                         alignment: center;
                                                                         spacing: 8px;
                                                                         IconSym { glyph: "\u{E171}"; size: 19px; tint: #E6E6E6; }
@@ -2121,6 +2127,7 @@ export component DashboardWidget inherits Window {
                                                                             font-size: 14.5px;
                                                                             font-weight: 600;
                                                                             color: #E6E6E6;
+                                                                            vertical-alignment: center;
                                                                             }
                                                                     }
                                                                     exp_touch := TouchArea {
@@ -2132,12 +2139,15 @@ export component DashboardWidget inherits Window {
                                                                     width: 182px;
                                                                     height: 40px;
                                                                     border-radius: 8px;
-                                                                    background: del_sel_touch.has-hover ? #2A1414 : #1A1A1A;
+                                                                    background: del_sel_touch.has-hover ? #242424 : #1A1A1A;
                                                                     border-width: 1px;
-                                                                    border-color: #3A2020;
+                                                                    border-color: #303030;
                                                                     animate background { duration: 130ms; easing: ease-out; }
                                                                     HorizontalLayout {
-                                                                        y: (parent.height - self.height) / 2;
+                                                                        x: 0px;
+                                                                        y: 0px;
+                                                                        width: parent.width;
+                                                                        height: parent.height;
                                                                         alignment: center;
                                                                         spacing: 8px;
                                                                         Image { source: @image-url("../../assets/delete_white.svg"); width: 19px; height: 19px; image-fit: contain; }
@@ -2145,7 +2155,8 @@ export component DashboardWidget inherits Window {
                                                                             text: "Delete selected";
                                                                             font-size: 14.5px;
                                                                             font-weight: 600;
-                                                                            color: #FF9A9A;
+                                                                            color: #E8E8E8;
+                                                                            vertical-alignment: center;
                                                                             }
                                                                     }
                                                                     del_sel_touch := TouchArea {
