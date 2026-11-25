@@ -71,6 +71,7 @@ assets = [
   ["../assets/icon_app.png", "usr/share/icons/hicolor/256x256/apps/quickstt.png", "644"],
   ["../../Source/mic_active.svg", "usr/lib/quickstt/mic_active.svg", "644"],
   ["../../Source/mic_inactive.svg", "usr/lib/quickstt/mic_inactive.svg", "644"],
+  ["../assets/delete_red.svg", "usr/lib/quickstt/delete_red.svg", "644"],
   ["../../Source/Untitled-1.svg", "usr/lib/quickstt/Untitled-1.svg", "644"],
   ["../assets/icon_app.png", "usr/lib/quickstt/icon_app.png", "644"],
   ["../target/release/tools/parakeet/parakeet_engine", "usr/lib/quickstt/tools/parakeet/parakeet_engine", "755"],

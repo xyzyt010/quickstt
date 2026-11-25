@@ -766,7 +766,7 @@ impl QuickSttApp {
                     warn!("gtk init failed — system tray unavailable");
                     return;
                 }
-                let dash_item = MenuItem::with_id(TRAY_ID_DASH, "Dashboard", true, None);
+                let dash_item = MenuItem::with_id(TRAY_ID_DASH, "Settings", true, None);
                 let show_item = MenuItem::with_id(TRAY_ID_SHOW, "Show", true, None);
                 let hide_item = MenuItem::with_id(TRAY_ID_HIDE, "Hide", true, None);
                 let quit_item = MenuItem::with_id(TRAY_ID_QUIT, "Quit", true, None);
@@ -799,7 +799,7 @@ impl QuickSttApp {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let dash_item = MenuItem::with_id(TRAY_ID_DASH, "Dashboard", true, None);
+        let dash_item = MenuItem::with_id(TRAY_ID_DASH, "Settings", true, None);
         let show_item = MenuItem::with_id(TRAY_ID_SHOW, "Show", true, None);
         let hide_item = MenuItem::with_id(TRAY_ID_HIDE, "Hide", true, None);
         let quit_item = MenuItem::with_id(TRAY_ID_QUIT, "Quit", true, None);
@@ -1863,7 +1863,7 @@ impl eframe::App for QuickSttApp {
             let wakeword_handle_clone = self.wakeword_handle.clone();
 
             let mut builder = ViewportBuilder::default()
-                .with_title("QuickSTT Advanced Dashboard")
+                .with_title("QuickSTT Settings")
                 .with_inner_size([theme::DASH_WIDTH, theme::DASH_HEIGHT])
                 .with_min_inner_size([600.0, 400.0])
                 .with_decorations(true)

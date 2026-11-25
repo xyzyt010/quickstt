@@ -1,5 +1,52 @@
 # Changelog
 
+## [2.0.0-alpha.46] — 2026-11-25
+
+Settings rename, +2 text everywhere, History rebuild (icons, playback, scroll).
+
+### Fixed
+- **Tray menu is now "Settings" everywhere.** The Windows native tray menu
+  (the owner-drawn overlay), the Linux SNI menu and the legacy reference GUI
+  all said "Dashboard"; they now say "Settings". The Slint window title is
+  "QuickSTT Settings" too.
+- **History playback now actually sounds right.** The output stream was
+  written as mono F32 regardless of device format/rate: on Windows (stereo
+  I16 WASAPI defaults) it built a stream whose clock was the *device* rate
+  while the playhead advanced per interleaved sample — effectively 2x fast
+  and chipmunk-pitched, i.e. unrecognisable. The player now prefers an F32
+  config (falling back to I16/U16 conversion), duplicates mono to every
+  channel per-frame, and linearly resamples 16 kHz recordings to the device
+  rate so position, duration, pitch and progress all track real time.
+- **History progress bar fills strictly left → right.** The played fill is
+  explicitly anchored at `x: 0` and the track itself is `x: 0` (previously
+  left implicit), with track-height blinking removed so the bar cannot
+  shimmer. The elapsed/total clock uses the decoder's true length while
+  playing, so the time now advances in step with the bar.
+- **History rows no longer block scrolling.** Each history card carried a
+  full-area `TouchArea` (for hover feedback) that swallowed drag-pan —
+  the "laggy scrollbar". It is removed; the row selection set is cloned
+  once per sync instead of once per row (60 → 1 clones per tick).
+- **All button icons are centred.** Copy/delete/more glyphs were parked at
+  `6,6` in a 44 px target (top-left), the play/pause triangle at `8,8` in
+  the 44 px circle, history-menu icons at `8,8` in 48 px rows, and the toast
+  tick at `10,6`. They are now centred with `(parent - self) / 2` on both
+  axes — across History, the pill menus and the tray overlay.
+
+### Changed
+- **All UI text is exactly +2 px throughout.** Every `font-size` in every
+  Slint screen (dashboard, pill, menus, textboard, onboarding, dock, shared
+  components) grew by exactly 2 px (e.g. 12 → 14, 13 → 15, 11.5 → 13.5),
+  with row/menu/card heights enlarged in step so nothing clips. The pill
+  shrink-wrap measurement matches the new sizes (17/14 px).
+- **History actions are icon-first.** Delete uses your supplied trash
+  artwork (`delete_red.svg`, recoloured red) for the row delete button,
+  the ⋮ menu "Delete turn", and both bulk deletes ("Delete all",
+  "Delete selected"); "Export audio" gains a download glyph. Bulk controls
+  are now centred icon + label pills instead of bare text.
+- The "Best fit" banner is always visible (previously hidden when no
+  recommendation resolved), so the Models tab never looks empty; catalog
+  cards and action pills grew to fit the +2 text without clipping.
+
 ## [2.0.0-alpha.45] — 2026-11-25
 
 Worker orphan leak fixed; offload always eventually fires; UI text hierarchy.

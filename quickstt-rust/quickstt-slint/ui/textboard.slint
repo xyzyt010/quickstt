@@ -45,8 +45,8 @@ export component TextBoard inherits Window {
     title_touch := TouchArea {
         x: 0px;
         y: 0px;
-        width: 260px;
-        height: 26px;
+        width: 258px;
+        height: 30px;
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                 drag_start();
@@ -62,20 +62,20 @@ export component TextBoard inherits Window {
         x: 10px;
         y: 0px;
         width: 250px;
-        height: 26px;
+        height: 30px;
         text: title_text;
         color: #B0B0B0;
-        font-size: 11px;
+        font-size: 13px;
         vertical-alignment: center;
         overflow: elide;
     }
 
     // Copy button
     copy_btn := Rectangle {
-        x: 268px;
-        y: 4px;
-        width: 36px;
-        height: 18px;
+        x: 266px;
+        y: 3px;
+        width: 42px;
+        height: 24px;
         border-radius: 4px;
         background: copied_indicator ? #1A3A1A : (copy_touch.has-hover ? #2A2A2A : #161616);
         border-width: copied_indicator ? 1px : 0px;
@@ -86,7 +86,7 @@ export component TextBoard inherits Window {
             height: parent.height;
             text: copied_indicator ? "✓" : "Copy";
             color: copied_indicator ? #51E088 : #EDEDED;
-            font-size: 10px;
+            font-size: 12px;
             font-weight: 500;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -103,10 +103,10 @@ export component TextBoard inherits Window {
         x: 314px;
         y: 0px;
         width: 20px;
-        height: 26px;
+        height: 30px;
         text: "×";
         color: close_touch.has-hover ? #FFFFFF : #808080;
-        font-size: 16px;
+        font-size: 18px;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -114,16 +114,16 @@ export component TextBoard inherits Window {
         x: 310px;
         y: 0px;
         width: 26px;
-        height: 26px;
+        height: 30px;
         clicked => { close_board(); }
         mouse-cursor: pointer;
     }
 
     Flickable {
         x: 12px;
-        y: 30px;
+        y: 34px;
         width: 316px;
-        height: 98px;
+        height: 96px;
         viewport-width: self.width;
         viewport-height: body.preferred-height;
         body := TextInput {
@@ -132,7 +132,7 @@ export component TextBoard inherits Window {
             width: 316px;
             text: body_text;
             color: #FFFFFF;
-            font-size: 14px;
+            font-size: 16px;
             font-weight: 500;
             font-family: "Segoe UI";
             wrap: word-wrap;

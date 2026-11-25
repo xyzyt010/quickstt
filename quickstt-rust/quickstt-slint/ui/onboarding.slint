@@ -36,7 +36,7 @@ component PillButton inherits Rectangle {
 
     Text {
         text: root.label;
-        font-size: 13px;
+        font-size: 15px;
         font-weight: 700;
         color: root.primary ? #000000 : (root.danger ? #FF9A9A : #E6E6E6);
         horizontal-alignment: center;
@@ -132,7 +132,7 @@ export component OnboardingWidget inherits Window {
             VerticalLayout {
                 Text {
                     text: "QuickSTT";
-                    font-size: 16px;
+                    font-size: 18px;
                     font-weight: 700;
                     color: #FFFFFF;
                 }
@@ -155,7 +155,7 @@ export component OnboardingWidget inherits Window {
                       root.step == 3 ? "Language" :
                       root.step == 4 ? "Pick your model" :
                       "You are set";
-                font-size: 26px;
+                font-size: 28px;
                 font-weight: 700;
                 color: #FFFFFF;
             }
@@ -166,7 +166,7 @@ export component OnboardingWidget inherits Window {
                       root.step == 3 ? "Auto detects, or pin one language — each model remembers its choice." :
                       root.step == 4 ? "Recommended for this PC — change any time in Settings." :
                       "Defaults are sensible. You can change everything later.";
-                font-size: 13px;
+                font-size: 15px;
                 color: #9A9A9A;
                 wrap: word-wrap;
             }
@@ -213,7 +213,7 @@ export component OnboardingWidget inherits Window {
                             border-color: #2A2A2A;
                             Text {
                                 text: "Ctrl";
-                                font-size: 15px;
+                                font-size: 17px;
                                 font-weight: 700;
                                 color: #FFFFFF;
                                 horizontal-alignment: center;
@@ -229,7 +229,7 @@ export component OnboardingWidget inherits Window {
                             border-color: #2A2A2A;
                             Text {
                                 text: "Space";
-                                font-size: 15px;
+                                font-size: 17px;
                                 font-weight: 700;
                                 color: #FFFFFF;
                                 horizontal-alignment: center;
@@ -239,7 +239,7 @@ export component OnboardingWidget inherits Window {
                     }
                     Text {
                         text: "hold both  ·  release when you are done  ·  100% offline";
-                        font-size: 12px;
+                        font-size: 14px;
                         color: #8E8E8E;
                         horizontal-alignment: center;
                     }
@@ -271,7 +271,7 @@ export component OnboardingWidget inherits Window {
                                 spacing: 2px;
                                 Text {
                                     text: "Let's ship the release notes";
-                                    font-size: 14px;
+                                    font-size: 16px;
                                     color: #EDEDED;
                                     vertical-alignment: center;
                                 }
@@ -349,7 +349,7 @@ export component OnboardingWidget inherits Window {
                         }
                         Text {
                             text: root.step == 1 ? "Ctrl+Space held  ·  speaking  ·  released — text lands at the cursor" : "";
-                            font-size: 11.5px;
+                            font-size: 13.5px;
                             color: #8E8E8E;
                             horizontal-alignment: center;
                         }
@@ -370,7 +370,7 @@ export component OnboardingWidget inherits Window {
                             : (root.demo_phase < 45
                                 ? "2 ·  Hold Ctrl, tap Space, then speak."
                                 : "3 ·  Or hover the pill and click the mic.");
-                        font-size: 13.5px;
+                        font-size: 15.5px;
                         font-weight: 600;
                         color: #FFFFFF;
                         horizontal-alignment: center;
@@ -402,7 +402,7 @@ export component OnboardingWidget inherits Window {
                                 spacing: 3px;
                                 Text {
                                     text: "The quick brown fox";
-                                    font-size: 13px;
+                                    font-size: 15px;
                                     color: #EDEDED;
                                     vertical-alignment: center;
                                 }
@@ -504,7 +504,7 @@ export component OnboardingWidget inherits Window {
                                 animate background { duration: 120ms; }
                                 Text {
                                     text: "Ctrl";
-                                    font-size: 12px;
+                                    font-size: 14px;
                                     font-weight: 700;
                                     color: (root.demo_phase >= 20 && root.demo_phase < 45) ? #000000 : #B9B9B9;
                                     horizontal-alignment: center;
@@ -522,7 +522,7 @@ export component OnboardingWidget inherits Window {
                                 animate background { duration: 120ms; }
                                 Text {
                                     text: "Space";
-                                    font-size: 12px;
+                                    font-size: 14px;
                                     font-weight: 700;
                                     color: (root.demo_phase >= 28 && root.demo_phase < 45) ? #000000 : #B9B9B9;
                                     horizontal-alignment: center;
@@ -535,7 +535,7 @@ export component OnboardingWidget inherits Window {
 
                     Text {
                         text: "Every finished turn also lands in Settings → History with its audio, so you can play it back, copy it, export the audio, or delete everything.";
-                        font-size: 11.5px;
+                        font-size: 13.5px;
                         color: #8E8E8E;
                         wrap: word-wrap;
                         horizontal-alignment: center;
@@ -546,7 +546,7 @@ export component OnboardingWidget inherits Window {
                 // ══ Step 3: language ══
                 if root.step == 3 : VerticalLayout {
                     spacing: 12px;
-                    Text { text: "Transcription language:"; font-size: 13px; color: #E6E6E6; }
+                    Text { text: "Transcription language:"; font-size: 15px; color: #E6E6E6; }
                     ComboBox {
                         height: 42px;
                         model: root.languages;
@@ -562,7 +562,7 @@ export component OnboardingWidget inherits Window {
                                 text: root.selected-language == 0
                                     ? "Auto: the engine detects the spoken language from the audio."
                                     : "Forced: this language is always used, even when another is spoken. Each model remembers its own choice.";
-                                font-size: 12px;
+                                font-size: 14px;
                                 color: #9A9A9A;
                                 wrap: word-wrap;
                             }
@@ -583,19 +583,19 @@ export component OnboardingWidget inherits Window {
                             spacing: 6px;
                             Text {
                                 text: "Recommended for this PC";
-                                font-size: 12px;
+                                font-size: 14px;
                                 font-weight: 700;
                                 color: #FFFFFF;
                             }
                             Text {
                                 text: root.recommend-reason;
-                                font-size: 11.5px;
+                                font-size: 13.5px;
                                 color: #9A9A9A;
                                 wrap: word-wrap;
                             }
                         }
                     }
-                    Text { text: "Choose a model:"; font-size: 13px; color: #E6E6E6; }
+                    Text { text: "Choose a model:"; font-size: 15px; color: #E6E6E6; }
                     ComboBox {
                         height: 42px;
                         model: root.models;
@@ -607,7 +607,7 @@ export component OnboardingWidget inherits Window {
                 // ══ Step 5: preferences ══
                 if root.step == 5 : VerticalLayout {
                     spacing: 10px;
-                    Text { text: "Where finished text goes:"; font-size: 13px; color: #E6E6E6; }
+                    Text { text: "Where finished text goes:"; font-size: 15px; color: #E6E6E6; }
                     HorizontalLayout {
                         spacing: 8px;
                         for i in 2 : Rectangle {
@@ -620,7 +620,7 @@ export component OnboardingWidget inherits Window {
                             animate background { duration: 130ms; easing: ease-out; }
                             Text {
                                 text: i == 0 ? "Type it\n(where I'm typing)" : "Clipboard\n(paste anywhere)";
-                                font-size: 11.5px;
+                                font-size: 13.5px;
                                 font-weight: root.ctrl-space-output == i ? 700 : 500;
                                 color: root.ctrl-space-output == i ? #000000 : #B9B9B9;
                                 horizontal-alignment: center;

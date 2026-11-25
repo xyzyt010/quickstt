@@ -52,14 +52,14 @@ component UpperPill inherits Rectangle {
         Text {
             text: "Dictate";
             color: #CFCFCF;
-            font-size: 15px;
+            font-size: 17px;
             font-weight: 600;
             vertical-alignment: center;
         }
         Text {
             text: "Ctrl + Space";
             color: #FFFFFF;
-            font-size: 15px;
+            font-size: 17px;
             font-weight: 700;
             vertical-alignment: center;
         }
@@ -113,7 +113,7 @@ component UpperPill inherits Rectangle {
         Text {
             text: "Transcribing…";
             color: #FFFFFF;
-            font-size: 12px;
+            font-size: 14px;
             font-weight: 600;
             vertical-alignment: center;
         }
@@ -141,7 +141,7 @@ component UpperPill inherits Rectangle {
         Text {
             text: "Done";
             color: #FFFFFF;
-            font-size: 12px;
+            font-size: 14px;
             font-weight: 600;
             vertical-alignment: center;
         }
@@ -155,7 +155,7 @@ component UpperPill inherits Rectangle {
         height: parent.height;
         text: live_text;
         color: #FF8A80;
-        font-size: 11px;
+        font-size: 13px;
         font-weight: 600;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -170,7 +170,7 @@ component UpperPill inherits Rectangle {
         height: parent.height;
         text: alert_text;
         color: #FFD54F;
-        font-size: 11px;
+        font-size: 13px;
         font-weight: 600;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -514,7 +514,7 @@ export component PillWidget inherits Window {
 export component TrayMenu inherits Window {
     title: "";
     width: 220px;
-    height: 180px;
+    height: 216px;
     background: transparent;
     no-frame: true;
 
@@ -535,12 +535,12 @@ export component TrayMenu inherits Window {
         x: 6px;
         y: 6px;
         width: 208px;
-        height: 168px;
+        height: 204px;
         spacing: 0px;
 
         // Row 0: Dashboard
         Rectangle {
-            height: 30px;
+            height: 36px;
             border-radius: 6px;
             background: t0.has-hover ? #21262D : transparent;
             t0 := TouchArea {
@@ -549,10 +549,10 @@ export component TrayMenu inherits Window {
             }
             Text {
                 x: 10px;
-                height: 30px;
+                height: 36px;
                 text: "Settings";
                 color: #F0F6FC;
-                font-size: 13px;
+                font-size: 15px;
                 font-weight: 500;
                 vertical-alignment: center;
             }
@@ -560,7 +560,7 @@ export component TrayMenu inherits Window {
 
         // Row 1: Show Widget
         Rectangle {
-            height: 30px;
+            height: 36px;
             border-radius: 6px;
             background: t1.has-hover ? #21262D : transparent;
             t1 := TouchArea {
@@ -569,10 +569,10 @@ export component TrayMenu inherits Window {
             }
             Text {
                 x: 10px;
-                height: 30px;
+                height: 36px;
                 text: "Show Widget";
                 color: #F0F6FC;
-                font-size: 13px;
+                font-size: 15px;
                 font-weight: 500;
                 vertical-alignment: center;
             }
@@ -580,7 +580,7 @@ export component TrayMenu inherits Window {
 
         // Row 2: Hide Widget
         Rectangle {
-            height: 30px;
+            height: 36px;
             border-radius: 6px;
             background: t2.has-hover ? #21262D : transparent;
             t2 := TouchArea {
@@ -589,10 +589,10 @@ export component TrayMenu inherits Window {
             }
             Text {
                 x: 10px;
-                height: 30px;
+                height: 36px;
                 text: "Hide Widget";
                 color: #F0F6FC;
-                font-size: 13px;
+                font-size: 15px;
                 font-weight: 500;
                 vertical-alignment: center;
             }
@@ -600,7 +600,7 @@ export component TrayMenu inherits Window {
 
         // Row 3: Hide for 1 hour (snooze — app, tray, triggers keep running)
         Rectangle {
-            height: 30px;
+            height: 36px;
             border-radius: 6px;
             background: t4.has-hover ? #21262D : transparent;
             t4 := TouchArea {
@@ -609,10 +609,10 @@ export component TrayMenu inherits Window {
             }
             Text {
                 x: 10px;
-                height: 30px;
+                height: 36px;
                 text: "Hide for 1 hour";
                 color: #F0F6FC;
-                font-size: 13px;
+                font-size: 15px;
                 font-weight: 500;
                 vertical-alignment: center;
             }
@@ -620,7 +620,7 @@ export component TrayMenu inherits Window {
 
         // Row: Show the intro tour again (the onboarding is always re-runnable)
         Rectangle {
-            height: 30px;
+            height: 36px;
             border-radius: 6px;
             background: t5.has-hover ? #21262D : transparent;
             t5 := TouchArea {
@@ -629,10 +629,10 @@ export component TrayMenu inherits Window {
             }
             Text {
                 x: 10px;
-                height: 30px;
+                height: 36px;
                 text: "Show the intro tour";
                 color: #F0F6FC;
-                font-size: 13px;
+                font-size: 15px;
                 font-weight: 500;
                 vertical-alignment: center;
             }
@@ -652,7 +652,7 @@ export component TrayMenu inherits Window {
 
         // Row 3: Quit App
         Rectangle {
-            height: 30px;
+            height: 36px;
             border-radius: 6px;
             background: t3.has-hover ? #21262D : transparent;
             t3 := TouchArea {
@@ -661,10 +661,10 @@ export component TrayMenu inherits Window {
             }
             Text {
                 x: 10px;
-                height: 30px;
+                height: 36px;
                 text: "Quit App";
                 color: #F0F6FC;
-                font-size: 13px;
+                font-size: 15px;
                 font-weight: 500;
                 vertical-alignment: center;
             }

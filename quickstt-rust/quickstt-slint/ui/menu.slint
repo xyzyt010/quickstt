@@ -7,7 +7,7 @@
 export component PillMenu inherits Window {
     title: "";
     width: 248px;
-    height: 234px;
+    height: 264px;
     background: transparent;
     no-frame: true;
 
@@ -49,7 +49,7 @@ export component PillMenu inherits Window {
         x: 0px;
         y: 0px;
         width: 248px;
-        height: 234px;
+        height: 264px;
         border-radius: 14px;
         background: #1B1B1C;
         opacity: menu_op;
@@ -60,11 +60,11 @@ export component PillMenu inherits Window {
             x: 6px;
             y: 6px;
             width: 236px;
-            height: 222px;
+            height: 252px;
             spacing: 0px;
 
             Rectangle {
-                height: 34px;
+                height: 40px;
                 border-radius: 8px;
                 background: h_hide.has-hover ? #2A2A2C : transparent;
                 animate background { duration: 100ms; }
@@ -74,15 +74,15 @@ export component PillMenu inherits Window {
                 }
                 Text {
                     x: 10px;
-                    height: 34px;
+                    height: 40px;
                     text: "Hide for 1 hour";
                     color: #FFFFFF;
-                    font-size: 13px;
+                    font-size: 15px;
                     vertical-alignment: center;
                 }
             }
             Rectangle {
-                height: 34px;
+                height: 40px;
                 border-radius: 8px;
                 background: h_set.has-hover ? #2A2A2C : transparent;
                 animate background { duration: 100ms; }
@@ -92,10 +92,10 @@ export component PillMenu inherits Window {
                 }
                 Text {
                     x: 10px;
-                    height: 34px;
+                    height: 40px;
                     text: "Settings";
                     color: #FFFFFF;
-                    font-size: 13px;
+                    font-size: 15px;
                     vertical-alignment: center;
                 }
             }
@@ -104,7 +104,7 @@ export component PillMenu inherits Window {
                 Rectangle { x: 10px; y: 4px; width: 216px; height: 1px; background: #2A2A2C; }
             }
             Rectangle {
-                height: 34px;
+                height: 40px;
                 border-radius: 8px;
                 background: h_mic.has-hover ? #2A2A2C : transparent;
                 animate background { duration: 100ms; }
@@ -114,25 +114,25 @@ export component PillMenu inherits Window {
                 }
                 Text {
                     x: 10px;
-                    height: 34px;
+                    height: 40px;
                     text: "Microphone";
                     color: #FFFFFF;
-                    font-size: 13px;
+                    font-size: 15px;
                     vertical-alignment: center;
                 }
                 Text {
                     x: 204px;
                     width: 22px;
-                    height: 34px;
+                    height: 40px;
                     text: "›";
                     color: #A0A0A0;
-                    font-size: 16px;
+                    font-size: 18px;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
             }
             Rectangle {
-                height: 34px;
+                height: 40px;
                 border-radius: 8px;
                 background: h_mod.has-hover ? #2A2A2C : transparent;
                 animate background { duration: 100ms; }
@@ -142,19 +142,19 @@ export component PillMenu inherits Window {
                 }
                 Text {
                     x: 10px;
-                    height: 34px;
+                    height: 40px;
                     text: "Model";
                     color: #FFFFFF;
-                    font-size: 13px;
+                    font-size: 15px;
                     vertical-alignment: center;
                 }
                 Text {
                     x: 204px;
                     width: 22px;
-                    height: 34px;
+                    height: 40px;
                     text: "›";
                     color: #A0A0A0;
-                    font-size: 16px;
+                    font-size: 18px;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
@@ -164,7 +164,7 @@ export component PillMenu inherits Window {
                 Rectangle { x: 10px; y: 4px; width: 216px; height: 1px; background: #2A2A2C; }
             }
             Rectangle {
-                height: 34px;
+                height: 40px;
                 border-radius: 8px;
                 background: h_hist.has-hover ? #2A2A2C : transparent;
                 animate background { duration: 100ms; }
@@ -174,15 +174,15 @@ export component PillMenu inherits Window {
                 }
                 Text {
                     x: 10px;
-                    height: 34px;
+                    height: 40px;
                     text: "Transcript history";
                     color: #FFFFFF;
-                    font-size: 13px;
+                    font-size: 15px;
                     vertical-alignment: center;
                 }
             }
             Rectangle {
-                height: 34px;
+                height: 40px;
                 border-radius: 8px;
                 background: h_paste.has-hover ? #2A2A2C : transparent;
                 animate background { duration: 100ms; }
@@ -192,10 +192,10 @@ export component PillMenu inherits Window {
                 }
                 Text {
                     x: 10px;
-                    height: 34px;
+                    height: 40px;
                     text: "Paste last transcript";
                     color: #FFFFFF;
-                    font-size: 13px;
+                    font-size: 15px;
                     vertical-alignment: center;
                 }
             }
@@ -248,7 +248,7 @@ export component MenuFlyout inherits Window {
             height: 32px;
             text: head_text;
             color: #A0A0A0;
-            font-size: 11px;
+            font-size: 13px;
             font-weight: 600;
             vertical-alignment: center;
             overflow: elide;
@@ -275,7 +275,7 @@ export component MenuFlyout inherits Window {
                     height: 32px;
                     text: items[i];
                     color: #FFFFFF;
-                    font-size: 12px;
+                    font-size: 14px;
                     vertical-alignment: center;
                     overflow: elide;
                 }
@@ -285,7 +285,7 @@ export component MenuFlyout inherits Window {
                     height: 32px;
                     text: "✓";
                     color: #FFFFFF;
-                    font-size: 13px;
+                    font-size: 15px;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
