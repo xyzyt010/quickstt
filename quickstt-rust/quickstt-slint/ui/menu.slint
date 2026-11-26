@@ -18,6 +18,11 @@ export component PillMenu inherits Window {
     callback settings_row();
     callback mic_row();
     callback model_row();
+    /// Pure-hover open (no pin): the TouchArea `entered` signal. This is
+    /// the reliable hover path on Linux, where the physical band hit-test
+    /// can miss by a scale/sample.
+    callback mic_hovered();
+    callback model_hovered();
     callback history_row();
     callback paste_row();
     /// Escape anywhere inside the menu closes it (same dismissal path as
@@ -110,6 +115,9 @@ export component PillMenu inherits Window {
                 animate background { duration: 100ms; }
                 h_mic := TouchArea {
                     clicked => { mic_row(); }
+                    changed has-hover => {
+                        if (self.has-hover) { mic_hovered(); }
+                    }
                     mouse-cursor: pointer;
                 }
                 Text {
@@ -138,6 +146,9 @@ export component PillMenu inherits Window {
                 animate background { duration: 100ms; }
                 h_mod := TouchArea {
                     clicked => { model_row(); }
+                    changed has-hover => {
+                        if (self.has-hover) { model_hovered(); }
+                    }
                     mouse-cursor: pointer;
                 }
                 Text {

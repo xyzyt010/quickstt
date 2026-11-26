@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.0.0-alpha.57] — 2026-11-27
+
+Side-dock menu below the pill; hover submenus reliable; anywhere-click closes; Mint mic list cleaned.
+
+### Fixed
+- **Side-dock menu opens below the pill.** Menu now sits under the expanded dictate pill, edge-aligned to the dock, on both sides (above only when there is no room below). Background wakewords/claps stay armed while it is open.
+- **Model/Mic hover always opens the flyout.** Slint hover signals open the submenus without pinning, even where the physical band hit-test misses.
+- **Click anywhere outside menu/flyout closes.** The cluster is menu + flyout + the narrow gap between them; the pill no longer counts as inside, the old 12px oversized corridor is gone, and the post-open grace is 200ms. One press outside closes.
+- **Mint mic list is real mics only.** Pseudo-devices (PipeWire Stream, PulseAudio, JACK, default:CARD…) are filtered by an allowlist ("mic"/"analog"/"array"/"built-in"), plus monitor/HDMI/etc. remain blocked. Plus two `looks_like_mic` unit tests.
+
 ## [2.0.0-alpha.56] — 2026-11-26
 
 Clap-Start speech-context gate; detector thresholds tightened.

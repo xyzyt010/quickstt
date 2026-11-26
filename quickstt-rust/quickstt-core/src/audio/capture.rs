@@ -53,7 +53,25 @@ fn looks_like_mic(name: &str) -> bool {
     if n.trim() == "default" || n.trim() == "pulse" || n.trim() == "pipewire" {
         return false;
     }
-    true
+    // Allowlist: ALSA/PipeWire enumerate many pseudo-devices ("PipeWire
+    // Stream", "PulseAudio Volume", "JACK", "default:CARD", ...). A real
+    // capture device always carries one of these markers — the Mint
+    // result "a bunch of weird non-existent mic options" was those
+    // pseudo-devices. The OS default itself (always a real capture) is
+    // added separately by the caller.
+    const MIC_HINT: &[&str] = &[
+        "mic",
+        "microphone",
+        "analog",
+        "array",
+        "built-in",
+        "builtin",
+        "headset mic",
+    ];
+    if MIC_HINT.iter().any(|p| n.contains(p)) {
+        return true;
+    }
+    false
 }
 
 /// List OS input (microphone) device names in enumeration order.
@@ -418,5 +436,41 @@ impl AudioCaptureManager {
             let _ = stream.pause();
         }
         tracing::info!("Transcription audio stream stopped.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_mics_pass_allowlist() {
+        for name in [
+            "Built-in Audio Analog Stereo",
+            "HDA Intel PCH: ALC236 Analog (hw:0,0)",
+            "Microphone Array (Intel Smart Sound Technology)",
+            "USB Microphone",
+            "Rode NT-USB Microphone",
+        ] {
+            assert!(looks_like_mic(name), "real mic must pass: {name}");
+        }
+    }
+
+    #[test]
+    fn pseudo_and_monitor_devices_fail() {
+        for name in [
+            "PipeWire Stream",
+            "PulseAudio Volume",
+            "default:CARD",
+            "Monitor of Built-in Analog Stereo",
+            "alsa_output.pci-0000_00_1f.3.hdmi-surround71.monitor",
+            "bluez_output.84_9D_4B_8E_BE_75.1.monitor",
+            "Dummy Output",
+            "JACK Audio",
+            "default",
+            "pulse",
+        ] {
+            assert!(!looks_like_mic(name), "pseudo device must fail: {name}");
+        }
     }
 }

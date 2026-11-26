@@ -4395,25 +4395,37 @@ fn dock_hop(
                 // Explicit anchor passed by the right-click handler after it
                 // synchronously expanded the pill — the rect in the values.
                 Some((px, py, pw, ph)) => {
-                    let pill_cx = px + pw / 2;
-                    let pill_cy = py + ph / 2;
                     let is_bottom = py + ph >= wb - 32;
-                    let is_right = !is_bottom && px + pw >= wr - 32;
                     let mut nx;
                     let mut ny;
                     if is_bottom {
+                        let pill_cx = px + pw / 2;
                         nx = (pill_cx - ww / 2).clamp(wl, (wr - ww).max(wl));
                         ny = py - hh - gap;
                         if ny < wt {
                             nx = (px + pw + gap).min((wr - ww).max(wl));
-                            ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
+                            ny = (py - hh / 2).clamp(wt, (wb - hh).max(wt));
                         }
-                    } else if is_right {
-                        nx = (px - gap - ww).max(wl);
-                        ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
                     } else {
-                        nx = (px + pw + gap).min((wr - ww).max(wl));
-                        ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
+                        // Side docks: the menu goes BELOW the (expanded)
+                        // pill, aligned to the dock edge — never beside it
+                        // and never overlapping the dictate capsule.
+                        let is_right = px + pw >= wr - 32;
+                        if is_right {
+                            nx = (px + pw - ww).clamp(wl, (wr - ww).max(wl));
+                        } else {
+                            nx = px.clamp(wl, (wr - ww).max(wl));
+                        }
+                        ny = py + ph + gap;
+                        if ny + hh > wb {
+                            // No room below: try above before clamping.
+                            let above = py - hh - gap;
+                            ny = if above >= wt {
+                                above
+                            } else {
+                                (wb - hh).max(wt)
+                            };
+                        }
                     }
                     (nx, ny)
                 }
@@ -4424,25 +4436,35 @@ fn dock_hop(
                     let py = ppos.y;
                     let pw = psz.width as i32;
                     let ph = psz.height as i32;
-                    let pill_cx = px + pw / 2;
-                    let pill_cy = py + ph / 2;
                     let is_bottom = py + ph >= wb - 32;
-                    let is_right = !is_bottom && px + pw >= wr - 32;
                     let mut nx;
                     let mut ny;
                     if is_bottom {
+                        let pill_cx = px + pw / 2;
                         nx = (pill_cx - ww / 2).clamp(wl, (wr - ww).max(wl));
                         ny = py - hh - gap;
                         if ny < wt {
                             nx = (px + pw + gap).min((wr - ww).max(wl));
-                            ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
+                            ny = (py - hh / 2).clamp(wt, (wb - hh).max(wt));
                         }
-                    } else if is_right {
-                        nx = (px - gap - ww).max(wl);
-                        ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
                     } else {
-                        nx = (px + pw + gap).min((wr - ww).max(wl));
-                        ny = (pill_cy - hh / 2).clamp(wt, (wb - hh).max(wt));
+                        // Side docks: below the (expanded) pill, aligned
+                        // to the dock edge — never beside/overlapping.
+                        let is_right = px + pw >= wr - 32;
+                        if is_right {
+                            nx = (px + pw - ww).clamp(wl, (wr - ww).max(wl));
+                        } else {
+                            nx = px.clamp(wl, (wr - ww).max(wl));
+                        }
+                        ny = py + ph + gap;
+                        if ny + hh > wb {
+                            let above = py - hh - gap;
+                            ny = if above >= wt {
+                                above
+                            } else {
+                                (wb - hh).max(wt)
+                            };
+                        }
                     }
                     (nx, ny)
                 }
@@ -4672,6 +4694,61 @@ fn dock_hop(
                     }
                 }
                 log_line("menu: model flyout pinned");
+            }
+        });
+    }
+    {
+        // Pure hover (no pin): the Slint TouchArea `entered` fires even
+        // when the Linux physical band hit-test misses. Opens immediately;
+        // the poll loop keeps it open while hovered (pin stays untouched).
+        let pm = pillmenu.as_weak();
+        let fly = flyout.as_weak();
+        let pw = pill.as_weak();
+        let state = state.clone();
+        let ui = flyout_ui.clone();
+        let opened = menu2_open_at.clone();
+        pillmenu.on_mic_hovered(move || {
+            *mlock(&opened) = Some(std::time::Instant::now());
+            if let Ok(u) = ui.lock() {
+                if u.mode == SubMode::Mic {
+                    return;
+                }
+            }
+            if let Some((items, rect, idx_map)) =
+                open_submenu(&fly, &pm, &pw, &state, SubMode::Mic)
+            {
+                if let Ok(mut u) = ui.lock() {
+                    u.mode = SubMode::Mic;
+                    u.items = items;
+                    u.idx_map = idx_map;
+                    u.rect = Some(rect);
+                }
+            }
+        });
+    }
+    {
+        let pm = pillmenu.as_weak();
+        let fly = flyout.as_weak();
+        let pw = pill.as_weak();
+        let state = state.clone();
+        let ui = flyout_ui.clone();
+        let opened = menu2_open_at.clone();
+        pillmenu.on_model_hovered(move || {
+            *mlock(&opened) = Some(std::time::Instant::now());
+            if let Ok(u) = ui.lock() {
+                if u.mode == SubMode::Model {
+                    return;
+                }
+            }
+            if let Some((items, rect, idx_map)) =
+                open_submenu(&fly, &pm, &pw, &state, SubMode::Model)
+            {
+                if let Ok(mut u) = ui.lock() {
+                    u.mode = SubMode::Model;
+                    u.items = items;
+                    u.idx_map = idx_map;
+                    u.rect = Some(rect);
+                }
             }
         });
     }
@@ -6319,6 +6396,10 @@ fn dock_hop(
                             .map(|u| u.rect)
                             .unwrap_or(None);
 
+                        // Bridge corridor: only the gap between menu and
+                        // flyout (plus the two rows) keeps the cluster open.
+                        // The old full-bounding-box +12 swalled outside
+                        // clicks and the menu felt frozen.
                         let in_corridor = if let (SubMode::Mic | SubMode::Model, Some((fx, fy, fw, fh))) = (active, fly_rect) {
                             let (row_y0, row_y1) = if active == SubMode::Mic {
                                 (PM_MIC_Y0, PM_MIC_Y1)
@@ -6327,11 +6408,16 @@ fn dock_hop(
                             };
                             let ry0 = mpos.y + (row_y0 as f32 * scale).round() as i32;
                             let ry1 = mpos.y + (row_y1 as f32 * scale).round() as i32;
-                            let min_y = ry0.min(fy) - 12;
-                            let max_y = ry1.max(fy + fh) + 12;
-                            let min_x = mpos.x.min(fx) - 12;
-                            let max_x = (mpos.x + mw).max(fx + fw) + 12;
-                            cx >= min_x && cx <= max_x && cy >= min_y && cy <= max_y
+                            let min_y = ry0.min(fy);
+                            let max_y = ry1.max(fy + fh);
+                            let menu_right = mpos.x + mw;
+                            let fly_right = fx + fw;
+                            let (gap_x0, gap_x1) = if fx >= menu_right {
+                                (menu_right, fx)
+                            } else {
+                                (fly_right, mpos.x)
+                            };
+                            cx >= gap_x0 && cx <= gap_x1 && cy >= min_y && cy <= max_y
                         } else {
                             false
                         };
@@ -6411,12 +6497,15 @@ fn dock_hop(
                                 && cy >= ppos.y - m
                                 && cy <= ppos.y + ph + m
                         };
-                        let in_cluster = in_menu || in_fly || in_pill || in_corridor;
+                        // Pill excluded: per spec the cluster is menu +
+                        // flyout only — a press on the pill (or anywhere
+                        // else) outside those two closes it.
+                        let in_cluster = in_menu || in_fly || in_corridor;
                         let fresh = menu2_open_at_timer
                             .lock()
                             .unwrap()
                             .map(|at| {
-                                at.elapsed() < std::time::Duration::from_millis(500)
+                                at.elapsed() < std::time::Duration::from_millis(200)
                             })
                             .unwrap_or(false);
 
