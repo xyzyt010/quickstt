@@ -399,15 +399,18 @@ impl TransientDetector {
         // Fixed sensitivity 1.0 (legacy default), hardened for real rooms:
         // a trigger clap is a LOUD onset — it needs a peak spike (≥5×
         // floor), a sharp frame-to-frame jump (≥4×), AND a high absolute
-        // peak (≥ 3000 ≈ −21dBFS). The absolute floor is the key
+        // peak (≥ 4500 ≈ −17dBFS). The absolute floor is the key
         // discriminator: household impulses (door thumps, coughs, desk
-        // knocks land 2000–3000 near a laptop mic) pass every ratio test, so
+        // knocks land 2000–4000 near a laptop mic) pass every ratio test, so
         // ratios alone start transcription "on even a little sound". A
         // deliberate hand clap near the mic hits 5000+ at 25×+ floor; room
         // noise in a loud room (floor ~900 from TV/chatter) sits at ~3-4×
         // and is blocked outright. (Ratio bar tightened 3→5: a 3.6×-floor
-        // room-noise onset fired the widget on the live log.)
-        // Escape hatch: an extremely loud onset (≥10× floor, abs ≥ 4000,
+        // room-noise onset fired the widget on the live log. Absolute bar
+        // tightened 3000→4500: media speech plosives at 3000-4000 kept
+        // firing hands-free sessions — see the speech-context gate in
+        // `wakeword_service`, which is the primary media guard.)
+        // Escape hatch: an extremely loud onset (≥10× floor, abs ≥ 6000,
         // jump ≥ 3.5×, wide burst) fires on peak strength so close-range
         // claps over a loud background are never missed. The hatch
         // deliberately also requires a jump AND width — pure peak tests stay
@@ -415,11 +418,11 @@ impl TransientDetector {
         // (Jump bar tightened 2.5→3.5: sustained vowels sit at ~2.8 and
         // were firing speech onsets that the arbiter then had to veto —
         // fewer false onsets, cleaner clap path.)
-        let peak_triggered = peak_over_floor >= 5.0 && max_abs >= 3000.0;
-        let jump_triggered = rms_jump >= 4.0 && max_abs >= 3000.0;
+        let peak_triggered = peak_over_floor >= 5.0 && max_abs >= 4500.0;
+        let jump_triggered = rms_jump >= 4.0 && max_abs >= 4500.0;
         let wide_triggered = width >= MIN_BURST_WIDTH;
         let bang_triggered =
-            peak_over_floor >= 10.0 && max_abs >= 4000.0 && rms_jump >= 3.5;
+            peak_over_floor >= 10.0 && max_abs >= 6000.0 && rms_jump >= 3.5;
         // Voiced veto (throat-clear / high-voice fix): a hand clap is a
         // broadband noise burst (high zero-crossing rate + high
         // sample-to-sample variation vs RMS). Voiced sounds — throat clears,

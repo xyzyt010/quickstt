@@ -28,6 +28,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc as tmpsc;
 use tracing::{info, warn};
 
@@ -186,6 +187,7 @@ fn run_service_thread(
     // the UI syncs the persisted value at startup.
     let mut transient = TransientDetector::new();
     let mut arbiter = TransientArbiter::new();
+    let mut last_vad_speech: Option<Instant> = None;
     let mut transient_action: u32 = TRANSIENT_DISABLED;
     let mut wakewords_enabled: bool = false;
 
@@ -201,6 +203,7 @@ fn run_service_thread(
                                 vad.reset();
                                 transient.reset();
                                 arbiter.reset();
+                                last_vad_speech = None;
                                 engine.reset();
                                 running.store(true, Ordering::Release);
                                 info!("Wakeword background streaming");
@@ -217,6 +220,7 @@ fn run_service_thread(
                         vad.reset();
                         transient.reset();
                         arbiter.reset();
+                        last_vad_speech = None;
                         engine.reset();
                         info!("Wakeword background stopped");
                     }
@@ -258,6 +262,7 @@ fn run_service_thread(
                                 vad.reset();
                                 transient.reset();
                                 arbiter.reset();
+                                last_vad_speech = None;
                                 engine.reset();
                             }
                             Err(e) => {
@@ -290,6 +295,7 @@ fn run_service_thread(
                         &mut vad,
                         &mut transient,
                         &mut arbiter,
+                        &mut last_vad_speech,
                         &mut transient_action,
                         wakewords_enabled,
                         &chunk,
@@ -317,6 +323,7 @@ fn run_service_thread(
                         vad.reset();
                         transient.reset();
                         arbiter.reset();
+                        last_vad_speech = None;
                         engine.reset();
                         running.store(true, Ordering::Release);
                         info!("Wakeword background streaming");
@@ -399,6 +406,7 @@ fn process_audio_chunk(
     vad: &mut EnergyVad,
     transient: &mut TransientDetector,
     arbiter: &mut TransientArbiter,
+    last_vad_speech: &mut Option<Instant>,
     transient_action: &mut u32,
     wakewords_enabled: bool,
     chunk: &[i16],
@@ -426,6 +434,21 @@ fn process_audio_chunk(
     // arbiter all stay silent here.
     if !wakewords_enabled {
         return false;
+    }
+
+    // Speech context for the clap-Start gate. Video/dialogue starts a
+    // session over and over because isolated speech bursts look like
+    // isolated impulses (sharp onset + pause). A real hand clap in a
+    // quiet room has no recent VAD speech; media speech always does.
+    // Run the VAD once, here, so the gate and the wakeword path below
+    // share one verdict.
+    let vad_speech = vad.process(chunk).speech_likely;
+    let speech_context = vad_speech
+        || last_vad_speech
+            .map(|t| t.elapsed() < Duration::from_millis(8000))
+            .unwrap_or(false);
+    if vad_speech {
+        *last_vad_speech = Some(Instant::now());
     }
 
     // Clap first: detections go through the two-chunk arbiter: only
@@ -462,6 +485,12 @@ fn process_audio_chunk(
         } {
             arbiter.reset();
             if *transient_action == TRANSIENT_START {
+                if speech_context {
+                    info!(
+                        "Background acoustic {} suppressed — speech context (clap-Start requires quiet, not media speech)",
+                        kind.as_str()
+                    );
+                } else {
                 // NOTE: `last_stats()` here is the QUIET confirmation chunk
                 // (the arbiter holds one chunk), so the onset numbers come
                 // from `last_onset_stats()` — the detection chunk.
@@ -499,6 +528,7 @@ fn process_audio_chunk(
                 let _ = orchestrator_tx.try_send(OrchestratorCommand::ShowWidget);
                 running.store(false, Ordering::Release);
                 return true;
+                }
             } else if *transient_action == TRANSIENT_STOP {
                 // Parked background has no session to stop; the foreground
                 // detector covers STOP while recording. Still log the
@@ -532,8 +562,6 @@ fn process_audio_chunk(
     if !wakewords_enabled {
         return false;
     }
-
-    let vad_speech = vad.process(chunk).speech_likely;
 
     let events = engine.process_chunk(chunk, vad_speech);
     // Heartbeat every ~5s of streaming: mic level, gate verdict, cache

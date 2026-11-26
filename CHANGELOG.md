@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.0.0-alpha.56] — 2026-11-26
+
+Clap-Start speech-context gate; detector thresholds tightened.
+
+### Fixed
+- **Clap no longer starts on media speech.** Background clap Start now
+  requires quiet: if the energy VAD has seen speech in the last 8s (or on
+  this chunk), the candidate is suppressed with a log line instead of
+  popping the widget. A deliberate hand clap in a quiet room still fires.
+- **Raw detector bars tightened.** Absolute onset peak 3000→4500 (bang
+  hatch 4000→6000), so sub-4500 speech plosives never become candidates.
+
 ## [2.0.0-alpha.55] — 2026-11-25
 
 Tray reachable hidden, mic/toggle single-press, "Silent!" pill, retrigger guard.
