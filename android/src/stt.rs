@@ -2,7 +2,9 @@
 // transcribe.cpp), the model catalog (with Cactus Whistle 16M bundled inside
 // the APK), and the on-device RAM onloading / offloading runtime manager.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
+#[cfg(target_os = "android")]
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -681,6 +683,48 @@ fn spawn_engine_process(
     }
 }
 
+/// First bytes that prove a download is a model, not an HTML error page.
+/// GGUF = "GGUF", whisper ggml = "ggml"/"lmgg", Cactus container magic
+/// \x84\x2a\xe1\x05. An HTML page (starts with '<') is never a model.
+pub fn header_is_model(head: &[u8]) -> bool {
+    if head.is_empty() || head[0] == b'<' {
+        return false;
+    }
+    head.starts_with(b"GGUF")
+        || head.starts_with(b"ggml")
+        || head.starts_with(b"lmgg")
+        || head.starts_with(&[0x84, 0x2a, 0xe1, 0x05])
+        // Cactus .cact is a binary container without a published magic;
+        // any non-HTML binary of plausible size is accepted for it (the
+        // size gate in model_installed is the second check).
+        || !head.iter().take(64).all(|b| b.is_ascii_graphic() || b.is_ascii_whitespace())
+}
+
+/// Validate a just-downloaded model file; deletes it and errors if the
+/// bytes are an error page / truncated stub instead of a model.
+pub fn validate_downloaded_model(index: usize) -> Result<(), String> {
+    let spec = model(index);
+    let Some(path) = model_path(index) else {
+        return Err("no model path available".into());
+    };
+    let head = {
+        use std::io::Read as _;
+        let mut f = std::fs::File::open(&path)
+            .map_err(|e| format!("downloaded file cannot be read: {e}"))?;
+        let mut buf = [0u8; 64];
+        let n = f.read(&mut buf).unwrap_or(0);
+        buf[..n].to_vec()
+    };
+    if !header_is_model(&head) || !model_installed(index) {
+        let _ = std::fs::remove_file(&path);
+        return Err(format!(
+            "{} download did not deliver a model file (bad header or too small) — removed",
+            spec.name
+        ));
+    }
+    Ok(())
+}
+
 /// Download a model, reporting progress (done, total) in bytes.
 #[cfg(target_os = "android")]
 pub fn download_model<F: FnMut(u64, u64) + 'static>(
@@ -693,7 +737,8 @@ pub fn download_model<F: FnMut(u64, u64) + 'static>(
         return Ok(());
     }
     let path = model_path(index).ok_or("no writable app directory")?;
-    crate::platform::download_file_with_progress(spec.url, &path, spec.min_bytes, progress)
+    crate::platform::download_file_with_progress(spec.url, &path, spec.min_bytes, progress)?;
+    validate_downloaded_model(index)
 }
 
 #[cfg(not(target_os = "android"))]
@@ -1079,6 +1124,15 @@ mod tests {
         assert_eq!(clean_transcript_output(sample), "Hello world.");
         let empty = "run: ok\ntext: (empty)\n";
         assert_eq!(clean_transcript_output(empty), "");
+    }
+
+    #[test]
+    fn downloaded_header_rejects_html_error_pages() {
+        assert!(!header_is_model(b"<html>404</html>"));
+        assert!(!header_is_model(b""));
+        assert!(header_is_model(b"GGUF...."));
+        assert!(header_is_model(b"ggml...."));
+        assert!(header_is_model(&[0x84, 0x2a, 0xe1, 0x05, 1, 2]));
     }
 
     #[test]

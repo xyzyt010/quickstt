@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.0.0-alpha.58] — 2026-11-28
+
+Minimal settings polish + Android perfection pass.
+
+### Desktop — fixed / removed
+- **No duplicate Active indicator in the model catalog.** The pill beside the model name is gone (only "Best fit" may sit there); the active state is shown only by the right-edge Active/Select button.
+- **All dropdowns get a rotating chevron.** New `ChevronDropdown` (Provider / Model / Language / cleanup / Ctrl+Space / clap / per-model choices, onboarding, and the Catalog header): collapsed = chevron down, expanded = chevron up, smooth 160ms rotation, inline expansion so nothing clips in scroll views.
+- **Model offloading shrunk and unified.** Grey hint paragraphs removed from both offloading cards (vertical size reduced), old checkbox brackets removed, checkbox now reads "Auto-offload speech model when idle (API-based models: always automatic)", and General's card is an exact duplicate of Speech Models → Model offloading (same controls). Default offload delay is now **5 seconds**.
+- **Guiding/hint texts removed**: General subtitle, Transcription History hints, cleanup explanation, Widget/WakeWords/System subtitles, sensitivity/clap explanations.
+- **".lrc export" toggle removed** from the shortened **System Startup** section — synchronized .lrc export is always on (forced in settings load/save).
+- **Cleanup models are explicit downloads.** Selecting a cleanup engine no longer silently downloads: the dropdown row shows Downloaded / Not downloaded, a Download button with size, and a live % progress bar. Failed downloads can be retried.
+
+### Android — perfected (see android/ANDROID_PERFECTION_REPORT.md)
+- Desktop monochrome theme (no blue), `ChevronDropdown`, ≥48dp targets, no duplicate Active marker, status/download lines actually rendered.
+- **Typing only via the sanctioned IME path**: voice bar appears only for a real editable `EditorInfo` while QuickSTT is the selected keyboard; live `setComposingText`, final `commitText`; password/no-save fields commit-only (never history/clipboard/logs). Accessibility/`INJECT_EVENTS` rejected and proven absent from the APK.
+- Durable versioned history store, persisted configurable auto-offload, Groq/OpenAI/Deepgram with Keystore-encrypted keys and the keyed-only/downloaded-only catalog rule, validated resumable downloads. Signed APK builds; `cargo test` 18+1 pass.
+
 ## [2.0.0-alpha.57] — 2026-11-27
 
 Side-dock menu below the pill; hover submenus reliable; anywhere-click closes; Mint mic list cleaned.

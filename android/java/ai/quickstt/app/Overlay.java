@@ -256,8 +256,13 @@ public final class Overlay {
     }
 
     /** True when the QuickSTT Voice Auto-Type input method is both enabled and selected. */
-    public static boolean accessibilityEnabled(Context context) {
+    public static boolean imeReady(Context context) {
         return QuickSttInputMethodService.isReady(context);
+    }
+
+    /** True when the currently bound editor is a password / no-save field. */
+    public static boolean currentFieldSensitive() {
+        return QuickSttInputMethodService.isCurrentFieldSensitive();
     }
 
     /** True when the QuickSTT Voice Auto-Type input method is enabled in system settings. */
@@ -265,8 +270,8 @@ public final class Overlay {
         return QuickSttInputMethodService.isEnabled(context);
     }
 
-    /** Open the Android Keyboard settings or Input Method Picker so the user can enable auto-typing. */
-    public static String openAccessibilitySettings(Context context) {
+    /** Open the Android Keyboard settings or Input Method Picker so the user can enable the voice IME. */
+    public static String openImeSettings(Context context) {
         return QuickSttInputMethodService.openSettingsOrPicker(context);
     }
 

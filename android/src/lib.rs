@@ -12,9 +12,11 @@
 //!     background, slight purple highlights, and 60/120fps super-smooth white
 //!     waveforms (no microphone icons).
 
+mod api;
 mod audio;
 mod conditioner;
 mod platform;
+mod store;
 mod stt;
 
 slint::include_modules!();
@@ -30,6 +32,145 @@ struct PendingTurn {
     seconds: i32,
     status: String,
     ok: bool,
+    /// Model/API that produced the text (for the history record).
+    model_name: String,
+    /// True for password/no-save fields: never persisted or copied.
+    sensitive: bool,
+    /// History record id (0 when history was off / nothing persisted).
+    history_id: u64,
+}
+
+/// One entry of the Listen model dropdown (downloaded locals + connected API).
+#[derive(Clone)]
+enum ModelOption {
+    Local(usize),
+    Api(String, String),
+}
+
+static MODEL_OPTIONS: Mutex<Vec<ModelOption>> = Mutex::new(Vec::new());
+static MEM_TURN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Persist a finished turn (history.jsonl + retained WAV) when enabled.
+/// Called on the worker thread; sensitive turns never reach here.
+fn persist_history_turn(turn: &mut PendingTurn) {
+    if !HISTORY_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(dir) = stt::work_dir() else { return };
+    let id = store::now_ms();
+    // Retain this turn's WAV next to the history file.
+    let audio_name = {
+        let src = stt::wav_path("quickstt-turn.wav");
+        let audio_dir = dir.join("history_audio");
+        let name = format!("turn-{id}.wav");
+        if src.exists() && std::fs::create_dir_all(&audio_dir).is_ok()
+            && std::fs::copy(&src, audio_dir.join(&name)).is_ok()
+        {
+            Some(name)
+        } else {
+            None
+        }
+    };
+    let rec = store::HistoryRecord {
+        id,
+        text: turn.text.clone(),
+        ts_ms: id,
+        seconds: turn.seconds,
+        model: turn.model_name.clone(),
+        audio: audio_name,
+    };
+    if let Ok(mut guard) = HISTORY.lock() {
+        if let Some(hist) = guard.as_mut() {
+            let evicted = hist.add(rec);
+            for name in evicted {
+                let _ = std::fs::remove_file(dir.join("history_audio").join(name));
+            }
+            let _ = hist.save();
+            turn.history_id = id;
+        }
+    }
+}
+
+fn history_turn_row(rec: &store::HistoryRecord) -> Turn {
+    Turn {
+        id: rec.id.to_string().into(),
+        text: rec.text.clone().into(),
+        when: store::when_label(rec.ts_ms, store::now_ms()).into(),
+        seconds: rec.seconds,
+        model: rec.model.clone().into(),
+    }
+}
+
+/// Rebuild the Listen model dropdown: downloaded locals + API models whose
+/// provider has a stored key (desktop model-menu rule). Nothing else is
+/// offered, so a pick can never land on an unusable model.
+fn refresh_model_options(ui: &AppWindow) {
+    let mut options: Vec<ModelOption> = Vec::new();
+    let mut names: Vec<slint::SharedString> = Vec::new();
+    for (idx, spec) in stt::MODELS.iter().enumerate() {
+        if api::local_selectable(stt::model_installed(idx)) {
+            options.push(ModelOption::Local(idx));
+            names.push(spec.name.into());
+        }
+    }
+    let settings = settings_snapshot();
+    for prov in api::PROVIDERS {
+        let has_key = platform::api_has_key(prov.id);
+        for model_id in prov.models {
+            if api::api_selectable(prov.id, model_id, has_key) {
+                options.push(ModelOption::Api(prov.id.to_string(), model_id.to_string()));
+                names.push(format!("{} \u{b7} {}", prov.name, model_id).into());
+            }
+        }
+    }
+    if names.is_empty() {
+        names.push("No model downloaded yet".into());
+    }
+    let selected = if settings.using_api() {
+        options.iter().position(|o| matches!(o, ModelOption::Api(pr, m) if *pr == settings.api_provider && *m == settings.api_model))
+    } else {
+        let current = ui.get_selected_model().max(0) as usize;
+        options.iter().position(|o| matches!(o, ModelOption::Local(i) if *i == current))
+    };
+    if let Ok(mut guard) = MODEL_OPTIONS.lock() {
+        *guard = options;
+    }
+    ui.set_model_names(Rc::new(slint::VecModel::from(names)).into());
+    ui.set_model_selected_option(selected.unwrap_or(0) as i32);
+    ui.set_using_api(settings.using_api());
+    if settings.using_api() {
+        if let Some(prov) = api::provider(&settings.api_provider) {
+            ui.set_active_api_label(
+                format!("{} \u{b7} {}", prov.name, settings.api_model).into(),
+            );
+        }
+    } else {
+        ui.set_active_api_label("".into());
+    }
+}
+
+fn refresh_api_ui(ui: &AppWindow) {
+    let settings = settings_snapshot();
+    let items: Vec<ApiProviderItem> = api::PROVIDERS
+        .iter()
+        .map(|prov| {
+            let connected = platform::api_has_key(prov.id);
+            let selected = if settings.api_provider == prov.id {
+                prov.models.iter().position(|m| *m == settings.api_model).unwrap_or(0)
+            } else {
+                0
+            };
+            ApiProviderItem {
+                provider_id: prov.id.into(),
+                name: prov.name.into(),
+                connected,
+                models: Rc::new(slint::VecModel::from(prov.models.iter().map(|m| slint::SharedString::from(*m)).collect::<Vec<_>>())).into(),
+                selected_model: selected as i32,
+            }
+        })
+        .collect();
+    ui.set_api_providers(Rc::new(slint::VecModel::from(items)).into());
+    refresh_model_options(ui);
 }
 
 /// Global recording & transcription state so the floating squircle widget and
@@ -39,6 +180,51 @@ static BG_STOP: AtomicBool = AtomicBool::new(false);
 static BG_BUSY: AtomicBool = AtomicBool::new(false);
 static LIVE_MODE: AtomicBool = AtomicBool::new(true);
 static AUTO_OFFLOAD: AtomicBool = AtomicBool::new(true);
+static OFFLOAD_IDLE_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(store::DEFAULT_OFFLOAD_IDLE_SECS);
+static HISTORY_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Persisted settings + history, initialised in `build_ui` from filesDir.
+static SETTINGS: Mutex<Option<store::Settings>> = Mutex::new(None);
+static HISTORY: Mutex<Option<store::HistoryStore>> = Mutex::new(None);
+
+fn settings_snapshot() -> store::Settings {
+    SETTINGS
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_default()
+}
+
+/// Mutate + persist settings atomically (settings.json in filesDir).
+fn update_settings<F: FnOnce(&mut store::Settings)>(f: F) {
+    let snapshot = {
+        let Ok(mut guard) = SETTINGS.lock() else { return };
+        let settings = guard.get_or_insert_with(store::Settings::default);
+        f(settings);
+        settings.clone()
+    };
+    if let Some(dir) = stt::work_dir() {
+        let _ = snapshot.save(&dir);
+    }
+    AUTO_OFFLOAD.store(snapshot.auto_offload, Ordering::SeqCst);
+    OFFLOAD_IDLE_SECS.store(snapshot.offload_idle_secs, Ordering::SeqCst);
+    LIVE_MODE.store(snapshot.live_mode, Ordering::SeqCst);
+    HISTORY_ENABLED.store(snapshot.history_enabled, Ordering::SeqCst);
+}
+
+fn using_api() -> Option<(String, String)> {
+    let s = settings_snapshot();
+    if s.using_api() && platform::api_has_key(&s.api_provider) {
+        Some((s.api_provider, s.api_model))
+    } else {
+        None
+    }
+}
+
+fn offload_idle_secs() -> u64 {
+    OFFLOAD_IDLE_SECS.load(Ordering::SeqCst)
+}
 static SERVICE_STARTED: AtomicBool = AtomicBool::new(false);
 static SHARED_PENDING: Mutex<Vec<PendingTurn>> = Mutex::new(Vec::new());
 static SHARED_LAST_TEXT: Mutex<String> = Mutex::new(String::new());
@@ -191,8 +377,9 @@ fn trigger_record_toggle() {
         return;
     }
 
+    let api_mode = using_api();
     let mut model_index = stt::selected();
-    if !stt::model_installed(model_index) {
+    if api_mode.is_none() && !stt::model_installed(model_index) {
         stt::ensure_bundled_models();
         if !stt::model_installed(model_index) {
             if stt::model_installed(0) {
@@ -228,8 +415,8 @@ fn trigger_record_toggle() {
         return;
     }
 
-    let live_mode = LIVE_MODE.load(Ordering::SeqCst);
-    let needs_onload = stt::loaded_model_index() != Some(model_index);
+    let live_mode = LIVE_MODE.load(Ordering::SeqCst) && api_mode.is_none();
+    let needs_onload = api_mode.is_none() && stt::loaded_model_index() != Some(model_index);
     let onload_pending = Arc::new(AtomicBool::new(needs_onload));
 
     DISCARD_RECORDING.store(false, Ordering::SeqCst);
@@ -490,22 +677,35 @@ fn trigger_record_toggle() {
         // Deliver output immediately on the worker thread so cross-app typing works
         // even when `NativeActivity` is in the background!
         if turn.ok {
-            if let Ok(mut slot) = SHARED_LAST_TEXT.lock() {
-                *slot = turn.text.clone();
+            // Password / no-save editor: commit through the IME only.
+            // Never history, never clipboard, never last-text, never logs.
+            turn.sensitive = platform::focused_field_sensitive();
+            if turn.sensitive {
+                let typed = platform::commit_final_text(&turn.text);
+                turn.status = if typed {
+                    "Typed into private field (not saved)".to_string()
+                } else {
+                    "Private field — could not type (keyboard not active)".to_string()
+                };
+            } else {
+                if let Ok(mut slot) = SHARED_LAST_TEXT.lock() {
+                    *slot = turn.text.clone();
+                }
+                let typed_in_box = if platform::has_focused_text_box() {
+                    platform::commit_final_text(&turn.text)
+                } else if !platform::has_window_focus() {
+                    platform::inject_text(&turn.text).is_ok()
+                } else {
+                    false
+                };
+                platform::copy_to_clipboard(&turn.text);
+                turn.status = if typed_in_box {
+                    "Typed into text box — tap field and paste if nothing appeared".to_string()
+                } else {
+                    "Copied to clipboard — tap the field and paste".to_string()
+                };
+                persist_history_turn(&mut turn);
             }
-            let typed_in_box = if platform::has_focused_text_box() {
-                platform::commit_final_text(&turn.text)
-            } else if !platform::has_window_focus() {
-                platform::inject_text(&turn.text).is_ok()
-            } else {
-                false
-            };
-            platform::copy_to_clipboard(&turn.text);
-            turn.status = if typed_in_box {
-                "Typed into text box".to_string()
-            } else {
-                "Copied to clipboard".to_string()
-            };
         }
 
         platform::update_overlay_level(0.0, false, false);
@@ -518,15 +718,15 @@ fn trigger_record_toggle() {
             list.push(turn);
         }
 
-        // Background 30-second idle auto-offload watchdog so RAM is freed 30s
-        // after stopping even if the app window is in the background.
+        // Background idle auto-offload watchdog so RAM is freed after the
+        // configured idle seconds even if the app window is in the background.
         std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(31));
+            std::thread::sleep(std::time::Duration::from_secs(offload_idle_secs() + 1));
             if AUTO_OFFLOAD.load(Ordering::SeqCst)
                 && !BG_RECORDING.load(Ordering::SeqCst)
                 && !BG_BUSY.load(Ordering::SeqCst)
             {
-                if let Some(offload_msg) = stt::check_idle_offload(30) {
+                if let Some(offload_msg) = stt::check_idle_offload(offload_idle_secs()) {
                     if let Some(weak) = BUBBLE_UI.lock().ok().and_then(|g| g.clone()) {
                         on_ui(move || {
                             if let Some(ui) = weak.upgrade() {
@@ -640,6 +840,7 @@ fn model_catalog() -> Vec<ModelItem> {
 }
 
 fn update_ui_model_lists(ui: &AppWindow) {
+    refresh_model_options(ui);
     let catalog = model_catalog();
     let installed_only: Vec<ModelItem> = catalog
         .iter()
@@ -716,7 +917,7 @@ fn bubble(
 
 fn refresh_overlay_state(ui: &AppWindow) {
     ui.set_ime_enabled(platform::ime_enabled());
-    ui.set_auto_type_ok(platform::accessibility_enabled());
+    ui.set_auto_type_ok(platform::ime_ready());
     let granted = platform::can_draw_overlays();
     ui.set_overlay_ok(granted);
     let want_pill = platform::pill_on_focus();
@@ -932,7 +1133,56 @@ pub fn build_ui() -> AppWindow {
         }
     }
 
-    let turns = Rc::new(slint::VecModel::from(Vec::<Turn>::new()));
+    // Durable state first: settings + history survive force-stop.
+    let saved = if let Some(dir) = stt::work_dir() {
+        let settings = store::Settings::load(&dir);
+        let hist = store::HistoryStore::load(&dir);
+        if let Ok(mut slot) = SETTINGS.lock() {
+            *slot = Some(settings.clone());
+        }
+        if let Ok(mut slot) = HISTORY.lock() {
+            *slot = Some(hist);
+        }
+        AUTO_OFFLOAD.store(settings.auto_offload, Ordering::SeqCst);
+        OFFLOAD_IDLE_SECS.store(settings.offload_idle_secs, Ordering::SeqCst);
+        LIVE_MODE.store(settings.live_mode, Ordering::SeqCst);
+        HISTORY_ENABLED.store(settings.history_enabled, Ordering::SeqCst);
+        Some(settings)
+    } else {
+        None
+    };
+    if let Some(settings) = &saved {
+        ui.set_auto_offload(settings.auto_offload);
+        ui.set_live_mode(settings.live_mode);
+        ui.set_history_enabled(settings.history_enabled);
+        ui.set_language_index(api::language_index(&settings.language) as i32);
+    }
+    ui.set_language_names(
+        Rc::new(slint::VecModel::from(
+            api::LANGUAGES.iter().map(|(_, n)| slint::SharedString::from(*n)).collect::<Vec<_>>(),
+        ))
+        .into(),
+    );
+    ui.set_offload_options(
+        Rc::new(slint::VecModel::from(
+            api::OFFLOAD_CHOICES
+                .iter()
+                .map(|secs| slint::SharedString::from(format!("Free RAM after {secs}s idle")))
+                .collect::<Vec<_>>(),
+        ))
+        .into(),
+    );
+    ui.set_offload_index(
+        saved.as_ref().map(|st| api::offload_index(st.offload_idle_secs)).unwrap_or(1) as i32,
+    );
+    refresh_api_ui(&ui);
+
+    let initial_turns: Vec<Turn> = HISTORY
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|h| h.records.iter().map(history_turn_row).collect()))
+        .unwrap_or_default();
+    let turns = Rc::new(slint::VecModel::from(initial_turns));
     ui.set_turns(turns.clone().into());
 
     let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -976,6 +1226,21 @@ pub fn build_ui() -> AppWindow {
                 return;
             }
             let spec = stt::model(index);
+            if let Some(dir) = stt::model_path(index).and_then(|p| p.parent().map(|x| x.to_path_buf())) {
+                let free = platform::free_space_bytes(&dir);
+                let needed = spec.min_bytes + 32 * 1024 * 1024;
+                if free >= 0 && (free as u64) < needed {
+                    ui.set_status_text(
+                        format!(
+                            "Not enough free space for {} ({} free)",
+                            spec.name,
+                            stt::human_size(free as u64)
+                        )
+                        .into(),
+                    );
+                    return;
+                }
+            }
             let start_info = format!("Connecting to HuggingFace · 0% of {}", spec.size);
             ui.set_model_downloading(true);
             ui.set_model_progress(0.0);
@@ -1210,7 +1475,7 @@ pub fn build_ui() -> AppWindow {
             let Some(ui) = weak.upgrade() else { return };
             let next = !ui.get_auto_offload();
             ui.set_auto_offload(next);
-            AUTO_OFFLOAD.store(next, Ordering::SeqCst);
+            update_settings(|st| st.auto_offload = next);
             let msg = if next {
                 "Auto onload/offload enabled"
             } else {
@@ -1227,7 +1492,7 @@ pub fn build_ui() -> AppWindow {
             let Some(ui) = weak.upgrade() else { return };
             let next = !ui.get_live_mode();
             ui.set_live_mode(next);
-            LIVE_MODE.store(next, Ordering::SeqCst);
+            update_settings(|st| st.live_mode = next);
             let msg = if next {
                 "Live mode on — types into focused text box as you speak"
             } else {
@@ -1243,10 +1508,10 @@ pub fn build_ui() -> AppWindow {
         ui.on_open_auto_type_settings(move || {
             let Some(ui) = weak.upgrade() else { return };
             let ime_en = platform::ime_enabled();
-            match platform::open_accessibility_settings() {
+            match platform::open_ime_settings() {
                 Ok(()) => {
                     ui.set_ime_enabled(ime_en);
-                    ui.set_auto_type_ok(platform::accessibility_enabled());
+                    ui.set_auto_type_ok(platform::ime_ready());
                     if ime_en {
                         ui.set_status_text(
                             "Select “QuickSTT Voice Auto-Type” in the keyboard picker".into(),
@@ -1311,6 +1576,10 @@ pub fn build_ui() -> AppWindow {
         ui.on_onboarding_finish(move || {
             let Some(ui) = weak.upgrade() else { return };
             platform::save_onboarding_done();
+            update_settings(|st| {
+                st.onboarding_done = true;
+                st.pill_on_focus = true;
+            });
             platform::save_pill_on_focus(true);
             ui.set_overlay_enabled(true);
             if platform::can_draw_overlays() {
@@ -1380,6 +1649,8 @@ pub fn build_ui() -> AppWindow {
             ui.set_overlay_enabled(wanted);
             if !wanted {
                 platform::hide_overlay();
+                platform::stop_service();
+                SERVICE_STARTED.store(false, Ordering::SeqCst);
                 note(&weak, &log, "Pill won't pop up over text boxes.");
                 ui.set_status_text("Pill won't pop up over text boxes".into());
                 return;
@@ -1407,6 +1678,184 @@ pub fn build_ui() -> AppWindow {
                 &log,
                 "Squircle widget will pop up whenever a text field is focused.",
             );
+        });
+    }
+
+    // ── History / settings / API callbacks ────────────────────────────────
+    {
+        let weak = ui.as_weak();
+        let turns_del = turns.clone();
+        ui.on_delete_turn(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let id_text = id.to_string();
+            // Remove the row from the screen model.
+            for i in 0..turns_del.row_count() {
+                if let Some(row) = turns_del.row_data(i) {
+                    if row.id.to_string() == id_text {
+                        turns_del.remove(i);
+                        break;
+                    }
+                }
+            }
+            // Remove the persisted record + its retained audio.
+            if let Ok(parsed) = id_text.parse::<u64>() {
+                if let Ok(mut guard) = HISTORY.lock() {
+                    if let Some(hist) = guard.as_mut() {
+                        if let Some(audio) = hist.delete(parsed) {
+                            if let Some(dir) = stt::work_dir() {
+                                let _ = std::fs::remove_file(dir.join("history_audio").join(audio));
+                            }
+                        }
+                        let _ = hist.save();
+                    }
+                }
+            }
+            ui.set_status_text("Deleted one history entry".into());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_toggle_history(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let next = !ui.get_history_enabled();
+            ui.set_history_enabled(next);
+            update_settings(|st| st.history_enabled = next);
+            ui.set_status_text(
+                if next { "History on — turns are saved on this device" } else { "History off — turns are not saved" }.into(),
+            );
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_pick_offload(move |idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            let secs = api::OFFLOAD_CHOICES
+                .get(idx.max(0) as usize)
+                .copied()
+                .unwrap_or(store::DEFAULT_OFFLOAD_IDLE_SECS);
+            ui.set_offload_index(idx.max(0));
+            update_settings(|st| st.offload_idle_secs = secs);
+            ui.set_status_text(format!("Model RAM freed after {secs}s idle").into());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_pick_language(move |idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            let (code, name) = api::LANGUAGES
+                .get(idx.max(0) as usize)
+                .copied()
+                .unwrap_or(api::LANGUAGES[0]);
+            ui.set_language_index(idx.max(0));
+            update_settings(|st| st.language = code.to_string());
+            ui.set_status_text(format!("Language: {name}").into());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_save_api_key(move |provider| {
+            let Some(ui) = weak.upgrade() else { return };
+            let provider = provider.to_string();
+            let key = ui.get_api_key_input().to_string();
+            if key.trim().is_empty() {
+                ui.set_status_text("Paste an API key first".into());
+                return;
+            }
+            if platform::api_set_key(&provider, &key) {
+                ui.set_api_key_input("".into());
+                // Selecting a provider auto-selects its first model.
+                if let Some(prov) = api::provider(&provider) {
+                    let first = prov.models.first().copied().unwrap_or("");
+                    update_settings(|st| {
+                        st.api_provider = provider.clone();
+                        st.api_model = first.to_string();
+                    });
+                }
+                refresh_api_ui(&ui);
+                ui.set_status_text(format!("{} connected — API model active", provider).into());
+            } else {
+                ui.set_status_text("Key could not be stored securely on this device".into());
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_clear_api_key(move |provider| {
+            let Some(ui) = weak.upgrade() else { return };
+            let provider = provider.to_string();
+            platform::api_clear_key(&provider);
+            if settings_snapshot().api_provider == provider {
+                update_settings(|st| {
+                    st.api_provider.clear();
+                    st.api_model.clear();
+                });
+            }
+            refresh_api_ui(&ui);
+            ui.set_status_text(format!("{provider} disconnected — key deleted").into());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_pick_api_model(move |provider, idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            let provider = provider.to_string();
+            if !platform::api_has_key(&provider) {
+                ui.set_status_text(api::unselectable_reason(true, false, false).into());
+                return;
+            }
+            let Some(prov) = api::provider(&provider) else { return };
+            let Some(model_id) = prov.models.get(idx.max(0) as usize) else { return };
+            update_settings(|st| {
+                st.api_provider = provider.clone();
+                st.api_model = model_id.to_string();
+            });
+            refresh_api_ui(&ui);
+            ui.set_status_text(format!("Using {} \u{b7} {}", prov.name, model_id).into());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_use_local_models(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            update_settings(|st| {
+                st.api_provider.clear();
+                st.api_model.clear();
+            });
+            refresh_api_ui(&ui);
+            ui.set_status_text("On-device model active".into());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
+        ui.on_pick_model_option(move |idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            let option = MODEL_OPTIONS
+                .lock()
+                .ok()
+                .and_then(|opts| opts.get(idx.max(0) as usize).cloned());
+            match option {
+                Some(ModelOption::Local(local)) => {
+                    ui.invoke_pick_model(local as i32);
+                }
+                Some(ModelOption::Api(provider, model_id)) => {
+                    if !platform::api_has_key(&provider) {
+                        ui.set_status_text(api::unselectable_reason(true, false, false).into());
+                        return;
+                    }
+                    update_settings(|st| {
+                        st.api_provider = provider.clone();
+                        st.api_model = model_id.clone();
+                    });
+                    refresh_api_ui(&ui);
+                    ui.set_status_text(format!("Using {provider} \u{b7} {model_id}").into());
+                    note(&weak, &log, "API model selected from Listen picker.");
+                }
+                None => {
+                    ui.set_status_text("Download a model in Models first".into());
+                    ui.set_tab(2);
+                }
+            }
         });
     }
 
@@ -1560,6 +2009,12 @@ pub fn build_ui() -> AppWindow {
             let spec = stt::model(index);
             ui.set_selected_model(index as i32);
             stt::save_selected(index);
+            update_settings(|st| {
+                st.selected_model = index;
+                st.api_provider.clear();
+                st.api_model.clear();
+            });
+            refresh_api_ui(&ui);
             sync_model_ui(&ui);
             note(&weak, &log, &format!("Selected model: {}", spec.name));
             if stt::model_installed(index) {
@@ -1683,7 +2138,7 @@ pub fn build_ui() -> AppWindow {
                     }
                 }
                 Err(e) => {
-                    note(&weak_a, &log_a, &format!("Direct key injection fallback: {e}"));
+                    note(&weak_a, &log_a, &format!("Typing unavailable: {e}"));
                     platform::copy_to_clipboard(&text);
                     ui.set_status_text("Copied to clipboard — ready to paste".into());
                     if ui.get_overlay_enabled() {
@@ -1730,6 +2185,17 @@ pub fn build_ui() -> AppWindow {
             let Some(ui) = weak_d.upgrade() else { return };
             while turns_clear.row_count() > 0 {
                 turns_clear.remove(0);
+            }
+            if let Ok(mut guard) = HISTORY.lock() {
+                if let Some(hist) = guard.as_mut() {
+                    let audio = hist.clear();
+                    let _ = hist.save();
+                    if let Some(dir) = stt::work_dir() {
+                        for name in audio {
+                            let _ = std::fs::remove_file(dir.join("history_audio").join(name));
+                        }
+                    }
+                }
             }
             ui.set_status_text("Cleared dictation history".into());
             note(&weak_d, &log_d, "Cleared dictation history.");
@@ -1795,7 +2261,7 @@ pub fn build_ui() -> AppWindow {
                         && !BG_BUSY.load(Ordering::SeqCst)
                         && !ui.get_model_loading()
                     {
-                        if let Some(offload_msg) = stt::check_idle_offload(30) {
+                        if let Some(offload_msg) = stt::check_idle_offload(offload_idle_secs()) {
                             sync_model_ui(&ui);
                             ui.set_status_text(offload_msg.clone().into());
                             note(&weak, &log, &offload_msg);
@@ -1822,12 +2288,22 @@ pub fn build_ui() -> AppWindow {
                     if turn.ok {
                         ui.set_live_text(turn.text.clone().into());
                         ui.set_has_text(true);
+                        let row_id = if turn.history_id > 0 {
+                            turn.history_id.to_string()
+                        } else {
+                            format!(
+                                "mem-{}",
+                                MEM_TURN_SEQ.fetch_add(1, Ordering::SeqCst)
+                            )
+                        };
                         turns.insert(
                             0,
                             Turn {
+                                id: row_id.into(),
                                 text: turn.text.clone().into(),
                                 when: "just now".into(),
                                 seconds: turn.seconds,
+                                model: turn.model_name.clone().into(),
                             },
                         );
                         ui.set_status_text(turn.status.clone().into());
@@ -1850,7 +2326,7 @@ pub fn build_ui() -> AppWindow {
         let index = stt::selected();
         ui.set_selected_model(index as i32);
         ui.set_ime_enabled(platform::ime_enabled());
-        ui.set_auto_type_ok(platform::accessibility_enabled());
+        ui.set_auto_type_ok(platform::ime_ready());
 
         let initial_onload = stt::model_installed(index);
         if initial_onload {
@@ -1921,8 +2397,8 @@ pub fn build_ui() -> AppWindow {
             ui.set_background_ok(true);
         }
 
-        // First-run onboarding pages (dark grey #121212, interactive).
-        let done = platform::onboarding_done();
+        // First-run onboarding pages (desktop black theme, interactive).
+        let done = settings_snapshot().onboarding_done || platform::onboarding_done();
         ui.set_show_onboarding(!done);
         ui.set_onboarding_page(0);
     }
@@ -1952,6 +2428,9 @@ fn transcribe_samples(samples: Vec<f32>, health: u8, model: usize) -> PendingTur
         seconds: 0,
         status,
         ok: false,
+        model_name: stt::model(model).name.to_string(),
+        sensitive: false,
+        history_id: 0,
     };
     if samples.is_empty() {
         return fail("Nothing was recorded".into());
@@ -1966,28 +2445,38 @@ fn transcribe_samples(samples: Vec<f32>, health: u8, model: usize) -> PendingTur
         return fail("No speech detected".into());
     }
     let wav = stt::wav_path("quickstt-turn.wav");
-    let result = audio::write_wav(&wav, &samples, audio::SAMPLE_RATE as u32)
-        .map_err(|e| format!("WAV write error ({}): {e}", wav.display()))
-        .and_then(|_| stt::transcribe(&wav, model));
-    match result {
+    if let Err(e) = audio::write_wav(&wav, &samples, audio::SAMPLE_RATE as u32) {
+        return fail(format!("WAV write error ({}): {e}", wav.display()));
+    }
+    // Cloud path: a connected API model replaces the local engine entirely.
+    if let Some((provider, model_id)) = using_api() {
+        let language = settings_snapshot().language;
+        return match platform::api_transcribe(&provider, &model_id, &wav, &language) {
+            Ok(text) if !text.trim().is_empty() => PendingTurn {
+                text: text.trim().to_string(),
+                seconds,
+                status: "Transcribed via API".into(),
+                ok: true,
+                model_name: model_id,
+                sensitive: false,
+                history_id: 0,
+            },
+            Ok(_) => fail("No speech detected".into()),
+            Err(e) => fail(format!("API transcription failed: {e}")),
+        };
+    }
+    match stt::transcribe(&wav, model) {
         Ok(text) if !text.trim().is_empty() => PendingTurn {
             text: text.trim().to_string(),
             seconds,
             status: "Transcribed & copied to clipboard".into(),
             ok: true,
+            model_name: stt::model(model).name.to_string(),
+            sensitive: false,
+            history_id: 0,
         },
-        Ok(_) => PendingTurn {
-            text: String::new(),
-            seconds,
-            status: "No speech detected".into(),
-            ok: false,
-        },
-        Err(e) => PendingTurn {
-            text: String::new(),
-            seconds,
-            status: format!("Transcription failed: {e}"),
-            ok: false,
-        },
+        Ok(_) => fail("No speech detected".into()),
+        Err(e) => fail(format!("Transcription failed: {e}")),
     }
 }
 

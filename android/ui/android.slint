@@ -2,9 +2,19 @@
 // #121212 Dark grey + blue accent · squircle · near-typography · portrait-locked.
 
 export struct Turn {
+    id: string,
     text: string,
     when: string,
     seconds: int,
+    model: string,
+}
+
+export struct ApiProviderItem {
+    provider-id: string,
+    name: string,
+    connected: bool,
+    models: [string],
+    selected-model: int,
 }
 
 export struct ModelItem {
@@ -30,7 +40,7 @@ component StatusDot inherits Rectangle {
     width: 8px;
     height: 8px;
     border-radius: 4px;
-    background: root.recording ? #EF4444 : (root.active ? #3B82F6 : #4E4E4E);
+    background: root.recording ? #EF4444 : (root.active ? #FFFFFF : #4E4E4E);
 }
 
 component RoundSpinner inherits Rectangle {
@@ -72,9 +82,9 @@ component ProgressBar inherits Rectangle {
     in property <float> progress: 0.0;
     height: 6px;
     border-radius: 3px;
-    background: #1E1E1E;
+    background: #141414;
     border-width: 1px;
-    border-color: #2C2C2C;
+    border-color: #262626;
     clip: true;
 
     Rectangle {
@@ -83,7 +93,7 @@ component ProgressBar inherits Rectangle {
         width: parent.width * Math.max(0.0, Math.min(1.0, root.progress));
         height: parent.height;
         border-radius: 3px;
-        background: @linear-gradient(90deg, #2563EB 0%, #3B82F6 100%);
+        background: @linear-gradient(90deg, #9A9A9A 0%, #FFFFFF 100%);
     }
 }
 
@@ -139,9 +149,9 @@ component Toggle inherits Rectangle {
     width: 46px;
     height: 26px;
     border-radius: 9px;
-    background: root.on ? #2563EB : #262626;
+    background: root.on ? #F5F5F5 : #262626;
     border-width: 1px;
-    border-color: root.on ? #60A5FA : #3A3A3A;
+    border-color: root.on ? #FFFFFF : #3A3A3A;
 
     Rectangle {
         width: 19px;
@@ -149,7 +159,7 @@ component Toggle inherits Rectangle {
         y: 3px;
         x: root.on ? 23px : 3px;
         border-radius: 6px;
-        background: #FFFFFF;
+        background: root.on ? #000000 : #FFFFFF;
 
         animate x { duration: 180ms; easing: ease-out; }
     }
@@ -166,26 +176,24 @@ component ActionButton inherits Rectangle {
     in property <bool> primary: true;
     in property <bool> enabled: true;
     in property <bool> destructive: false;
+    // Kept for call-site compatibility; the desktop theme has one primary
+    // style (white on black), so this no longer changes the colours.
     in property <bool> blue: false;
     callback clicked();
 
-    height: 40px;
-    border-radius: 12px;
+    min-height: 48px;
+    border-radius: 10px;
     border-width: 1px;
     border-color: !root.enabled
         ? #262626
         : (root.destructive
             ? #522226
-            : (root.primary
-                ? (root.blue ? #3B82F6 : #FFFFFF)
-                : #333333));
+            : (root.primary ? #FFFFFF : #333333));
     background: !root.enabled
-        ? #1A1A1A
+        ? #141414
         : (root.destructive
             ? #33181B
-            : (root.primary
-                ? (root.blue ? #2563EB : #F5F5F5)
-                : #242424));
+            : (root.primary ? #F5F5F5 : #141414));
 
     Text {
         width: parent.width;
@@ -197,11 +205,10 @@ component ActionButton inherits Rectangle {
             ? #525252
             : (root.destructive
                 ? #FCA5A5
-                : (root.primary
-                    ? (root.blue ? #FFFFFF : #121212)
-                    : #F5F5F5));
+                : (root.primary ? #000000 : #F5F5F5));
         horizontal-alignment: center;
         vertical-alignment: center;
+        overflow: elide;
     }
 
     ta := TouchArea {
@@ -222,9 +229,9 @@ component Badge inherits Rectangle {
     height: 20px;
     width: label.preferred-width + 14px;
     border-radius: 6px;
-    background: root.active ? #172544 : #242424;
+    background: root.active ? #1A1A1A : #242424;
     border-width: 1px;
-    border-color: root.active ? #2563EB : #303030;
+    border-color: root.active ? #F5F5F5 : #303030;
 
     label := Text {
         width: parent.width;
@@ -232,18 +239,108 @@ component Badge inherits Rectangle {
         text: root.text;
         font-size: 10px;
         font-weight: 700;
-        color: root.active ? #93C5FD : #A3A3A3;
+        color: root.active ? #EDEDED : #A3A3A3;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
 }
 
+// Desktop-style dropdown: closed chevron points down, expanded points up
+// (160ms ease-out rotation). Used for model / language / offload pickers.
+component ChevronDropdown inherits Rectangle {
+    in property <[string]> options;
+    in property <string> placeholder: "Select";
+    in-out property <int> selected-index: 0;
+    in-out property <bool> expanded: false;
+    callback picked(int);
+
+    min-height: 48px;
+    border-radius: 10px;
+    background: #0E0E0E;
+    border-width: 1px;
+    border-color: #262626;
+
+    VerticalLayout {
+        width: parent.width;
+
+        Rectangle {
+            height: 48px;
+            background: transparent;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 8px;
+
+                Text {
+                    text: (root.selected-index >= 0 && root.selected-index < root.options.length)
+                        ? root.options[root.selected-index] : root.placeholder;
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: #F5F5F5;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: "⌄";
+                    font-size: 16px;
+                    color: #9A9A9A;
+                    vertical-alignment: center;
+                    transform-rotation: root.expanded ? 180deg : 0deg;
+                    animate transform-rotation { duration: 160ms; easing: ease-out; }
+                }
+            }
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => { root.expanded = !root.expanded; }
+            }
+        }
+
+        if root.expanded : VerticalLayout {
+            width: parent.width;
+            padding-bottom: 6px;
+
+            for opt[i] in root.options : Rectangle {
+                height: 44px;
+                background: i == root.selected-index ? #141414 : transparent;
+
+                Text {
+                    x: 12px;
+                    width: parent.width - 24px;
+                    height: parent.height;
+                    text: opt;
+                    font-size: 13px;
+                    color: i == root.selected-index ? #FFFFFF : #C9C9C9;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                    overflow: elide;
+                }
+
+                TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    clicked => {
+                        root.selected-index = i;
+                        root.expanded = false;
+                        root.picked(i);
+                    }
+                }
+            }
+        }
+    }
+}
+
 component Card inherits Rectangle {
     in property <bool> highlighted: false;
-    border-radius: 20px;
-    background: root.highlighted ? #222222 : #1C1C1C;
+    border-radius: 10px;
+    background: root.highlighted ? #141414 : #0E0E0E;
     border-width: 1px;
-    border-color: root.highlighted ? #3B82F6 : #2A2A2A;
+    border-color: root.highlighted ? #F5F5F5 : #262626;
 
     animate border-color { duration: 200ms; }
 }
@@ -296,7 +393,7 @@ component NavItem inherits Rectangle {
         width: 24px;
         height: 2.5px;
         border-radius: 1.25px;
-        background: root.active ? #3B82F6 : transparent;
+        background: root.active ? #FFFFFF : transparent;
 
         animate background { duration: 160ms; }
     }
@@ -306,7 +403,9 @@ component TurnRow inherits Rectangle {
     in property <string> text;
     in property <string> when;
     in property <int> seconds;
+    in property <string> model: "";
     callback copy-clicked();
+    callback delete-clicked();
 
     min-height: 52px;
     background: transparent;
@@ -352,6 +451,22 @@ component TurnRow inherits Rectangle {
                 clicked => { root.copy-clicked(); }
             }
         }
+
+        Text {
+            text: "✕";
+            font-size: 12px;
+            font-weight: 700;
+            color: #A3A3A3;
+            vertical-alignment: center;
+            min-width: 48px;
+            horizontal-alignment: center;
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => { root.delete-clicked(); }
+            }
+        }
     }
 }
 
@@ -364,7 +479,7 @@ component Dot inherits Rectangle {
     width: root.active ? 18px : 7px;
     height: 7px;
     border-radius: 3.5px;
-    background: root.active ? #3B82F6 : #333333;
+    background: root.active ? #FFFFFF : #333333;
 
     animate width { duration: 240ms; easing: ease-out; }
     animate background { duration: 240ms; }
@@ -494,7 +609,7 @@ component HeroMic inherits Rectangle {
         y: 37px;
         border-radius: 23px;
         border-width: 2px;
-        border-color: #3B82F6;
+        border-color: #FFFFFF;
         opacity: 0.25 + 0.35 * Math.sin(root.phase * 360deg);
     }
 }
@@ -508,7 +623,7 @@ component HeroStack inherits Rectangle {
 
     Rectangle { width: 96px; height: 54px; x: 30px; y: 84px; border-radius: 13px; background: #1E1E1E; border-width: 1px; border-color: #2E2E2E; }
     Rectangle { width: 96px; height: 54px; x: 18px; y: 62px; border-radius: 13px; background: #242424; border-width: 1px; border-color: #2E2E2E; }
-    Rectangle { width: 96px; height: 54px; x: 40px; y: 40px; border-radius: 13px; background: #181818; border-width: 1px; border-color: #3B82F6; }
+    Rectangle { width: 96px; height: 54px; x: 40px; y: 40px; border-radius: 13px; background: #181818; border-width: 1px; border-color: #FFFFFF; }
 
     // Floating pill with ✓ and ✕ glyphs
     Rectangle {
@@ -519,7 +634,7 @@ component HeroStack inherits Rectangle {
         border-radius: 9px;
         background: #242424;
         border-width: 1px;
-        border-color: #3B82F6;
+        border-color: #FFFFFF;
 
         Text {
             width: 50px;
@@ -573,7 +688,7 @@ component HeroKeyboard inherits Rectangle {
             x: 32px;
             y: 58px;
             border-radius: 3px;
-            background: #2563EB;
+            background: #F5F5F5;
         }
     }
 
@@ -584,7 +699,7 @@ component HeroKeyboard inherits Rectangle {
         x: 70px;
         y: 26px;
         border-radius: 4px;
-        background: #3B82F6;
+        background: #FFFFFF;
         opacity: 0.5 + 0.5 * Math.sin(root.phase * 360deg * 2);
 
         animate opacity { duration: 600ms; easing: ease-in-out; }
@@ -606,10 +721,10 @@ component HeroModel inherits Rectangle {
         border-radius: 24px;
         background: #1E1E1E;
         border-width: 1px;
-        border-color: #3B82F6;
+        border-color: #FFFFFF;
     }
 
-    IconLayers { x: 62px; y: 42px; tint: #3B82F6; width: 26px; height: 26px; }
+    IconLayers { x: 62px; y: 42px; tint: #FFFFFF; width: 26px; height: 26px; }
 
     Rectangle {
         width: 52px;
@@ -617,7 +732,7 @@ component HeroModel inherits Rectangle {
         x: 49px;
         y: 84px;
         border-radius: 7.5px;
-        background: #172544;
+        background: #1A1A1A;
 
         Text {
             width: parent.width;
@@ -625,7 +740,7 @@ component HeroModel inherits Rectangle {
             text: "READY";
             font-size: 9px;
             font-weight: 700;
-            color: #93C5FD;
+            color: #EDEDED;
             horizontal-alignment: center;
             vertical-alignment: center;
         }
@@ -638,7 +753,7 @@ component HeroModel inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: "QuickSTT";
-    background: #121212;
+    background: #000000;
     default-font-size: 14px;
     preferred-width: 412px;
     preferred-height: 760px;
@@ -685,6 +800,17 @@ export component AppWindow inherits Window {
     in-out property <[Turn]> turns: [];
     in-out property <[ModelItem]> models: [];
     in-out property <[ModelItem]> installed-models: [];
+    in-out property <[string]> model-names: [];
+    in-out property <int> model-selected-option: 0;
+    in-out property <[ApiProviderItem]> api-providers: [];
+    in-out property <string> api-key-input: "";
+    in-out property <bool> using-api: false;
+    in-out property <string> active-api-label: "";
+    in-out property <bool> history-enabled: true;
+    in-out property <int> language-index: 0;
+    in-out property <[string]> language-names: [];
+    in-out property <int> offload-index: 1;
+    in-out property <[string]> offload-options: [];
 
     callback toggle-record();
     callback pick-model(int);
@@ -714,9 +840,18 @@ export component AppWindow inherits Window {
     callback test-keyboard();
     callback onboarding-finish();
     callback restart-onboarding();
+    callback delete-turn(string);
+    callback toggle-history();
+    callback pick-offload(int);
+    callback pick-language(int);
+    callback save-api-key(string);
+    callback clear-api-key(string);
+    callback pick-api-model(string, int);
+    callback pick-model-option(int);
+    callback use-local-models();
 
     Rectangle {
-        background: #121212;
+        background: #000000;
 
         VerticalLayout {
             width: parent.width;
@@ -725,7 +860,7 @@ export component AppWindow inherits Window {
             // ── Content ────────────────────────────────────────────────────
             Rectangle {
                 vertical-stretch: 1;
-                background: #121212;
+                background: #000000;
                 clip: true;
 
                 // ══ TAB 0: LISTEN ═════════════════════════════════════════
@@ -746,12 +881,12 @@ export component AppWindow inherits Window {
 
                         Rectangle {
                             width: 30px;
-                            height: 30px;
+                            height: 48px;
                             border-radius: 9px;
                             background: #1C1C1C;
                             border-width: 1px;
                             border-color: #2A2A2A;
-                            IconWave { x: 5px; y: 6px; tint: #3B82F6; }
+                            IconWave { x: 5px; y: 6px; tint: #FFFFFF; }
                         }
 
                         Text {
@@ -777,6 +912,17 @@ export component AppWindow inherits Window {
                             active: root.model-loaded;
                             recording: root.recording;
                         }
+                    }
+
+                    // One-line status (every action reports here; nothing else nags)
+                    Text {
+                        text: root.mic-health != "" ? root.mic-health : root.status-text;
+                        font-size: 11px;
+                        font-weight: 600;
+                        color: root.mic-health != "" ? #FCA5A5 : #9A9A9A;
+                        horizontal-alignment: left;
+                        overflow: elide;
+                        height: 16px;
                     }
 
                     // Transcript — the hero (tap to show floating squircle widget & focus)
@@ -813,7 +959,7 @@ export component AppWindow inherits Window {
 
                                 ActionButton {
                                     width: 68px;
-                                    height: 28px;
+                                    min-height: 48px;
                                     border-radius: 8px;
                                     label: "Type";
                                     primary: true;
@@ -824,7 +970,7 @@ export component AppWindow inherits Window {
 
                                 ActionButton {
                                     width: 68px;
-                                    height: 28px;
+                                    min-height: 48px;
                                     border-radius: 8px;
                                     label: "Copy";
                                     primary: false;
@@ -834,7 +980,7 @@ export component AppWindow inherits Window {
 
                                 ActionButton {
                                     width: 68px;
-                                    height: 28px;
+                                    min-height: 48px;
                                     border-radius: 8px;
                                     label: "Share";
                                     primary: false;
@@ -876,7 +1022,7 @@ export component AppWindow inherits Window {
                         if !(root.model-loading || root.busy) : Rectangle {
                             width: 14px; height: 14px; y: 11px;
                             border-radius: 7px;
-                            background: root.model-loaded ? #3B82F6 : #2E2E2E;
+                            background: root.model-loaded ? #FFFFFF : #2E2E2E;
                         }
 
                         Text {
@@ -893,7 +1039,7 @@ export component AppWindow inherits Window {
 
                         ActionButton {
                             width: 86px;
-                            height: 28px;
+                            min-height: 48px;
                             border-radius: 8px;
                             label: root.model-loaded ? "Offload" : "Onload";
                             primary: !root.model-loaded;
@@ -906,7 +1052,7 @@ export component AppWindow inherits Window {
 
                         ActionButton {
                             width: 56px;
-                            height: 28px;
+                            min-height: 48px;
                             border-radius: 8px;
                             label: "Test";
                             primary: false;
@@ -914,46 +1060,12 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // Downloaded library models ONLY — tap to use
-                    Flickable {
-                        height: 44px;
-                        content-width: Math.max(self.width, root.installed-models.length * 146px);
-                        content-height: self.height;
-
-                        strip := HorizontalLayout {
-                            width: Math.max(parent.width, root.installed-models.length * 146px);
-                            spacing: 6px;
-                            alignment: start;
-
-                            for m in root.installed-models : Rectangle {
-                                width: 140px;
-                                height: 38px;
-                                border-radius: 10px;
-                                background: root.selected-model == m.catalog-index ? #2563EB : #1C1C1C;
-                                border-width: 1px;
-                                border-color: root.selected-model == m.catalog-index ? #60A5FA : #2E2E2E;
-
-                                Text {
-                                    width: parent.width;
-                                    height: parent.height;
-                                    text: m.name;
-                                    font-size: 10px;
-                                    font-weight: 700;
-                                    color: #F5F5F5;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                }
-
-                                TouchArea {
-                                    width: parent.width;
-                                    height: parent.height;
-                                    clicked => {
-                                        root.pick-model(m.catalog-index);
-                                    }
-                                }
-                            }
-                        }
+                    // Model picker — downloaded locals + connected API only (Rust filters)
+                    ChevronDropdown {
+                        options: root.model-names;
+                        selected-index: root.model-selected-option;
+                        placeholder: "Model";
+                        picked(idx) => { root.pick-model-option(idx); }
                     }
 
                     // Related destination — Models
@@ -999,7 +1111,7 @@ export component AppWindow inherits Window {
 
                             if root.turns.length > 0 : ActionButton {
                                 width: 78px;
-                                height: 28px;
+                                min-height: 48px;
                                 label: "Clear";
                                 primary: false;
                                 destructive: true;
@@ -1032,7 +1144,9 @@ export component AppWindow inherits Window {
                                     text: t.text;
                                     when: t.when;
                                     seconds: t.seconds;
+                                    model: t.model;
                                     copy-clicked => { root.copy-turn(t.text); }
+                                    delete-clicked => { root.delete-turn(t.id); }
                                 }
                             }
                         }
@@ -1133,7 +1247,6 @@ export component AppWindow inherits Window {
                         }
 
                         for m[i] in root.models : Card {
-                            highlighted: root.selected-model == i;
 
                             VerticalLayout {
                                 width: parent.width;
@@ -1152,16 +1265,27 @@ export component AppWindow inherits Window {
                                         overflow: elide;
                                     }
 
-                                    Badge {
-                                        text: m.bundled ? "BUILT-IN" : m.size;
-                                        active: m.loaded;
+                                    Text {
+                                        text: m.installed ? "Downloaded" : "Not downloaded";
+                                        font-size: 10px;
+                                        font-weight: 700;
+                                        color: m.installed ? #EDEDED : #8A8A8A;
+                                        vertical-alignment: center;
                                     }
                                 }
 
                                 Body {
-                                    text: m.detail;
+                                    text: m.detail + " \u{b7} " + m.size;
                                     font-size: 11px;
                                     color: #8A8A8A;
+                                }
+
+                                if m.ram-status != "" : Text {
+                                    text: m.ram-status;
+                                    font-size: 10px;
+                                    color: #8A8A8A;
+                                    horizontal-alignment: left;
+                                    overflow: elide;
                                 }
 
                                 if m.downloading : VerticalLayout {
@@ -1169,11 +1293,12 @@ export component AppWindow inherits Window {
                                     ProgressBar { progress: m.progress; }
 
                                     Text {
-                                        text: Math.round(m.progress * 100.0) + "%";
+                                        text: (m.download-info != "" ? m.download-info + "  \u{b7}  " : "") + Math.round(m.progress * 100.0) + "%";
                                         font-size: 10px;
                                         font-weight: 700;
-                                        color: #93C5FD;
+                                        color: #EDEDED;
                                         horizontal-alignment: right;
+                                        overflow: elide;
                                     }
                                 }
 
@@ -1182,7 +1307,7 @@ export component AppWindow inherits Window {
 
                                     if !m.installed && !m.downloading : ActionButton {
                                         horizontal-stretch: 1;
-                                        height: 30px;
+                                        height: 48px;
                                         label: m.bundled ? "Restore" : ("Download · " + m.size);
                                         primary: true;
                                         blue: true;
@@ -1192,7 +1317,7 @@ export component AppWindow inherits Window {
 
                                     if m.downloading : ActionButton {
                                         horizontal-stretch: 1;
-                                        height: 30px;
+                                        height: 48px;
                                         label: "Working…";
                                         primary: false;
                                         enabled: false;
@@ -1200,17 +1325,16 @@ export component AppWindow inherits Window {
 
                                     if m.installed : ActionButton {
                                         horizontal-stretch: 1;
-                                        height: 30px;
-                                        label: root.selected-model == i ? "Selected" : "Use";
-                                        primary: root.selected-model != i;
-                                        blue: root.selected-model != i;
-                                        enabled: root.selected-model != i;
+                                        height: 48px;
+                                        label: (root.selected-model == i && !root.using-api) ? "Active" : "Use";
+                                        primary: !(root.selected-model == i && !root.using-api);
+                                        enabled: !(root.selected-model == i && !root.using-api);
                                         clicked => { root.pick-model(i); }
                                     }
 
                                     if m.installed : ActionButton {
                                         width: 52px;
-                                        height: 30px;
+                                        height: 48px;
                                         label: "Test";
                                         primary: false;
                                         enabled: !root.test-running;
@@ -1219,12 +1343,112 @@ export component AppWindow inherits Window {
 
                                     if m.installed && !m.bundled : ActionButton {
                                         width: 60px;
-                                        height: 30px;
+                                        height: 48px;
                                         label: "Delete";
                                         primary: false;
                                         destructive: true;
                                         clicked => { root.uninstall-model(i); }
                                     }
+                                }
+                            }
+                        }
+
+                        // Cloud API providers — selectable only with a stored key
+                        Text {
+                            text: "Cloud API";
+                            font-size: 16px;
+                            font-weight: 700;
+                            color: #F5F5F5;
+                            horizontal-alignment: left;
+                        }
+
+                        if root.using-api : ActionButton {
+                            label: "Using " + root.active-api-label + " — switch to on-device";
+                            primary: false;
+                            clicked => { root.use-local-models(); }
+                        }
+
+                        for prov in root.api-providers : Card {
+                            VerticalLayout {
+                                width: parent.width;
+                                padding: 14px;
+                                spacing: 8px;
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+
+                                    Text {
+                                        text: prov.name;
+                                        font-size: 14px;
+                                        font-weight: 700;
+                                        color: #F5F5F5;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+
+                                    Text {
+                                        text: prov.connected ? "Connected" : "Not connected";
+                                        font-size: 10px;
+                                        font-weight: 700;
+                                        color: prov.connected ? #EDEDED : #8A8A8A;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                if !prov.connected : HorizontalLayout {
+                                    spacing: 8px;
+
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        height: 48px;
+                                        border-radius: 10px;
+                                        background: #000000;
+                                        border-width: 1px;
+                                        border-color: #262626;
+
+                                        TextInput {
+                                            x: 12px;
+                                            width: parent.width - 24px;
+                                            height: parent.height;
+                                            text <=> root.api-key-input;
+                                            input-type: password;
+                                            font-size: 13px;
+                                            color: #F5F5F5;
+                                            vertical-alignment: center;
+                                        }
+
+                                        if root.api-key-input == "" : Text {
+                                            x: 12px;
+                                            height: parent.height;
+                                            text: "API key";
+                                            font-size: 13px;
+                                            color: #7A7A7A;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    ActionButton {
+                                        width: 104px;
+                                        height: 48px;
+                                        label: "Connect";
+                                        primary: true;
+                                        enabled: root.api-key-input != "";
+                                        clicked => { root.save-api-key(prov.provider-id); }
+                                    }
+                                }
+
+                                if prov.connected : ChevronDropdown {
+                                    options: prov.models;
+                                    selected-index: prov.selected-model;
+                                    picked(idx) => { root.pick-api-model(prov.provider-id, idx); }
+                                }
+
+                                if prov.connected : ActionButton {
+                                    height: 48px;
+                                    label: "Disconnect " + prov.name;
+                                    primary: false;
+                                    destructive: true;
+                                    clicked => { root.clear-api-key(prov.provider-id); }
                                 }
                             }
                         }
@@ -1309,7 +1533,7 @@ export component AppWindow inherits Window {
                                     spacing: 12px;
 
                                     Text {
-                                        text: "Free RAM after 30 s idle";
+                                        text: "Free RAM when idle";
                                         font-size: 14px;
                                         font-weight: 600;
                                         color: #F5F5F5;
@@ -1321,6 +1545,50 @@ export component AppWindow inherits Window {
                                         on: root.auto-offload;
                                         toggled => { root.toggle-auto-offload(); }
                                     }
+                                }
+
+                                if root.auto-offload : ChevronDropdown {
+                                    options: root.offload-options;
+                                    selected-index: root.offload-index;
+                                    picked(idx) => { root.pick-offload(idx); }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+
+                                    Text {
+                                        text: "Save dictation history";
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        color: #F5F5F5;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    Toggle {
+                                        on: root.history-enabled;
+                                        toggled => { root.toggle-history(); }
+                                    }
+                                }
+
+                                Text {
+                                    text: "Language";
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    color: #F5F5F5;
+                                    horizontal-alignment: left;
+                                }
+
+                                ChevronDropdown {
+                                    options: root.language-names;
+                                    selected-index: root.language-index;
+                                    picked(idx) => { root.pick-language(idx); }
+                                }
+
+                                ActionButton {
+                                    label: "Test microphone";
+                                    primary: false;
+                                    clicked => { root.test-mic(); }
                                 }
                             }
                         }
@@ -1443,14 +1711,14 @@ export component AppWindow inherits Window {
         if root.show-onboarding : Rectangle {
             width: parent.width;
             height: parent.height;
-            background: @radial-gradient(circle, #1E1E1E 0%, #121212 60%);
+            background: @radial-gradient(circle, #141414 0%, #000000 60%);
 
             // Ambient glow blobs, drifting slowly with wave-phase
             Rectangle {
                 width: 320px;
                 height: 320px;
                 border-radius: 160px;
-                background: @radial-gradient(circle, #3B82F6 0%, transparent 70%);
+                background: @radial-gradient(circle, #FFFFFF 0%, transparent 70%);
                 opacity: 0.14;
                 x: -80px + Math.sin(root.wave-phase * 360deg) * 14px;
                 y: -60px + Math.cos(root.wave-phase * 360deg * 0.8) * 12px;
@@ -1459,7 +1727,7 @@ export component AppWindow inherits Window {
                 width: 280px;
                 height: 280px;
                 border-radius: 140px;
-                background: @radial-gradient(circle, #2563EB 0%, transparent 70%);
+                background: @radial-gradient(circle, #F5F5F5 0%, transparent 70%);
                 opacity: 0.12;
                 x: parent.width - 180px + Math.cos(root.wave-phase * 360deg * 0.7) * 16px;
                 y: parent.height - 250px + Math.sin(root.wave-phase * 360deg * 0.9) * 14px;
@@ -1585,9 +1853,9 @@ export component AppWindow inherits Window {
                     x: 30px; width: parent.width - 60px;
                     height: 48px;
                     border-radius: 14px;
-                    background: root.mic-ok ? #172544 : #1E1E1E;
+                    background: root.mic-ok ? #1A1A1A : #1E1E1E;
                     border-width: 1px;
-                    border-color: root.mic-ok ? #3B82F6 : #2E2E2E;
+                    border-color: root.mic-ok ? #FFFFFF : #2E2E2E;
 
                     Text {
                         width: parent.width;
@@ -1595,7 +1863,7 @@ export component AppWindow inherits Window {
                         text: root.mic-ok ? "Microphone ✓" : "Allow microphone";
                         font-size: 14px;
                         font-weight: 600;
-                        color: root.mic-ok ? #93C5FD : #F5F5F5;
+                        color: root.mic-ok ? #EDEDED : #F5F5F5;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -1611,9 +1879,9 @@ export component AppWindow inherits Window {
                     x: 30px; width: parent.width - 60px;
                     height: 48px;
                     border-radius: 14px;
-                    background: root.overlay-ok ? #172544 : #1E1E1E;
+                    background: root.overlay-ok ? #1A1A1A : #1E1E1E;
                     border-width: 1px;
-                    border-color: root.overlay-ok ? #3B82F6 : #2E2E2E;
+                    border-color: root.overlay-ok ? #FFFFFF : #2E2E2E;
 
                     Text {
                         width: parent.width;
@@ -1621,7 +1889,7 @@ export component AppWindow inherits Window {
                         text: root.overlay-ok ? "Overlay ✓" : "Allow display over apps";
                         font-size: 14px;
                         font-weight: 600;
-                        color: root.overlay-ok ? #93C5FD : #F5F5F5;
+                        color: root.overlay-ok ? #EDEDED : #F5F5F5;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -1637,9 +1905,9 @@ export component AppWindow inherits Window {
                     x: 30px; width: parent.width - 60px;
                     height: 48px;
                     border-radius: 14px;
-                    background: root.auto-type-ok ? #172544 : #1E1E1E;
+                    background: root.auto-type-ok ? #1A1A1A : #1E1E1E;
                     border-width: 1px;
-                    border-color: root.auto-type-ok ? #3B82F6 : #2E2E2E;
+                    border-color: root.auto-type-ok ? #FFFFFF : #2E2E2E;
 
                     Text {
                         width: parent.width;
@@ -1651,7 +1919,7 @@ export component AppWindow inherits Window {
                                 : "Enable Voice Auto-Type");
                         font-size: 14px;
                         font-weight: 600;
-                        color: root.auto-type-ok ? #93C5FD : #F5F5F5;
+                        color: root.auto-type-ok ? #EDEDED : #F5F5F5;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }

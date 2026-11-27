@@ -1,5 +1,5 @@
-import { Button, CheckBox, ComboBox, LineEdit, Slider, ScrollView } from "std-widgets.slint";
-import { IconSym, ToggleRow } from "common.slint";
+import { Button, CheckBox, LineEdit, Slider, ScrollView } from "std-widgets.slint";
+import { IconSym, ToggleRow, ChevronDropdown } from "common.slint";
 
 // Model card for the hardware-aware catalog (image-inspired): name, blurb,
 // badge (Active/Recommended/Legacy/"", pink pills), accuracy/speed 0-100,
@@ -254,7 +254,7 @@ export component DashboardWidget inherits Window {
     in property <bool> auto-stop-silence: false;
     in property <int> silence-duration: 8;
     in property <bool> auto-offload: true;
-    in property <int> offload-seconds: 15;
+    in property <int> offload-seconds: 5;
     in property <bool> ctrl-space-enabled: true;
     in property <int> ctrl-space-mode: 0;
     in property <int> ctrl-space-output: 0;
@@ -334,6 +334,9 @@ export component DashboardWidget inherits Window {
     callback set-ctrl-space-output(int);
     callback set-clean-disfluencies(bool);
     callback set-disfluency-engine(int);
+    /// Explicit cleanup-model download (per selected engine). State comes
+    /// back via cleanup-downloaded / cleanup-downloading / download-progress.
+    callback download-cleanup-model(int);
     callback set-sidebar-width(length);
     callback set-sidebar-collapsed(bool);
     // History backup toggle (top of the General tab's history card).
@@ -412,6 +415,10 @@ export component DashboardWidget inherits Window {
     // ── Hardware-fit recommendation for the cleanup engine ──
     in property <int> recommend-cleanup-engine: -1;
     in property <string> recommend-cleanup-note: "";
+    /// Cleanup engines 0..3 downloaded on disk (FDT/S1-mini/SmolLM2/Gemma).
+    in property <[bool]> cleanup-downloaded: [false, false, false, false];
+    /// Cleanup engine currently downloading (-1 = none).
+    in property <int> cleanup-downloading: -1;
 
     // Monitor scale factor (1.0 = 96 dpi, 1.25 = 125%, …), set from Rust via
     // GetDpiForWindow. Slint's winit-software backend renders at this scale but
@@ -792,12 +799,6 @@ export component DashboardWidget inherits Window {
                             font-weight: 700;
                             color: #FFFFFF;
                         }
-                        Text {
-                            text: "Configure Windows integration, silence auto-commit, memory auto-offload, and recording output.";
-                            font-size: 14px;
-                            color: #9A9A9A;
-                            wrap: word-wrap;
-                        }
 
                         // ── History moved to its own section ──
                         // Everything that used to live at the top of General
@@ -819,12 +820,6 @@ export component DashboardWidget inherits Window {
                                     font-size: 16px;
                                     font-weight: 600;
                                     color: #FFFFFF;
-                                }
-                                Text {
-                                    text: "Every finished turn — transcript and audio — is kept in the dedicated History section. There you can play it back, copy or export the audio and text, select turns in bulk, and delete everything.";
-                                    font-size: 14px;
-                                    color: #9A9A9A;
-                                    wrap: word-wrap;
                                 }
                                 Rectangle {
                                     width: 176px;
@@ -859,7 +854,7 @@ export component DashboardWidget inherits Window {
                                 padding: 16px;
                                 spacing: 12px;
 
-                                Text { text: "System Startup & Behavior"; font-size: 16px; font-weight: 600; color: #FFFFFF; }
+                                Text { text: "System Startup"; font-size: 16px; font-weight: 600; color: #FFFFFF; }
 
                                 CheckBox {
                                     height: 40px;
@@ -873,12 +868,8 @@ export component DashboardWidget inherits Window {
                                     checked: root.start-minimized;
                                     toggled => { root.set-start-minimized(self.checked); }
                                 }
-                                CheckBox {
-                                    height: 40px;
-                                    text: "Export synchronized .lrc (lyrics/timestamp) files with recordings";
-                                    checked: root.lrc-enabled;
-                                    toggled => { root.set-lrc-enabled(self.checked); }
-                                }
+                                // .lrc export is always on (no toggle): the
+                                // setting is forced true in Rust on load/save.
                             }
                         }
 
@@ -931,7 +922,9 @@ export component DashboardWidget inherits Window {
                             }
                         }
 
-                        // Group 3: Memory Auto-Offload
+                        // Group 3: Model offloading — duplicate access to the
+                        // exact same controls as Speech Models → Model
+                        // offloading (same properties, same callbacks).
                         Rectangle {
                             background: #0E0E0E;
                             border-radius: 10px;
@@ -939,14 +932,14 @@ export component DashboardWidget inherits Window {
                             border-color: #262626;
 
                             VerticalLayout {
-                                padding: 16px;
-                                spacing: 12px;
+                                padding: 14px;
+                                spacing: 10px;
 
-                                Text { text: "Memory Management & Model Offloading"; font-size: 16px; font-weight: 600; color: #FFFFFF; }
+                                Text { text: "Model offloading"; font-size: 15px; font-weight: 600; color: #FFFFFF; }
 
                                 CheckBox {
                                     height: 40px;
-                                    text: "Auto-offload speech model when idle (saves RAM)";
+                                    text: "Auto-offload speech model when idle (API-based models: always automatic)";
                                     checked: root.auto-offload;
                                     toggled => { root.set-auto-offload(self.checked); }
                                 }
@@ -976,15 +969,6 @@ export component DashboardWidget inherits Window {
                                         vertical-alignment: center;
                                         min-width: 55px;
                                     }
-                                }
-
-                                Text {
-                                    text: root.auto-offload
-                                        ? "On: " + root.offload-seconds + "s after a turn ends, the model worker (for example nemotron_engine) is terminated and its RAM is released. The next turn reloads it automatically."
-                                        : "Off: the model stays loaded for instant turns. A 15-minute safety ceiling still releases it, so RAM is never parked forever.";
-                                    font-size: 14px;
-                                    color: #9A9A9A;
-                                    wrap: word-wrap;
                                 }
                             }
                         }
@@ -1018,8 +1002,7 @@ export component DashboardWidget inherits Window {
                                     HorizontalLayout {
                                         spacing: 8px;
                                         Text { text: "Trigger Mode:"; font-size: 15px; color: #FFFFFF; vertical-alignment: center; min-width: 110px; }
-                                        ComboBox {
-                                            height: 40px;
+                                        ChevronDropdown {
                                             model: ["Push-to-Talk (Hold)", "Toggle (Press on/off)"];
                                             current-index: root.ctrl-space-mode;
                                             selected(v) => { root.set-ctrl-space-mode(self.current-index); }
@@ -1034,8 +1017,7 @@ export component DashboardWidget inherits Window {
                                         // display-only choice could only mean
                                         // "my dictation never reached the text
                                         // box".
-                                        ComboBox {
-                                            height: 40px;
+                                        ChevronDropdown {
                                             model: ["Type into active app", "Copy to clipboard"];
                                             current-index: root.ctrl-space-output == 1 ? 1 : 0;
                                             selected(v) => { root.set-ctrl-space-output(self.current-index); }
@@ -1058,26 +1040,65 @@ export component DashboardWidget inherits Window {
                                         vertical-alignment: center;
                                         min-width: 110px;
                                     }
-                                    ComboBox {
-                                        height: 40px;
+                                    ChevronDropdown {
                                         model: ["FDT 66M tagger - fillers + repeats only (66MB)", "S1-mini INT4 (0.6B) - self-corrections + numbers (375MB, slow)", "SmolLM2 360M Q4 - self-corrections + numbers (271MB, fast)", "Gemma 3 270M Q4 - self-corrections + numbers (253MB, fast)"];
                                         current-index: root.disfluency-engine;
                                         enabled: root.clean-disfluencies;
                                         selected(v) => { root.set-disfluency-engine(self.current-index); }
                                     }
                                 }
-                                if root.recommend-cleanup-note != "" : Text {
-                                    text: root.recommend-cleanup-note;
-                                    font-size: 14px;
-                                    font-weight: 600;
-                                    color: #7FB069;
-                                    wrap: word-wrap;
-                                }
-                                Text {
-                                    text: "FDT is an instant deletion-only tagger. The three normalizer engines also resolve self-corrections (\"no wait, thursday\") and write spoken numbers, dates and times in written form: S1-mini (0.6B, highest quality, slowest), SmolLM2 360M and Gemma 3 270M (llama.cpp, fast). Weights download on first use; the model loads only for the turn being cleaned, off the UI thread, and is dropped immediately after.";
-                                    font-size: 14px;
-                                    color: #9A9A9A;
-                                    wrap: word-wrap;
+                                // Cleanup download state for the selected
+                                // engine: Downloaded / Not downloaded, an
+                                // explicit Download button, live % bar.
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text {
+                                        text: root.cleanup-downloaded[root.disfluency-engine] ? "Downloaded" : "Not downloaded";
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        color: root.cleanup-downloaded[root.disfluency-engine] ? #FFFFFF : #9A9A9A;
+                                        vertical-alignment: center;
+                                        min-width: 110px;
+                                    }
+                                    if root.cleanup-downloading == root.disfluency-engine : Rectangle {
+                                        height: 8px;
+                                        border-radius: 4px;
+                                        background: #1F1F1F;
+                                        Rectangle {
+                                            x: 0px; y: 0px;
+                                            height: 8px;
+                                            width: (parent.width * root.download-progress / 100);
+                                            border-radius: 4px;
+                                            background: #FFFFFF;
+                                        }
+                                    }
+                                    if root.cleanup-downloading == root.disfluency-engine : Text {
+                                        text: root.download-progress + "%";
+                                        font-size: 14px;
+                                        font-weight: 700;
+                                        color: #FFFFFF;
+                                        vertical-alignment: center;
+                                        min-width: 48px;
+                                    }
+                                    if !root.cleanup-downloaded[root.disfluency-engine] && root.cleanup-downloading != root.disfluency-engine : Rectangle {
+                                        width: 148px;
+                                        height: 34px;
+                                        border-radius: 15px;
+                                        background: dl_cleanup.has-hover ? #E4E4E4 : #FFFFFF;
+                                        animate background { duration: 130ms; easing: ease-out; }
+                                        Text {
+                                            text: "Download " + (root.disfluency-engine == 0 ? "66 MB" : root.disfluency-engine == 1 ? "375 MB" : root.disfluency-engine == 2 ? "271 MB" : "253 MB");
+                                            font-size: 14px;
+                                            font-weight: 700;
+                                            color: #000000;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        dl_cleanup := TouchArea {
+                                            clicked => { root.download-cleanup-model(root.disfluency-engine); }
+                                            mouse-cursor: pointer;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1206,8 +1227,7 @@ export component DashboardWidget inherits Window {
                                 HorizontalLayout {
                                     spacing: 10px;
                                     Text { text: "Provider"; font-size: 15px; color: #FFFFFF; vertical-alignment: center; min-width: 72px; }
-                                    ComboBox {
-                                        height: 40px;
+                                    ChevronDropdown {
                                         model: root.provider-options;
                                         current-index: root.active-provider-index;
                                         selected(v) => { root.set-provider(v); }
@@ -1217,8 +1237,7 @@ export component DashboardWidget inherits Window {
                                 HorizontalLayout {
                                     spacing: 10px;
                                     Text { text: "Model"; font-size: 15px; color: #FFFFFF; vertical-alignment: center; min-width: 72px; }
-                                    ComboBox {
-                                        height: 40px;
+                                    ChevronDropdown {
                                         model: root.models;
                                         current-index: root.selected-model;
                                         selected(v) => { root.select-model(v); }
@@ -1232,8 +1251,7 @@ export component DashboardWidget inherits Window {
                                     // show a disabled one-entry list — never a
                                     // prose note — so the column always reads the
                                     // same way.
-                                    ComboBox {
-                                        height: 40px;
+                                    ChevronDropdown {
                                         model: root.languages;
                                         current-index: root.selected-language;
                                         enabled: root.languages.length > 1;
@@ -1260,7 +1278,7 @@ export component DashboardWidget inherits Window {
 
                                 CheckBox {
                                     height: 40px;
-                                    text: "Auto-offload speech model when idle (worker process exits, RAM freed)";
+                                    text: "Auto-offload speech model when idle (API-based models: always automatic)";
                                     checked: root.auto-offload;
                                     toggled => { root.set-auto-offload(self.checked); }
                                 }
@@ -1290,15 +1308,6 @@ export component DashboardWidget inherits Window {
                                         vertical-alignment: center;
                                         min-width: 55px;
                                     }
-                                }
-
-                                Text {
-                                    text: root.auto-offload
-                                        ? "On: " + root.offload-seconds + "s after a turn ends, the model worker (for example nemotron_engine) is terminated and its RAM is released. The next turn reloads it automatically."
-                                        : "Off: the model stays loaded for instant turns. A 15-minute safety ceiling still releases it, so RAM is never parked forever.";
-                                    font-size: 14px;
-                                    color: #9A9A9A;
-                                    wrap: word-wrap;
                                 }
                             }
                         }
@@ -1356,8 +1365,7 @@ export component DashboardWidget inherits Window {
                                             }
                                         }
 
-                                        if param.kind == 2 : ComboBox {
-                                            height: 36px;
+                                        if param.kind == 2 : ChevronDropdown {
                                             model: param.choices;
                                             current-index: round(param.value);
                                             selected(v) => {
@@ -1408,13 +1416,13 @@ export component DashboardWidget inherits Window {
                                         alignment: center;
                                         Text { text: "Catalog"; font-size: 15px; font-weight: 600; color: #FFFFFF; vertical-alignment: center; }
                                         Rectangle { horizontal-stretch: 1; }
-                                        Text {
-                                            text: "▾";
-                                            font-size: 16px;
-                                            color: #FFFFFF;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                            transform-rotation: root.catalog-open ? 0deg : 180deg;
+                                        IconSym {
+                                            glyph: "\u{E313}";
+                                            size: 22px;
+                                            tint: #FFFFFF;
+                                            // Expanded (open) = chevron up,
+                                            // collapsed = chevron down.
+                                            transform-rotation: root.catalog-open ? 180deg : 0deg;
                                             animate transform-rotation { duration: 160ms; easing: ease-out; }
                                         }
                                     }
@@ -1458,7 +1466,12 @@ export component DashboardWidget inherits Window {
                                                 spacing: 8px;
                                                 alignment: start;
                                                 Text { text: card.name; font-size: 15px; font-weight: 600; color: card.installed ? #FFFFFF : #9A9A9A; vertical-alignment: center; overflow: elide; }
-                                                if card.badge != "" : Rectangle {
+                                                // Only "Best fit" may sit beside
+                                                // the name. The active state is
+                                                // shown ONLY by the right-edge
+                                                // Active/Select button — no
+                                                // duplicate pill beside the name.
+                                                if card.badge == "Best fit" : Rectangle {
                                                     width: 84px; height: 22px; border-radius: 9px; background: #FFFFFF;
                                                     Text { text: card.badge; font-size: 13px; font-weight: 700; color: #000000; horizontal-alignment: center; vertical-alignment: center; }
                                                 }
@@ -1596,12 +1609,6 @@ export component DashboardWidget inherits Window {
                             font-size: 20px;
                             font-weight: 700;
                             color: #FFFFFF;
-                        }
-                        Text {
-                            text: "Customize the appearance of the floating mini pill widget. Sliders apply immediately with live preview.";
-                            font-size: 14px;
-                            color: #9A9A9A;
-                            wrap: word-wrap;
                         }
 
                         // Interactive Live Preview Box
@@ -1763,12 +1770,6 @@ export component DashboardWidget inherits Window {
                             font-weight: 700;
                             color: #FFFFFF;
                         }
-                        Text {
-                            text: "Hands-free voice triggers. Calibrated sensitivity and strict noise gates prevent false activations from room noise and TV audio.";
-                            font-size: 14px;
-                            color: #9A9A9A;
-                            wrap: word-wrap;
-                        }
 
                         // Master Activation Switch
                         Rectangle {
@@ -1831,12 +1832,6 @@ export component DashboardWidget inherits Window {
                                         min-width: 95px;
                                     }
                                 }
-                                Text {
-                                    text: "Score bar for the phrases above — HIGHER (right) = triggers on quieter speech, LOWER (left) = needs louder, clearer speech. Too high answers TV and chatter; too low needs shouting. 50 is balanced.";
-                                    font-size: 14px;
-                                    color: #9A9A9A;
-                                    wrap: word-wrap;
-                                }
 
                                 HorizontalLayout {
                                     spacing: 12px;
@@ -1856,12 +1851,6 @@ export component DashboardWidget inherits Window {
                                         vertical-alignment: center;
                                         min-width: 95px;
                                     }
-                                }
-                                Text {
-                                    text: "Voice gate in front of the detector — HIGHER (right) = soft speech gets through, but so does more room noise. LOWER (left) = stricter; set too low, quiet phrases never reach the detector at all. Same direction as above: right = more sensitive. 50 is balanced.";
-                                    font-size: 14px;
-                                    color: #9A9A9A;
-                                    wrap: word-wrap;
                                 }
 
                                 // Live Microphone Input Level Visualizer
@@ -1940,19 +1929,12 @@ export component DashboardWidget inherits Window {
                                 HorizontalLayout {
                                     spacing: 8px;
                                     Text { text: "Clap Action:"; font-size: 15px; color: #FFFFFF; vertical-alignment: center; }
-                                    ComboBox {
-                                        height: 40px;
+                                    ChevronDropdown {
                                         model: ["Start Dictation", "Stop Dictation", "Disabled"];
                                         current-index: root.transient-action;
                                         enabled: true;
                                         selected(v) => { root.set-transient-action(self.current-index); }
                                     }
-                                }
-                                Text {
-                                    text: "One sharp hand clap triggers the action above. Isolated impulses only — speech and sustained noise are vetoed. Wakewords work independently.";
-                                    font-size: 14px;
-                                    color: #9A9A9A;
-                                    wrap: word-wrap;
                                 }
                             }
                         }
@@ -1970,12 +1952,6 @@ export component DashboardWidget inherits Window {
                                     font-size: 20px;
                                     font-weight: 700;
                                     color: #FFFFFF;
-                                }
-                                Text {
-                                    text: "Every turn you have dictated, newest first, with its audio. Play it back, copy or export it, select turns in bulk, or delete everything.";
-                                    font-size: 14px;
-                                    color: #9A9A9A;
-                                    wrap: word-wrap;
                                 }
 
                                                     // ── Transcription History (its own section) ──
@@ -2394,12 +2370,6 @@ export component DashboardWidget inherits Window {
                             font-size: 20px;
                             font-weight: 700;
                             color: #FFFFFF;
-                        }
-                        Text {
-                            text: "Inspect active ML inference runtimes, build versions, and software update status.";
-                            font-size: 14px;
-                            color: #9A9A9A;
-                            wrap: word-wrap;
                         }
 
                         // System Runtime Status Card

@@ -50,7 +50,8 @@ Write-Host "==> compiling the Java helpers"
 & javac --release 8 -nowarn -classpath $androidJar -d "$work\classes" `
     "java\ai\quickstt\app\Bubble.java" "java\ai\quickstt\app\Overlay.java" `
     "java\ai\quickstt\app\Engine.java" "java\ai\quickstt\app\SpeechService.java" `
-    "java\ai\quickstt\app\ModelDownloader.java" "java\ai\quickstt\app\QuickSttInputMethodService.java"
+    "java\ai\quickstt\app\ModelDownloader.java" "java\ai\quickstt\app\QuickSttInputMethodService.java" `
+    "java\ai\quickstt\app\ApiClient.java"
 if ($LASTEXITCODE -ne 0) { throw "javac failed" }
 
 Write-Host "==> dexing"

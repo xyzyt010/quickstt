@@ -100,12 +100,9 @@ name = "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
 [[package.metadata.android.uses_permission]]
 name = "android.permission.SYSTEM_ALERT_WINDOW"
 
-# Type into the app in front with real key events. It is a system
-# permission, so it only becomes usable on a rooted phone or a userdebug
-# build ("adb shell pm grant ai.quickstt.app android.permission.INJECT_EVENTS");
-# without it the app falls back to the clipboard.
-[[package.metadata.android.uses_permission]]
-name = "android.permission.INJECT_EVENTS"
+# NOTE: no INJECT_EVENTS (signature permission — root/userdebug only), no
+# accessibility / SMS / notification-listener declarations. Cross-app typing
+# uses only the sanctioned BIND_INPUT_METHOD voice keyboard; see README.
 
 [[package.metadata.android.uses_feature]]
 name = "android.hardware.microphone"

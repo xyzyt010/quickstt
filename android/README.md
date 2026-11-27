@@ -32,6 +32,11 @@ build and publish the Linux `.deb`/`.tar.gz` (see `.github/workflows/release-des
 | **Automatic onload on start & 30 s idle auto-offload** with round loading spinner | ✅ implemented (persistent `--worker` + pinned buffers) |
 | **Model self-test** ("Test this model" — records 4 s, runs the engine) | ✅ implemented |
 | **Automatic & live real-time typing into focused text boxes** (`QuickSttInputMethodService` voice keyboard — `setComposingText` live, `commitText` on stop; clipboard fallback) | ✅ implemented |
+| **Durable history** (versioned JSONL in filesDir, atomic saves, per-turn delete/clear incl. retained audio, history on/off setting, password fields never saved) | ✅ implemented (`src/store.rs`) |
+| **Cloud API transcription** (Groq + OpenAI + Deepgram; AndroidKeyStore-encrypted keys, Java HTTPS, selectable only with a stored key) | ✅ implemented (`ApiClient.java`, `src/api.rs`) |
+| **Persisted settings** (auto-offload + idle seconds, live mode, history, language, selected/API model — `settings.json`, atomic) | ✅ implemented |
+| **Configurable idle auto-offload** (15–900 s picker; was hard-coded 30 s) | ✅ implemented |
+| **Desktop monochrome theme** (black/#0E0E0E/#262626, white primary, no blue; `ChevronDropdown` pickers) | ✅ implemented |
 | **5-page interactive onboarding** (dark grey, vector-drawn; mic / overlay / voice keyboard / bundled model) | ✅ implemented |
 | **Share sheet** for the last transcript | ✅ implemented |
 | **Activity log + status line (every action says what it did)** | ✅ implemented |
@@ -466,5 +471,10 @@ the wrong place, cards hanging off the screen):
    that possible).
 2. **More whisper models**: the engine is model-agnostic — adding Whisper Base
    or the multilingual Whisper models only needs a catalog entry.
-3. **Offload**: mirror the desktop idle-unload (`auto_offload`, 60 s) by
-   dropping the engine session when idle.
+3. **On-device verification of the API path**: exercise Groq/OpenAI/Deepgram
+   with real keys on a phone (compile- and logic-verified only so far; see
+   `ANDROID_PERFECTION_REPORT.md`).
+
+Done since this list was written: durable history, persisted settings with
+configurable idle offload (15–900 s), cloud API providers, desktop-theme
+retheme. Full audit: `ANDROID_PERFECTION_REPORT.md`.

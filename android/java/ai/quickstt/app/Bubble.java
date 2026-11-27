@@ -1095,7 +1095,7 @@ public final class Bubble {
 
         private void drawAcceptButton(Canvas canvas, RectF r, int alpha) {
             Path chip = squircleForGlyph(r);
-            chipPaint.setColor(0xFF2563EB);
+            chipPaint.setColor(0xFFF5F5F5);
             chipPaint.setAlpha(Math.min(alpha, 245));
             canvas.drawPath(chip, chipPaint);
 
@@ -1103,6 +1103,8 @@ public final class Bubble {
             float cy = r.centerY();
             float hw = dp(getContext(), 8.5f);
             float hh = dp(getContext(), 6.2f);
+            int glyphPrev = glyphPaint.getColor();
+            glyphPaint.setColor(0xFF000000);
             glyphPaint.setAlpha(alpha);
             glyphPaint.setStrokeWidth(dp(getContext(), 2.4f));
             glyphPath.reset();
@@ -1110,6 +1112,7 @@ public final class Bubble {
             glyphPath.lineTo(cx - hw * 0.28f, cy + hh);
             glyphPath.lineTo(cx + hw, cy - hh);
             canvas.drawPath(glyphPath, glyphPaint);
+            glyphPaint.setColor(glyphPrev);
         }
 
         private final Path scratchPath = new Path();

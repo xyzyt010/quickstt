@@ -54,6 +54,9 @@ public final class QuickSttInputMethodService extends InputMethodService {
 
     private VoiceBarView voiceBar;
 
+    /** Last EditorInfo seen in onStartInput(View); gates when the bar may show. */
+    private static volatile EditorInfo lastEditorInfo;
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -71,7 +74,15 @@ public final class QuickSttInputMethodService extends InputMethodService {
     @Override
     public boolean onEvaluateInputViewShown() {
         super.onEvaluateInputViewShown();
-        return true;
+        // The voice bar is a keyboard: it may appear ONLY in the keyboard
+        // area, and only while an editable EditorInfo is bound. TYPE_NULL
+        // means "no text field" (e.g. some WebViews / custom views) — the
+        // system must not show any input view for those.
+        EditorInfo info = getCurrentInputEditorInfo();
+        if (info == null) {
+            info = lastEditorInfo;
+        }
+        return isEditableEditor(info);
     }
 
     @Override
@@ -84,21 +95,22 @@ public final class QuickSttInputMethodService extends InputMethodService {
     public void onStartInput(EditorInfo attribute, boolean restarting) {
         super.onStartInput(attribute, restarting);
         instance = this;
+        lastEditorInfo = attribute;
         Overlay.initNative(this);
         Bubble.ensureWatcher(this);
         if (!restarting) {
             beginTurn();
         }
-        if (isEditableEditor(attribute) || isInputViewShown()) {
-            Bubble.onImeActive(this, true);
-        }
+        // Notify the overlay pill only for a real editable field.
+        Bubble.onImeActive(this, isEditableEditor(attribute));
     }
 
     @Override
     public void onStartInputView(EditorInfo info, boolean restarting) {
         super.onStartInputView(info, restarting);
         instance = this;
-        Bubble.onImeActive(this, true);
+        lastEditorInfo = info;
+        Bubble.onImeActive(this, isEditableEditor(info));
     }
 
     @Override
@@ -125,6 +137,8 @@ public final class QuickSttInputMethodService extends InputMethodService {
     @Override
     public void onFinishInput() {
         beginTurn();
+        lastEditorInfo = null;
+        Bubble.onImeActive(this, false);
         super.onFinishInput();
     }
 
@@ -141,17 +155,85 @@ public final class QuickSttInputMethodService extends InputMethodService {
         super.onDestroy();
     }
 
+    /**
+     * Strictly editable: an EditorInfo is present and its input class is not
+     * TYPE_NULL. Field names/hints do not make a TYPE_NULL editor typable —
+     * the system binds no usable InputConnection editing session for it.
+     */
     private static boolean isEditableEditor(EditorInfo attribute) {
         if (attribute == null) {
             return false;
         }
         int cls = attribute.inputType & InputType.TYPE_MASK_CLASS;
-        if (cls != InputType.TYPE_NULL) {
+        return cls != InputType.TYPE_NULL;
+    }
+
+    /**
+     * Password / no-save editors. Committing text into them through the IME
+     * is allowed, but the transcript must never be persisted to history,
+     * logs or the clipboard. Incognito (no-personalized-learning) editors
+     * are treated the same way.
+     */
+    private static boolean isSensitiveEditor(EditorInfo info) {
+        if (info == null) {
+            return false;
+        }
+        if ((info.imeOptions & EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING) != 0) {
             return true;
         }
-        return !TextUtils.isEmpty(attribute.fieldName)
-                || attribute.fieldId > 0
-                || !TextUtils.isEmpty(attribute.hintText);
+        int cls = info.inputType & InputType.TYPE_MASK_CLASS;
+        int variation = info.inputType & InputType.TYPE_MASK_VARIATION;
+        if (cls == InputType.TYPE_CLASS_TEXT) {
+            return variation == InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    || variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                    || variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD;
+        }
+        if (cls == InputType.TYPE_CLASS_NUMBER) {
+            return variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD;
+        }
+        return false;
+    }
+
+    /** True when the currently bound editor must not be saved/copied/logged. */
+    public static boolean isCurrentFieldSensitive() {
+        QuickSttInputMethodService svc = instance;
+        EditorInfo info = null;
+        if (svc != null) {
+            try {
+                info = svc.getCurrentInputEditorInfo();
+            } catch (Throwable ignored) {
+            }
+        }
+        if (info == null) {
+            info = lastEditorInfo;
+        }
+        return isSensitiveEditor(info);
+    }
+
+    /** Run the editor's own action (search / send / go / done) if it has one. */
+    void handleEditorAction() {
+        try {
+            InputConnection ic = getCurrentInputConnection();
+            if (ic == null) {
+                return;
+            }
+            EditorInfo info = getCurrentInputEditorInfo();
+            if (info == null) {
+                info = lastEditorInfo;
+            }
+            int action = info != null
+                    ? (info.imeOptions & EditorInfo.IME_MASK_ACTION) : EditorInfo.IME_ACTION_UNSPECIFIED;
+            if (action != EditorInfo.IME_ACTION_UNSPECIFIED
+                    && action != EditorInfo.IME_ACTION_NONE) {
+                ic.performEditorAction(action);
+            } else {
+                ic.sendKeyEvent(new android.view.KeyEvent(
+                        android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_ENTER));
+                ic.sendKeyEvent(new android.view.KeyEvent(
+                        android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_ENTER));
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     /** Synchronize recording/loading state from Bubble into the IME voice bar if visible. */
@@ -526,6 +608,7 @@ public final class QuickSttInputMethodService extends InputMethodService {
         private final RectF kbdBtnRect = new RectF();
         private final RectF recBtnRect = new RectF();
         private final RectF delBtnRect = new RectF();
+        private final RectF enterBtnRect = new RectF();
         private final RectF spinnerRect = new RectF();
         private final Path squirclePath = new Path();
 
@@ -655,14 +738,24 @@ public final class QuickSttInputMethodService extends InputMethodService {
 
             // 2. Far-right "⌫" Backspace squircle button
             float delRight = cardRect.right - Bubble.dp(getContext(), 6f);
-            float delW = Bubble.dp(getContext(), 42f);
+            float delW = Bubble.dp(getContext(), 40f);
             delBtnRect.set(delRight - delW, cy - btnH * 0.5f, delRight, cy + btnH * 0.5f);
+            btnPaint.setColor(0xFF262626);
+            btnBorderPaint.setColor(0xFF383838);
             canvas.drawRoundRect(delBtnRect, btnR, btnR, btnPaint);
             canvas.drawRoundRect(delBtnRect, btnR, btnR, btnBorderPaint);
             canvas.drawText("⌫", delBtnRect.centerX(), base, textPaint);
 
+            // 2b. Editor action (search/send/done) button
+            float enterRight = delBtnRect.left - Bubble.dp(getContext(), 6f);
+            float enterW = Bubble.dp(getContext(), 40f);
+            enterBtnRect.set(enterRight - enterW, cy - btnH * 0.5f, enterRight, cy + btnH * 0.5f);
+            canvas.drawRoundRect(enterBtnRect, btnR, btnR, btnPaint);
+            canvas.drawRoundRect(enterBtnRect, btnR, btnR, btnBorderPaint);
+            canvas.drawText("↵", enterBtnRect.centerX(), base, textPaint);
+
             // 3. "● START" / "■ STOP" squircle button
-            float recRight = delBtnRect.left - Bubble.dp(getContext(), 6f);
+            float recRight = enterBtnRect.left - Bubble.dp(getContext(), 6f);
             float recW = Bubble.dp(getContext(), 76f);
             recBtnRect.set(recRight - recW, cy - btnH * 0.5f, recRight, cy + btnH * 0.5f);
             String recLabel;
@@ -676,12 +769,17 @@ public final class QuickSttInputMethodService extends InputMethodService {
                 btnBorderPaint.setColor(0xFF3D3D3D);
             } else {
                 recLabel = "● START";
-                btnPaint.setColor(0xFF2563EB);
-                btnBorderPaint.setColor(0xFF60A5FA);
+                btnPaint.setColor(0xFFF5F5F5);
+                btnBorderPaint.setColor(0xFFFFFFFF);
             }
             canvas.drawRoundRect(recBtnRect, btnR, btnR, btnPaint);
             canvas.drawRoundRect(recBtnRect, btnR, btnR, btnBorderPaint);
+            int prevColor = textPaint.getColor();
+            if (!liveRecording && !liveBusy) {
+                textPaint.setColor(0xFF000000);
+            }
             canvas.drawText(recLabel, recBtnRect.centerX(), base, textPaint);
+            textPaint.setColor(prevColor);
 
             // 4. Center status + round spinner
             float centerLeft = kbdBtnRect.right + Bubble.dp(getContext(), 10f);
@@ -711,7 +809,11 @@ public final class QuickSttInputMethodService extends InputMethodService {
                     handleBackspace();
                     return true;
                 }
-                if (recBtnRect.contains(x, y) || (!liveBusy || liveRecording)) {
+                if (enterBtnRect.contains(x, y)) {
+                    handleEditorAction();
+                    return true;
+                }
+                if (recBtnRect.contains(x, y)) {
                     Bubble.onImeActive(getContext(), true);
                     Bubble.dispatchAction(Bubble.ACTION_RECORD);
                     return true;

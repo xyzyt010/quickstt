@@ -456,8 +456,9 @@ impl Settings {
             .clamp(150, 280);
         settings.history_enabled =
             read_bool(key, "historyEnabled").unwrap_or(true);
-        settings.lrc_enabled =
-            read_bool(key, "lrcEnabled").unwrap_or(true);
+        // .lrc export is always on — there is no UI toggle anymore, so a
+        // legacy stored "false" must not survive.
+        settings.lrc_enabled = true;
         settings.ww_hey_jarvis =
             read_bool(key, "wwHeyJarvis").unwrap_or(true);
         settings.ww_jarvis =
@@ -516,6 +517,8 @@ impl Settings {
             .map_err(|e| crate::error::QuickSttError::SettingsError(e.to_string()))?;
         let mut settings: Self = toml::from_str(&content)
             .map_err(|e| crate::error::QuickSttError::SettingsError(e.to_string()))?;
+        // .lrc export is always on (no UI toggle).
+        settings.lrc_enabled = true;
         Self::migrate_extra(&mut settings);
         // Same rule as the Registry path: stored value wins, otherwise the
         // default (Start — transients are active out of the box).

@@ -31,7 +31,7 @@ pub const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
 pub const AUTO_RESTART_DELAY_SECS: u64 = 2;
 
 /// Default auto-offload delay (seconds)
-pub const DEFAULT_OFFLOAD_DELAY_SECS: u32 = 300;
+pub const DEFAULT_OFFLOAD_DELAY_SECS: u32 = 5;
 
 /// Default wake word engine label kept compatible with the legacy Qt app.
 pub const DEFAULT_WAKE_ENGINE: &str = "OpenWakeWord (TFLite)";

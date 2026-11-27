@@ -51,19 +51,14 @@ pub fn has_window_focus() -> bool {
 
 /// Type text into the app that currently has the focus.
 ///
-/// This is the lowest level input API an app can use: real `KeyEvent`s
-/// (built by `KeyCharacterMap.getEvents`, so capitals and punctuation come
-/// out right) are pushed into the input stack with
-/// `InputManager.injectInputEvent` — the same mechanism the system uses for
-/// hardware keyboards.
-///
-/// It needs the `INJECT_EVENTS` permission, which is a system permission: it
-/// only works on a rooted phone, on a userdebug/eng build, or when the appop
-/// is enabled with
-/// `adb shell appops set ai.quickstt.app android:inject_event allow`.
-/// When it is not allowed the call fails and the caller falls back to the
-/// clipboard.
-#[cfg(target_os = "android")]
+/// Android-legal path only: the text is committed through QuickSTT's own
+/// Input Method (`QuickSttInputMethodService`), whose `InputConnection` is
+/// bound by the system to the currently focused editor. There is no other
+/// sanctioned way for one app to write into another app's field:
+/// `INJECT_EVENTS` is a signature permission (root/userdebug only) and an
+/// accessibility service is Play-Protect-blocked for sideloaded APKs — both
+/// were removed. When QuickSTT is not the active IME this returns `Err`
+/// and the caller falls back to clipboard + "tap the field and paste".
 pub fn inject_text(text: &str) -> Result<(), String> {
     if text.trim().is_empty() {
         return Ok(());
@@ -71,95 +66,7 @@ pub fn inject_text(text: &str) -> Result<(), String> {
     if commit_final_text(text) {
         return Ok(());
     }
-    let app = app().ok_or("the app is not running")?;
-    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }.map_err(|e| e.to_string())?;
-    let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
-
-    let result = (|| -> Result<(), String> {
-        // The input manager: it is a hidden class, but the system hands it
-        // out through the regular getSystemService() call.
-        let service = env
-            .new_string("input")
-            .map_err(|e| e.to_string())?;
-        let manager = env
-            .call_method(
-                &activity,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
-                &[JValue::from(&service)],
-            )
-            .map_err(|e| e.to_string())?
-            .l()
-            .map_err(|e| e.to_string())?;
-
-        // The virtual keyboard's character map: it turns a character into the
-        // key events (with the right shift/meta state) a real keyboard sends.
-        let kcm_cls = env
-            .find_class("android/view/KeyCharacterMap")
-            .map_err(|e| e.to_string())?;
-        let keymap = env
-            .call_static_method(
-                kcm_cls,
-                "load",
-                "(I)Landroid/view/KeyCharacterMap;",
-                &[JValue::from(-1i32)],
-            )
-            .map_err(|e| e.to_string())?
-            .l()
-            .map_err(|e| e.to_string())?;
-
-        for ch in text.chars() {
-            // UTF-16 units (a surrogate pair is two units).
-            let mut units = [0u16; 2];
-            let units = ch.encode_utf16(&mut units).to_vec();
-            let array = env
-                .new_char_array(units.len() as i32)
-                .map_err(|e| e.to_string())?;
-            env.set_char_array_region(&array, 0, &units)
-                .map_err(|e| e.to_string())?;
-            let events = env
-                .call_method(
-                    &keymap,
-                    "getEvents",
-                    "([C)[Landroid/view/KeyEvent;",
-                    &[JValue::from(&array)],
-                )
-                .map_err(|e| e.to_string())?
-                .l()
-                .map_err(|e| e.to_string())?;
-            let events = jni::objects::JObjectArray::from(events);
-            let len = env.get_array_length(&events).map_err(|e| e.to_string())?;
-            for index in 0..len {
-                let event = env
-                    .get_object_array_element(&events, index)
-                    .map_err(|e| e.to_string())?;
-                env.call_method(
-                    &manager,
-                    "injectInputEvent",
-                    "(Landroid/view/InputEvent;I)V",
-                    &[JValue::from(&event), JValue::from(INJECT_MODE_WAIT_FOR_FINISH)],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-        }
-        Ok(())
-    })();
-
-    // A refused injection leaves a Java exception pending; clear it so the
-    // thread stays usable and report what happened.
-    if env.exception_check().unwrap_or(false) {
-        let _ = env.exception_clear();
-        return Err("Android refused the input (the INJECT_EVENTS permission is missing)".into());
-    }
-    std::mem::forget(activity);
-    result.map_err(|e| e)
-}
-
-/// Desktop preview: there is no input stack to type into.
-#[cfg(not(target_os = "android"))]
-pub fn inject_text(_text: &str) -> Result<(), String> {
-    Err("typing into other apps is only possible on Android".into())
+    Err("QuickSTT is not the active keyboard - text was copied; tap the field and paste, or select the QuickSTT keyboard".into())
 }
 
 /// Offer the text to other apps through the system share sheet. This always
@@ -233,11 +140,6 @@ struct OverlayHandle {
     view: jni::objects::GlobalRef,
     params: jni::objects::GlobalRef,
 }
-
-/// `InputManager.INJECT_INPUT_EVENT_MODE_WAIT_FOR_FINISH` — the injected event
-/// is fully processed before the call returns.
-#[cfg(target_os = "android")]
-const INJECT_MODE_WAIT_FOR_FINISH: i32 = 2;
 
 /// The Android app handle. It owns the Activity instance and the Java UI
 /// thread, both of which we need.
@@ -1118,8 +1020,11 @@ pub fn watch_overlay_permission() {
     }
 }
 
-/// True when the QuickSTT accessibility auto-typing service is enabled.
-pub fn accessibility_enabled() -> bool {
+/// True when the QuickSTT voice IME is enabled AND selected as active.
+/// (An earlier accessibility-based design was rejected: accessibility
+/// services are Play-Protect-blocked for sideloaded APKs, so typing uses
+/// only the sanctioned Input Method path.)
+pub fn ime_ready() -> bool {
     #[cfg(target_os = "android")]
     {
         with_activity(|env, activity| {
@@ -1127,7 +1032,7 @@ pub fn accessibility_enabled() -> bool {
                 env,
                 activity,
                 "ai/quickstt/app/Overlay",
-                "accessibilityEnabled",
+                "imeReady",
                 "(Landroid/content/Context;)Z",
                 &[JValue::from(activity)],
             )?;
@@ -1139,8 +1044,9 @@ pub fn accessibility_enabled() -> bool {
     false
 }
 
-/// Open the Android Accessibility settings screen so the user can enable auto-typing.
-pub fn open_accessibility_settings() -> Result<(), String> {
+/// Open Android keyboard settings (or the input-method picker when the
+/// QuickSTT IME is already enabled) so the user can select the voice IME.
+pub fn open_ime_settings() -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let outcome = with_activity(|env, activity| {
@@ -1148,7 +1054,7 @@ pub fn open_accessibility_settings() -> Result<(), String> {
                 env,
                 activity,
                 "ai/quickstt/app/Overlay",
-                "openAccessibilitySettings",
+                "openImeSettings",
                 "(Landroid/content/Context;)Ljava/lang/String;",
                 &[JValue::from(activity)],
             )?;
@@ -1157,7 +1063,7 @@ pub fn open_accessibility_settings() -> Result<(), String> {
         match outcome {
             Some(msg) if msg.is_empty() => Ok(()),
             Some(msg) => Err(msg),
-            None => Err("accessibility settings could not be opened".into()),
+            None => Err("keyboard settings could not be opened".into()),
         }
     }
     #[cfg(not(target_os = "android"))]
@@ -1252,6 +1158,177 @@ pub fn commit_final_text(text: &str) -> bool {
     {
         let _ = text;
         false
+    }
+}
+
+/// True when the currently bound editor is a password / no-save field.
+/// Such turns may be committed through the IME but must never be persisted
+/// to history, logs or the clipboard (see `QuickSttInputMethodService`).
+pub fn focused_field_sensitive() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "currentFieldSensitive",
+                "()Z",
+                &[],
+            )?;
+            value.z().ok()
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    false
+}
+
+/// Store a provider API key in the AndroidKeyStore-backed Java store.
+/// The key itself is never logged or kept in Rust beyond this call.
+pub fn api_set_key(provider: &str, key: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let p = env.new_string(provider).ok()?;
+            let k = env.new_string(key).ok()?;
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/ApiClient",
+                "setKey",
+                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Z",
+                &[JValue::from(activity), JValue::from(&p), JValue::from(&k)],
+            )?;
+            value.z().ok()
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (provider, key);
+        false
+    }
+}
+
+/// True when a usable (decryptable, non-empty) key is stored for a provider.
+pub fn api_has_key(provider: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let p = env.new_string(provider).ok()?;
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/ApiClient",
+                "hasKey",
+                "(Landroid/content/Context;Ljava/lang/String;)Z",
+                &[JValue::from(activity), JValue::from(&p)],
+            )?;
+            value.z().ok()
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = provider;
+        false
+    }
+}
+
+pub fn api_clear_key(provider: &str) {
+    #[cfg(target_os = "android")]
+    {
+        let _ = with_activity(|env, activity| {
+            let p = env.new_string(provider).ok()?;
+            call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/ApiClient",
+                "clearKey",
+                "(Landroid/content/Context;Ljava/lang/String;)V",
+                &[JValue::from(activity), JValue::from(&p)],
+            )?;
+            Some(())
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = provider;
+    }
+}
+
+/// Transcribe a 16 kHz WAV with a cloud provider via the Java HTTPS helper.
+/// Blocking — call from a worker thread. Errors are user-readable and
+/// never contain the API key.
+pub fn api_transcribe(provider: &str, model: &str, wav: &std::path::Path, language: &str) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        let wav_text = wav.to_string_lossy().to_string();
+        let outcome = with_activity(|env, activity| {
+            let p = env.new_string(provider).ok()?;
+            let m = env.new_string(model).ok()?;
+            let w = env.new_string(&wav_text).ok()?;
+            let l = env.new_string(language).ok()?;
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/ApiClient",
+                "transcribe",
+                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                &[
+                    JValue::from(activity),
+                    JValue::from(&p),
+                    JValue::from(&m),
+                    JValue::from(&w),
+                    JValue::from(&l),
+                ],
+            )?;
+            jni_string(env, value)
+        });
+        match outcome {
+            Some(body) => {
+                if let Some(text) = body.strip_prefix("OK\n") {
+                    Ok(text.trim().to_string())
+                } else if let Some(err) = body.strip_prefix("ERR\n") {
+                    Err(err.trim().to_string())
+                } else {
+                    Err("the provider reply could not be read".into())
+                }
+            }
+            None => Err("the API request could not be started (is the app in front?)".into()),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (provider, model, wav, language);
+        Err("cloud transcription is only available on Android".into())
+    }
+}
+
+/// Free bytes on the app volume, for the pre-download storage check (-1 = unknown).
+pub fn free_space_bytes(path: &std::path::Path) -> i64 {
+    #[cfg(target_os = "android")]
+    {
+        let text = path.to_string_lossy().to_string();
+        with_activity(|env, activity| {
+            let p = env.new_string(&text).ok()?;
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/ApiClient",
+                "freeSpaceBytes",
+                "(Ljava/lang/String;)J",
+                &[JValue::from(&p)],
+            )?;
+            value.j().ok()
+        })
+        .unwrap_or(-1)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = path;
+        -1
     }
 }
 

@@ -168,16 +168,22 @@ pub fn model_dir(engine: u32) -> PathBuf {
     })
 }
 
-/// True when the worker script + every file this engine needs are on disk.
-pub fn files_present(engine: u32) -> bool {
-    let worker_ok = worker_candidates().iter().any(|p| p.is_file());
+/// True when every model file this engine needs is on disk (worker script
+/// not required — this is the dashboard's "Downloaded" state).
+pub fn model_files_present(engine: u32) -> bool {
     let required = match engine {
         ENGINE_S1MINI => S1_REQUIRED,
         ENGINE_SMOLLM2 => SMOLLM2_REQUIRED,
         ENGINE_GEMMA3 => GEMMA3_REQUIRED,
         _ => FDT_REQUIRED,
     };
-    worker_ok && required.iter().all(|f| model_dir(engine).join(f).is_file())
+    required.iter().all(|f| model_dir(engine).join(f).is_file())
+}
+
+/// True when the worker script + every file this engine needs are on disk.
+pub fn files_present(engine: u32) -> bool {
+    let worker_ok = worker_candidates().iter().any(|p| p.is_file());
+    worker_ok && model_files_present(engine)
 }
 
 fn worker_candidates() -> Vec<PathBuf> {
@@ -467,7 +473,7 @@ pub fn ensure_download(state: SharedState, engine: u32) {
         ENGINE_GEMMA3 => 3,
         _ => 0,
     };
-    if files_present(engine) || DL_STARTED[idx].swap(true, Ordering::Relaxed) {
+    if model_files_present(engine) || DL_STARTED[idx].swap(true, Ordering::Relaxed) {
         return;
     }
     std::thread::Builder::new()
@@ -509,6 +515,10 @@ pub fn ensure_download(state: SharedState, engine: u32) {
                 {
                     warn!("Cleanup download failed for {name}: {e:#}");
                     let _ = std::fs::remove_file(&dest);
+                    // Allow a retry from the Download button: the old
+                    // code left DL_STARTED latched after any failure, so
+                    // a failed fetch could never be retried in-process.
+                    DL_STARTED[idx].store(false, Ordering::Relaxed);
                     if let Ok(mut s) = state.lock() {
                         s.is_downloading = false;
                         s.download_speed_text = String::new();

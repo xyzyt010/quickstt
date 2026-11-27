@@ -12,7 +12,8 @@
 //     behave identically to dashboard picks (and survive the restart).
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { Button, CheckBox, ComboBox } from "std-widgets.slint";
+import { Button, CheckBox } from "std-widgets.slint";
+import { ChevronDropdown } from "common.slint";
 
 // Small round icon button (Back / Skip / Next footer + Skip top-right).
 component PillButton inherits Rectangle {
@@ -547,8 +548,7 @@ export component OnboardingWidget inherits Window {
                 if root.step == 3 : VerticalLayout {
                     spacing: 12px;
                     Text { text: "Transcription language:"; font-size: 15px; color: #E6E6E6; }
-                    ComboBox {
-                        height: 42px;
+                    ChevronDropdown {
                         model: root.languages;
                         current-index: root.selected-language;
                         selected(v) => { root.set-language(v); }
@@ -596,8 +596,7 @@ export component OnboardingWidget inherits Window {
                         }
                     }
                     Text { text: "Choose a model:"; font-size: 15px; color: #E6E6E6; }
-                    ComboBox {
-                        height: 42px;
+                    ChevronDropdown {
                         model: root.models;
                         current-index: root.selected-model;
                         selected(v) => { root.set-model(v); }

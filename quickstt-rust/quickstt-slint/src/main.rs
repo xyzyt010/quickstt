@@ -7281,12 +7281,9 @@ fn dock_hop(
                                     }
                                 }
                             } else {
-                                if s.settings.clean_disfluencies {
-                                    quickstt_core::models::disfluency::ensure_download(
-                                        Arc::clone(&state_timer),
-                                        s.settings.disfluency_engine,
-                                    );
-                                }
+                                // No auto-download at turn time: cleanup
+                                // weights are fetched only from the explicit
+                                // Download button next to the cleanup dropdown.
                                 log_line(&format!(
                                     "batch turn output bulk +{} chars",
                                     raw_full.len()
@@ -7615,9 +7612,10 @@ fn dock_hop(
                             };
                             let is_active = idx == s.selected_model;
                             let is_rec = Some(idx) == s.recommended_model && !is_active;
-                            let badge = if is_active {
-                                "Active"
-                            } else if is_rec {
+                            // No "Active" badge beside the name (duplicate
+                            // of the right-edge Active button) — only the
+                            // Best-fit recommendation pill lives there.
+                            let badge = if is_rec {
                                 "Best fit"
                             } else {
                                 ""
@@ -8935,9 +8933,10 @@ fn dock_hop(
     }
     {
         let state = state.clone();
-        dashboard.on_set_lrc_enabled(move |on| {
+        dashboard.on_set_lrc_enabled(move |_on| {
             if let Ok(mut s) = state.lock() {
-                s.settings.lrc_enabled = on;
+                // Always on — no UI toggle anymore.
+                s.settings.lrc_enabled = true;
                 let _ = s.settings.save_all();
             }
         });
@@ -8994,17 +8993,28 @@ fn dock_hop(
                     "cleanup engine -> {}",
                     quickstt_core::models::disfluency::engine_label(engine)
                 ));
-                // Fetch the newly selected weights in the background so the
-                // first turn with it does not silently pass text through.
-                if s.settings.clean_disfluencies
-                    && !quickstt_core::models::disfluency::files_present(engine)
-                {
-                    quickstt_core::models::disfluency::ensure_download(
-                        Arc::clone(&state),
-                        engine,
-                    );
-                }
+                // No silent auto-download on select: the user fetches the
+                // weights explicitly with the Download button (which shows
+                // Downloaded / Not downloaded + live % progress).
             }
+        });
+    }
+    {
+        let state = state.clone();
+        dashboard.on_download_cleanup_model(move |v| {
+            let engine = v.clamp(0, 3) as u32;
+            if quickstt_core::models::disfluency::model_files_present(engine) {
+                log_line(&format!(
+                    "cleanup download: {} already downloaded",
+                    quickstt_core::models::disfluency::engine_label(engine)
+                ));
+                return;
+            }
+            log_line(&format!(
+                "cleanup download -> {}",
+                quickstt_core::models::disfluency::engine_label(engine)
+            ));
+            quickstt_core::models::disfluency::ensure_download(Arc::clone(&state), engine);
         });
     }
     {
@@ -9844,6 +9854,31 @@ fn dock_hop(
             dashboard.set_ctrl_space_output(s.settings.ctrl_space_output as i32);
             dashboard.set_clean_disfluencies(s.settings.clean_disfluencies);
             dashboard.set_disfluency_engine(s.settings.disfluency_engine.clamp(0, 3) as i32);
+            {
+                use quickstt_core::models::disfluency as disf;
+                let dl: Vec<bool> = (0..4).map(|e| disf::model_files_present(e)).collect();
+                let cur = dashboard.get_cleanup_downloaded();
+                let cur_vec: Vec<bool> = (0..4).map(|i| cur.row_data(i).unwrap_or(false)).collect();
+                if cur_vec != dl {
+                    dashboard.set_cleanup_downloaded(slint::ModelRc::new(slint::VecModel::from_slice(&dl)));
+                }
+                // Which cleanup engine is downloading (label match against
+                // the global download state the downloader maintains).
+                let cleanup_dl = if s.is_downloading {
+                    match s.download_name.as_str() {
+                        n if n.contains("S1-mini") => 1,
+                        n if n.contains("SmolLM2") => 2,
+                        n if n.contains("Gemma") => 3,
+                        n if n.contains("Disfluency") => 0,
+                        _ => -1,
+                    }
+                } else {
+                    -1
+                };
+                if dashboard.get_cleanup_downloading() != cleanup_dl {
+                    dashboard.set_cleanup_downloading(cleanup_dl);
+                }
+            }
             dashboard.set_sidebar_width(s.settings.dash_sidebar_width.clamp(225, 280) as i32);
             dashboard.set_sidebar_collapsed(s.settings.dash_sidebar_collapsed);
             dashboard.set_history_enabled(s.settings.history_enabled);

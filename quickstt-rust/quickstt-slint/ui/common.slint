@@ -29,6 +29,93 @@ export component IconSym inherits Rectangle {
     }
 }
 
+// Dropdown with a rotating chevron: collapsed = chevron points down,
+// expanded = chevron points up, 160ms smooth rotation between states.
+// Inline expansion (no OS popup) so it never clips inside ScrollViews.
+export component ChevronDropdown inherits Rectangle {
+    in property <[string]> model: [];
+    in-out property <int> current-index: 0;
+    in property <bool> enabled: true;
+    in-out property <bool> expanded: false;
+    callback selected(string);
+
+    height: root.expanded && root.enabled ? (42px + root.model.length * 38px + 6px) : 40px;
+    animate height { duration: 160ms; easing: ease-out; }
+    border-radius: 8px;
+    background: #141414;
+    border-width: 1px;
+    border-color: root.expanded ? #404040 : #262626;
+    animate border-color { duration: 160ms; easing: ease-out; }
+    opacity: root.enabled ? 1.0 : 0.45;
+    clip: true;
+
+    // Header row (always visible)
+    Rectangle {
+        x: 0px; y: 0px;
+        width: parent.width;
+        height: 40px;
+        background: transparent;
+        Text {
+            x: 12px;
+            width: parent.width - 48px;
+            height: parent.height;
+            text: root.model.length > 0 ? root.model[clamp(root.current-index, 0, root.model.length - 1)] : "";
+            font-size: 14.5px;
+            color: #FFFFFF;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        IconSym {
+            glyph: "\u{E313}";
+            size: 22px;
+            tint: #B9B9B9;
+            x: parent.width - self.width - 10px;
+            y: (parent.height - self.height) / 2;
+            transform-rotation: root.expanded ? 180deg : 0deg;
+            animate transform-rotation { duration: 160ms; easing: ease-out; }
+        }
+        header_touch := TouchArea {
+            enabled: root.enabled;
+            clicked => { root.expanded = !root.expanded; }
+            mouse-cursor: pointer;
+        }
+    }
+
+    // Options list (only when expanded)
+    if root.expanded : VerticalLayout {
+        x: 4px;
+        y: 44px;
+        width: parent.width - 8px;
+        spacing: 2px;
+        for opt[i] in root.model : Rectangle {
+            height: 36px;
+            border-radius: 6px;
+            background: i == root.current-index ? #262626 : (opt_touch.has-hover ? #1A1A1A : transparent);
+            animate background { duration: 110ms; easing: ease-out; }
+            Text {
+                x: 8px;
+                width: parent.width - 16px;
+                height: parent.height;
+                text: opt;
+                font-size: 14.5px;
+                font-weight: i == root.current-index ? 700 : 400;
+                color: i == root.current-index ? #FFFFFF : #D8D8D8;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            opt_touch := TouchArea {
+                enabled: root.enabled;
+                clicked => {
+                    root.current-index = i;
+                    root.expanded = false;
+                    root.selected(opt);
+                }
+                mouse-cursor: pointer;
+            }
+        }
+    }
+}
+
 // One-tap segmented toggle: leading icon + label, hairline plate, filled
 // when armed. Replaces std-widgets CheckBox in the history toolbar (the
 // stock checkbox was visually from 2012).
