@@ -1,0 +1,46 @@
+# Maintainer: QuickSTT Team <support@quickstt.com>
+# Binary repackage of the official universal tarball (no compilation).
+# Build: makepkg -si
+pkgname=quickstt
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Floating offline voice typing pill (Whisper/Parakeet/Nemotron, X11 & Wayland/Hyprland)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/xyzyt010/quickstt"
+license=('MIT')
+depends=('gtk3' 'alsa-lib' 'libpulse' 'portaudio' 'libx11' 'libxi' 'libxtst' 'xdotool' 'xclip' 'openblas')
+optdepends=('wtype: Wayland typing'
+            'wl-clipboard: Wayland clipboard'
+            'ydotool: Wayland typing fallback')
+options=('!strip')
+source=("quickstt-${pkgver}.tar.gz::https://github.com/xyzyt010/quickstt/releases/download/desktop-v${pkgver}/quickstt-desktop-v${pkgver}-${CARCH}.tar.gz")
+noextract=("quickstt-${pkgver}.tar.gz")
+# Replace with the value from the release SHA256SUMS (run: makepkg -g).
+sha256sums=('SKIP')
+
+package() {
+  install -dm755 "${pkgdir}/opt/quickstt"
+  bsdtar -xf "${srcdir}/quickstt-${pkgver}.tar.gz" -C "${pkgdir}/opt/quickstt"
+  chmod 755 "${pkgdir}/opt/quickstt/QuickSTT"
+  find "${pkgdir}/opt/quickstt/tools" -type f \
+    \( -name 'whisper-cli' -o -name 'transcribe-cli' -o -name 'parakeet_engine' -o -name 'llama-cli' \) \
+    -exec chmod 755 {} + 2>/dev/null || true
+
+  install -dm755 "${pkgdir}/usr/bin"
+  ln -s /opt/quickstt/QuickSTT "${pkgdir}/usr/bin/quickstt"
+
+  if [ -f "${pkgdir}/opt/quickstt/assets/quickstt.desktop" ]; then
+    install -Dm644 "${pkgdir}/opt/quickstt/assets/quickstt.desktop" \
+      "${pkgdir}/usr/share/applications/quickstt.desktop"
+    # Point the packaged entry at the system install.
+    sed -i 's|^Exec=.*|Exec=/usr/bin/quickstt|' "${pkgdir}/usr/share/applications/quickstt.desktop"
+  fi
+  if [ -f "${pkgdir}/opt/quickstt/icon_app.png" ]; then
+    install -Dm644 "${pkgdir}/opt/quickstt/icon_app.png" \
+      "${pkgdir}/usr/share/pixmaps/quickstt.png"
+  fi
+  if [ -f "${pkgdir}/opt/quickstt/LICENSE.txt" ]; then
+    install -Dm644 "${pkgdir}/opt/quickstt/LICENSE.txt" \
+      "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  fi
+}

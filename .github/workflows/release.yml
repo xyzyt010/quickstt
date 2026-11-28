@@ -143,12 +143,16 @@ jobs:
             java/ai/quickstt/app/Bubble.java java/ai/quickstt/app/Overlay.java \
             java/ai/quickstt/app/Engine.java java/ai/quickstt/app/SpeechService.java \
             java/ai/quickstt/app/ModelDownloader.java \
-            java/ai/quickstt/app/QuickSttInputMethodService.java
+            java/ai/quickstt/app/ApiClient.java \
+            java/ai/quickstt/app/QuickSttInputMethodService.java \
+            java/ai/quickstt/app/QuickSttAccessibilityService.java
           "$BUILD_TOOLS"/d8 --min-api 26 --output target/dex/dex \
             target/dex/classes/ai/quickstt/app/*.class
-          # Our own manifest: it declares the foreground service and the
-          # Voice Auto-Type input method (no accessibility service, so
-          # Play Protect does not block sideloaded installs).
+          # Our own manifest: it declares the foreground service, the
+          # Voice Auto-Type input method, and the optional Keyboard
+          # Companion accessibility service (sideload companion only, off
+          # by default until the user explicitly enables it in system
+          # Accessibility settings; not required for normal use).
           VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           MAJOR="${VERSION%%.*}"; REST="${VERSION#*.}"
           MINOR="${REST%%.*}"; PATCH="${REST#*.}"
@@ -257,8 +261,10 @@ jobs:
 
           On-device, offline voice dictation for Android: a translucent floating
           pill you tap anywhere, plus a standard Voice Auto-Type keyboard that
-          types live into any text box — no accessibility service, no root,
-          nothing leaves the phone.
+          types live into any text box — no root, nothing leaves the phone.
+          An optional Keyboard Companion accessibility service is included
+          for sideload builds; it is off by default and only runs if you
+          explicitly enable it in system Accessibility settings.
 
           ### Fixed & improved in this release (Android __VER__)
           - **Floating squircle widget pops up reliably on any text field**: combines a 1px full-height transparent `WindowInsets.Type.ime()` watcher (`ImeWatcherView`) with `QuickSttInputMethodService` callbacks and Android 11+ Display-backed `WindowContext` creation so the squircle widget appears whenever you tap any text field outside the app (whether using QuickSTT Voice Auto-Type or Gboard/Samsung Keyboard) or tap the transcript box inside the app.

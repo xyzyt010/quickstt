@@ -17,7 +17,7 @@
 
 #define MyAppName "QuickSTT"
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.0-alpha.58"
+  #define MyAppVersion "1.0.0"
 #endif
 ; The Windows file-version resource needs four numeric fields; the app's own
 ; version carries a pre-release label ("2.0.0-alpha.29"). Build-Installer.ps1

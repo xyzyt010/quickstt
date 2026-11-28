@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.0] — 2026-11-28
+
+First final release. Supersedes the 2.0.0-alpha line (kept: alpha.58/alpha.57
+desktop, alpha.28 Android; all older releases deleted).
+
+- **Desktop**: offline voice-typing pill (wakewords, clap gate, tray),
+  right-click menus with keyed/downloaded-only model flyouts, minimal
+  monochrome Settings with rotating-chevron dropdowns, explicit cleanup-model
+  downloads, 5s model auto-offload, durable History.
+- **Android**: desktop-matched minimal UI, IME voice keyboard (appears only
+  on real text fields), optional sideload Keyboard Companion (accessibility,
+  any keyboard), drag-to-remove pill, durable history, cloud providers with
+  Keystore keys.
+- **Install**: one command everywhere — `install.sh` (Debian/Fedora/Arch/
+  Gentoo/openSUSE, x86_64 + aarch64, X11/Xfce/Wayland/Hyprland) and
+  `install.ps1` (interactive setup wizard; Windows ARM64 via x64 emulation).
+  Native package recipes in `packaging/` (PKGBUILD, RPM spec, Gentoo ebuild).
+
 ## [2.0.0-alpha.58] — 2026-11-28
 
 Minimal settings polish + Android perfection pass.

@@ -22,28 +22,37 @@ QuickSTT is a **native** Linux + Windows app with two complementary stacks: a le
 
 ## Downloads
 
-Everything is published on the [GitHub release page](https://github.com/xyzyt010/quickstt/releases/latest) — the APK, the Linux tarball, the Debian package and the checksums.
+### One-command install (v1.0.0)
 
-| What | Platform | Link |
-|---|---|---|
-| **`quickstt-android-release.apk`** (10.5 MB) | Android 8.0+ (arm64-v8a) | [download](https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.28/quickstt-android-release.apk) |
-| `QuickSTT-Setup-2.0.0-alpha.26.exe` | Windows 10/11 (installer) | [download](https://github.com/xyzyt010/quickstt/releases/download/desktop-v2.0.0-alpha.26/QuickSTT-Setup-2.0.0-alpha.26.exe) |
-| `quickstt-desktop-v2.0.0-alpha.26-x86_64.tar.gz` | Ubuntu 22.04+ / Debian 12 / Mint 21+ | [download](https://github.com/xyzyt010/quickstt/releases/download/desktop-v2.0.0-alpha.26/quickstt-desktop-v2.0.0-alpha.26-x86_64.tar.gz) |
-| `quickstt_2.0.0.alpha.26-1_amd64.deb` | Debian / Ubuntu / Mint | [download](https://github.com/xyzyt010/quickstt/releases/download/desktop-v2.0.0-alpha.26/quickstt_2.0.0.alpha.26-1_amd64.deb) |
-| `SHA256SUMS` | — | [download](https://github.com/xyzyt010/quickstt/releases/latest/download/SHA256SUMS.txt) |
-
-Install the phone app:
+Linux (Debian family x86_64 gets the `.deb`; other distros/arches get the tarball in `~/.local`):
 
 ```bash
-wget -O quickstt.apk https://github.com/xyzyt010/quickstt/releases/download/v2.0.0-alpha.28/quickstt-android-release.apk
-adb install -r quickstt.apk
+curl -fsSL https://raw.githubusercontent.com/xyzyt010/quickstt/main/install.sh | sh
 ```
 
-The APK is signed with the release key, so it installs over the earlier
-builds. The models are **not** in the APK: the app downloads the one you
-pick (Whisper Tiny EN, Cactus Whistle, Moonshine, SenseVoice, Canary,
-Parakeet, Nemotron 3.5 ASR Streaming 0.6B, Qwen3-ASR) and then works
-offline.
+Windows (downloads the setup exe, verifies its checksum, launches the wizard):
+
+```powershell
+irm https://raw.githubusercontent.com/xyzyt010/quickstt/main/install.ps1 | iex
+```
+
+Pin a release with `QUICKSTT_VERSION=desktop-v1.0.0` (Linux) or `.\install.ps1 -Version 1.0.0` / `-Portable` / `-Silent` (Windows). Uninstall on Linux: `sh install.sh --uninstall`.
+
+### Manual downloads
+
+Everything is on the [GitHub releases page](https://github.com/xyzyt010/quickstt/releases) — desktop under tag `desktop-v1.0.0`, Android under tag `v1.0.0`:
+
+| Asset | Platform |
+|---|---|
+| `quickstt_1.0.0-1_amd64.deb` | Debian / Ubuntu / Mint, x86_64 |
+| `quickstt-desktop-v1.0.0-x86_64.tar.gz` | Linux x86_64, any distro |
+| `quickstt-desktop-v1.0.0-aarch64.tar.gz` | Linux aarch64, any distro |
+| `QuickSTT-Setup-1.0.0.exe` | Windows x64 installer (on Windows ARM64: via x64 emulation) |
+| `quickstt-desktop-v1.0.0-win64-portable.zip` | Windows x64 portable, no install |
+| `quickstt-android-release.apk` | Android 8.0+ (arm64-v8a), release `v1.0.0` |
+| `SHA256SUMS` | Checksums for that release's assets |
+
+The same Linux binary auto-supports X11 (incl. Xfce) and Wayland/Hyprland. Native Fedora/Arch/Gentoo package recipes live in [`packaging/`](packaging/README.md). Models are **not** bundled: the app downloads the one you pick, then works offline.
 
 ---
 
@@ -129,12 +138,12 @@ wget -O /tmp/quickstt.tar.gz \
 mkdir -p ~/quickstt && tar xzf /tmp/quickstt.tar.gz -C ~/quickstt && ~/quickstt/QuickSTT &
 ```
 
-### Alternative: `install.sh` (auto-detects distro, picks deb vs tarball)
+### Alternative: `install.sh` (auto-detects distro/arch/session, picks deb vs tarball)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xyzyt010/quickstt/main/scripts/install.sh | bash
-# Explicit:  curl -fsSL https://raw.githubusercontent.com/xyzyt010/quickstt/main/scripts/install.sh | bash -s -- --deb
-# Tarball:  curl -fsSL https://raw.githubusercontent.com/xyzyt010/quickstt/main/scripts/install.sh | bash -s -- --tarball
+curl -fsSL https://raw.githubusercontent.com/xyzyt010/quickstt/main/install.sh | sh
+# Pin a release:  QUICKSTT_VERSION=desktop-v1.0.0 curl -fsSL https://raw.githubusercontent.com/xyzyt010/quickstt/main/install.sh | sh
+# Uninstall:      sh install.sh --uninstall   (after downloading install.sh)
 ```
 
 ### Mint Cinnamon quirks
@@ -403,13 +412,14 @@ See `docs/BUILDING.md`.
 
 | Platform | Artifact | How | Install |
 |---|---|---|---|
-| **Linux Mint / Ubuntu / Debian** | `quickstt_2.0.0.alpha.26-1_amd64.deb` | `cargo deb -p quickstt-slint` (CI) | `sudo apt install ./quickstt_*.deb` |
-| **Portable Linux** | `quickstt-desktop-v2.0.0-alpha.26-x86_64.tar.gz` | CI `release-desktop.yml` | `tar xzf` into `~/quickstt`, run `./QuickSTT` |
-| **Windows** | `QuickSTT-Setup-2.0.0-alpha.26.exe` (installer) + `quickstt-slint-2.0.0-alpha.26-win64.exe` (portable) | `quickstt-rust/installer/Build-Installer.ps1` | run the installer, or the single exe anywhere |
+| **Linux Mint / Ubuntu / Debian (x86_64)** | `quickstt_1.0.0-1_amd64.deb` | `cargo deb -p quickstt-slint` (CI) | `sudo apt install ./quickstt_*.deb` |
+| **Linux x86_64 / aarch64, any distro** | `quickstt-desktop-v1.0.0-x86_64.tar.gz` / `quickstt-desktop-v1.0.0-aarch64.tar.gz` | CI `release-desktop.yml` | `install.sh`, or `tar xzf` and run `./QuickSTT` |
+| **Fedora / Arch / Gentoo** | native package from the tarball | recipes in `packaging/` (no CI-built rpm/pkg) | see `packaging/README.md` |
+| **Windows** | `QuickSTT-Setup-1.0.0.exe` (installer) + `quickstt-desktop-v1.0.0-win64-portable.zip` | `quickstt-rust/installer/Build-Installer.ps1` | run the installer, or unzip and run `QuickSTT.exe` |
 
-Checksums: `cat quickstt-rust/dist/SHA256SUMS; sha256sum -c dist/SHA256SUMS`.
+Checksums: `sha256sum -c SHA256SUMS` (downloaded from the same release).
 
-See `docs/PACKAGING.md`.
+See `packaging/README.md` and `docs/PACKAGING.md`.
 
 ---
 
