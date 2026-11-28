@@ -20,7 +20,13 @@ name: Windows ARM64 Portable
 #
 # Engine notes (ARM64):
 # - whisper-cli, llama-cli and transcribe-cli are built from source
-#   on the ARM runner (generic flags, never -march=native leak).
+#   on the ARM runner (no -march flags are ever passed).
+# - ggml on MSVC-ARM hard-errors with GGML_NATIVE=OFF
+#   ("MSVC on ARM requires GGML_NATIVE=ON", ggml/src/ggml-cpu/CMakeLists.txt).
+#   The engines below therefore use GGML_NATIVE=ON on ARM: under cl.exe
+#   this does NOT emit any -march/-mcpu flag (it only probes features and
+#   forwards -D__ARM_FEATURE_* defines), so it keeps the generic,
+#   no-native-leak intent of the x64 job.
 # - parakeet_engine is built from source (continue-on-error: the
 #   checked-in tools\parakeet binaries are x86-only MinGW builds and
 #   must never ship in an ARM zip; if the ARM build fails, the zip
@@ -85,13 +91,15 @@ jobs:
           cmake --version | Select-Object -First 1
       - name: Build whisper.cpp (Whisper GGML engine, generic ARM64)
         shell: pwsh
-        # Clean MSVC build, static ggml, CPU-only. GGML_NATIVE=OFF is
-        # critical: never leak -march=native into the binary.
+        # Clean MSVC build, static ggml, CPU-only. ggml requires
+        # GGML_NATIVE=ON on MSVC-ARM (configure hard-errors otherwise);
+        # under cl.exe this emits no -march/-mcpu flag, it only forwards
+        # -D__ARM_FEATURE_* defines, so the binary stays generic.
         run: |
           $wcpp = Join-Path $env:RUNNER_TEMP 'whisper-cpp'
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp $wcpp
           if ($LASTEXITCODE -ne 0) { throw "whisper.cpp clone failed" }
-          cmake -S $wcpp -B "$wcpp\build" -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF
+          cmake -S $wcpp -B "$wcpp\build" -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=ON
           if ($LASTEXITCODE -ne 0) { throw "whisper.cpp configure failed" }
           cmake --build "$wcpp\build" --config Release -j $env:NUMBER_OF_PROCESSORS --target whisper-cli
           if ($LASTEXITCODE -ne 0) { throw "whisper.cpp build failed" }
@@ -112,8 +120,9 @@ jobs:
         shell: pwsh
         # Prefer the official llama.cpp ARM64 zip; on 404 fall back to a
         # from-source cmake build with the same flags as the Linux job
-        # (BUILD_SHARED_LIBS=OFF GGML_NATIVE=OFF LLAMA_USE_PREBUILT_UI=OFF),
-        # plus GGML_OPENMP=OFF, and no -march flags (generic ARM64).
+        # (BUILD_SHARED_LIBS=OFF LLAMA_USE_PREBUILT_UI=OFF), plus
+        # GGML_OPENMP=OFF, and GGML_NATIVE=ON (required on MSVC-ARM, still
+        # generic: no -march/-mcpu flag under cl.exe).
         run: |
           New-Item -ItemType Directory -Force -Path 'tools\lfm3_audio' | Out-Null
           $url = 'https://github.com/ggml-org/llama.cpp/releases/download/b11960/llama-b11960-bin-win-arm64.zip'
@@ -130,7 +139,7 @@ jobs:
             $llama = Join-Path $env:RUNNER_TEMP 'llamacpp'
             git clone --depth 1 --branch b11960 https://github.com/ggml-org/llama.cpp $llama
             if ($LASTEXITCODE -ne 0) { throw "llama.cpp clone failed" }
-            cmake -S $llama -B "$llama\build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_USE_PREBUILT_UI=OFF
+            cmake -S $llama -B "$llama\build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=ON -DGGML_OPENMP=OFF -DLLAMA_USE_PREBUILT_UI=OFF
             if ($LASTEXITCODE -ne 0) { throw "llama.cpp configure failed" }
             cmake --build "$llama\build" --config Release -j $env:NUMBER_OF_PROCESSORS --target llama-cli
             if ($LASTEXITCODE -ne 0) { throw "llama.cpp build failed" }
@@ -159,11 +168,12 @@ jobs:
         # The checked-in quickstt-rust\tools\nemotron\transcribe-cli.exe is
         # x86-only; build handy-computer/transcribe.cpp from source and stage
         # its ARM64 binary as tools\nemotron\transcribe-cli.exe.
+        # GGML_NATIVE=ON is required on MSVC-ARM (see whisper step).
         run: |
           $tcpp = Join-Path $env:RUNNER_TEMP 'transcribe-cpp'
           git clone --depth 1 https://github.com/handy-computer/transcribe.cpp $tcpp
           if ($LASTEXITCODE -ne 0) { throw "transcribe.cpp clone failed" }
-          cmake -S $tcpp -B "$tcpp\build" -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF
+          cmake -S $tcpp -B "$tcpp\build" -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON
           if ($LASTEXITCODE -ne 0) { throw "transcribe.cpp configure failed" }
           cmake --build "$tcpp\build" --config Release -j $env:NUMBER_OF_PROCESSORS
           if ($LASTEXITCODE -ne 0) { throw "transcribe.cpp build failed" }
