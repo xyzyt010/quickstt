@@ -1,0 +1,312 @@
+name: Windows ARM64 Portable
+
+# Native Windows ARM64 (aarch64-pc-windows-msvc) portable, built on a
+# GitHub-hosted ARM runner. Mirrors the build-windows job in
+# release-desktop.yml, adapted for ARM64.
+#
+# Why this exists: the x64 setup/portable run on Windows ARM64 via
+# emulation. install.ps1 already prefers
+#   quickstt-desktop-v<ver>-arm64-portable.zip
+# when the OS architecture is Arm64, falling back to win64 assets.
+# This workflow produces that native zip so the v1.0.0 release can
+# ship a native arm64 portable. The zip name for tag runs is
+#   quickstt-${{ github.ref_name }}-arm64-portable.zip
+# i.e. quickstt-desktop-v<ver>-arm64-portable.zip, matching the
+# release-desktop.yml win64 pattern (quickstt-<ref>-win64-portable.zip).
+#
+# Out of scope: no Inno Setup exe in CI. A native arm64 setup would
+# require Inno Setup on the ARM runner; leave that for a later
+# follow-up. This workflow ships the portable zip only.
+#
+# Engine notes (ARM64):
+# - whisper-cli, llama-cli and transcribe-cli are built from source
+#   on the ARM runner (generic flags, never -march=native leak).
+# - parakeet_engine is built from source (continue-on-error: the
+#   checked-in tools\parakeet binaries are x86-only MinGW builds and
+#   must never ship in an ARM zip; if the ARM build fails, the zip
+#   ships without parakeet).
+# - The checked-in quickstt-rust\tools\nemotron\transcribe-cli.exe
+#   is x86-only and is NEVER copied into the ARM zip; only the
+#   freshly built ARM binary is staged.
+#
+# Wakeword / ort on ARM64 (LIMITATION, do not fake it):
+# quickstt-core gates the ort alternative-backend (tract) behind
+#   cfg(not(all(aarch64, windows, msvc)))
+# i.e. the cfg-gated dependency at quickstt-core/Cargo.toml:53. On
+# aarch64-pc-windows-msvc the alternative-backend is compiled OUT,
+# so the wakeword (livekit-wakeword ONNX, "wakeword" feature ->
+# ort + ort-tract + ndarray) relies solely on the ONNX Runtime
+# binary ort downloads for aarch64-pc-windows-msvc. If ORT ships
+# no ARM64 Windows binary for the pinned ort version
+# (=2.0.0-rc.11), cargo build or wakeword runtime may fail on ARM.
+# The workflow does not disable the wakeword feature; it records
+# this limitation here. Verify the ARM link in the run logs.
+
+on:
+  push:
+    tags: [ "desktop-v*" ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. desktop-v1.0.0)"
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows-arm64:
+    name: Windows ARM64 Portable (aarch64-pc-windows-msvc)
+    # Verified label: "windows-11-arm" (Windows 11 VS2026 ARM64,
+    # arch arm64; docs.github.com/en/actions/reference/runners/github-hosted-runners).
+    # Also available as "windows-11-vs2026-arm"; we use windows-11-arm.
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: quickstt-rust
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: parakeet_engine
+          shared-key: "parakeet-arm64"
+      - name: Show runner arch
+        shell: pwsh
+        run: |
+          Write-Host "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          Write-Host "PROCESSOR_ARCHITEW6432=$env:PROCESSOR_ARCHITEW6432"
+          rustc -vV
+          cmake --version | Select-Object -First 1
+      - name: Build whisper.cpp (Whisper GGML engine, generic ARM64)
+        shell: pwsh
+        # Clean MSVC build, static ggml, CPU-only. GGML_NATIVE=OFF is
+        # critical: never leak -march=native into the binary.
+        run: |
+          $wcpp = Join-Path $env:RUNNER_TEMP 'whisper-cpp'
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp $wcpp
+          if ($LASTEXITCODE -ne 0) { throw "whisper.cpp clone failed" }
+          cmake -S $wcpp -B "$wcpp\build" -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF
+          if ($LASTEXITCODE -ne 0) { throw "whisper.cpp configure failed" }
+          cmake --build "$wcpp\build" --config Release -j $env:NUMBER_OF_PROCESSORS --target whisper-cli
+          if ($LASTEXITCODE -ne 0) { throw "whisper.cpp build failed" }
+          New-Item -ItemType Directory -Force -Path 'tools\whisper_cpp' | Out-Null
+          # Multi-config generators put the exe under build\bin\Release; each
+          # also fall back to a recursive search so a generator change does
+          # not silently break staging.
+          $bin = "$wcpp\build\bin\Release\whisper-cli.exe"
+          if (-not (Test-Path $bin)) {
+            $found = Get-ChildItem $wcpp -Recurse -File -Filter 'whisper-cli.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $bin = $found.FullName }
+          }
+          if (-not (Test-Path $bin)) { throw "whisper-cli.exe not found under $wcpp" }
+          Copy-Item $bin 'tools\whisper_cpp\whisper-cli.exe' -Force
+          Write-Host "whisper-cli staged from $bin"
+          Get-Item 'tools\whisper_cpp\whisper-cli.exe' | Format-List Name,Length
+      - name: Stage LFM3-Audio runtime (llama.cpp b11960, ARM64)
+        shell: pwsh
+        # Prefer the official llama.cpp ARM64 zip; on 404 fall back to a
+        # from-source cmake build with the same flags as the Linux job
+        # (BUILD_SHARED_LIBS=OFF GGML_NATIVE=OFF LLAMA_USE_PREBUILT_UI=OFF),
+        # plus GGML_OPENMP=OFF, and no -march flags (generic ARM64).
+        run: |
+          New-Item -ItemType Directory -Force -Path 'tools\lfm3_audio' | Out-Null
+          $url = 'https://github.com/ggml-org/llama.cpp/releases/download/b11960/llama-b11960-bin-win-arm64.zip'
+          $zip = Join-Path $env:RUNNER_TEMP 'llama-b11960-bin-win-arm64.zip'
+          & curl.exe -L --fail --retry 3 -o $zip $url
+          if ($LASTEXITCODE -eq 0) {
+            $extract = Join-Path $env:RUNNER_TEMP 'lfm3_stage'
+            Expand-Archive $zip -DestinationPath $extract -Force
+            $copied = Get-ChildItem $extract -Recurse -File | Where-Object { $_.Extension -eq '.dll' -or $_.Name -ieq 'llama-cli.exe' }
+            foreach ($f in $copied) { Copy-Item $f.FullName (Join-Path 'tools\lfm3_audio' $f.Name) -Force }
+            Write-Host "staged $($copied.Count) files from official ARM64 zip"
+          } else {
+            Write-Host "official ARM64 zip unavailable (404) - building llama-cli from source"
+            $llama = Join-Path $env:RUNNER_TEMP 'llamacpp'
+            git clone --depth 1 --branch b11960 https://github.com/ggml-org/llama.cpp $llama
+            if ($LASTEXITCODE -ne 0) { throw "llama.cpp clone failed" }
+            cmake -S $llama -B "$llama\build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_USE_PREBUILT_UI=OFF
+            if ($LASTEXITCODE -ne 0) { throw "llama.cpp configure failed" }
+            cmake --build "$llama\build" --config Release -j $env:NUMBER_OF_PROCESSORS --target llama-cli
+            if ($LASTEXITCODE -ne 0) { throw "llama.cpp build failed" }
+            $bin = "$llama\build\bin\Release\llama-cli.exe"
+            if (-not (Test-Path $bin)) {
+              $found = Get-ChildItem $llama -Recurse -File -Filter 'llama-cli.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($found) { $bin = $found.FullName }
+            }
+            if (-not (Test-Path $bin)) { throw "llama-cli.exe not found under $llama" }
+            Copy-Item $bin 'tools\lfm3_audio\llama-cli.exe' -Force
+            $dlls = Get-ChildItem $llama -Recurse -File -Filter '*.dll' -ErrorAction SilentlyContinue
+            foreach ($f in $dlls) { Copy-Item $f.FullName (Join-Path 'tools\lfm3_audio' $f.Name) -Force }
+            Write-Host "staged llama-cli from source ($bin)"
+          }
+          $cli = 'tools\lfm3_audio\llama-cli.exe'
+          if (-not (Test-Path $cli)) { throw "llama-cli.exe missing after staging" }
+          Get-Item $cli | Format-List Name,Length
+          try {
+            & $cli --version
+            Write-Host "llama-cli --version ok"
+          } catch {
+            Write-Host "llama-cli --version probe failed (non-fatal): $($_.Exception.Message)"
+          }
+      - name: Build transcribe.cpp (Nemotron engine, ARM64)
+        shell: pwsh
+        # The checked-in quickstt-rust\tools\nemotron\transcribe-cli.exe is
+        # x86-only; build handy-computer/transcribe.cpp from source and stage
+        # its ARM64 binary as tools\nemotron\transcribe-cli.exe.
+        run: |
+          $tcpp = Join-Path $env:RUNNER_TEMP 'transcribe-cpp'
+          git clone --depth 1 https://github.com/handy-computer/transcribe.cpp $tcpp
+          if ($LASTEXITCODE -ne 0) { throw "transcribe.cpp clone failed" }
+          cmake -S $tcpp -B "$tcpp\build" -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF
+          if ($LASTEXITCODE -ne 0) { throw "transcribe.cpp configure failed" }
+          cmake --build "$tcpp\build" --config Release -j $env:NUMBER_OF_PROCESSORS
+          if ($LASTEXITCODE -ne 0) { throw "transcribe.cpp build failed" }
+          New-Item -ItemType Directory -Force -Path 'tools\nemotron' | Out-Null
+          $bin = "$tcpp\build\bin\Release\transcribe-cli.exe"
+          if (-not (Test-Path $bin)) {
+            $found = Get-ChildItem $tcpp -Recurse -File -Filter 'transcribe-cli.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $bin = $found.FullName }
+          }
+          if (-not (Test-Path $bin)) { throw "transcribe-cli.exe not found under $tcpp" }
+          Copy-Item $bin 'tools\nemotron\transcribe-cli.exe' -Force
+          $dlls = Get-ChildItem $tcpp -Recurse -File -Filter '*.dll' -ErrorAction SilentlyContinue
+          foreach ($f in $dlls) { Copy-Item $f.FullName (Join-Path 'tools\nemotron' $f.Name) -Force }
+          Write-Host "transcribe-cli staged from $bin"
+          Get-Item 'tools\nemotron\transcribe-cli.exe' | Format-List Name,Length
+      - name: Build parakeet_engine (Parakeet TDT runtime, ARM64)
+        working-directory: parakeet_engine
+        continue-on-error: true
+        run: cargo build --release
+      - name: Stage parakeet_engine into tools\parakeet (ARM64 only)
+        shell: pwsh
+        working-directory: parakeet_engine
+        # Best-effort: only stage a freshly built ARM64 exe. The git-tracked
+        # tools\parakeet\*.exe + MinGW dlls are x86-only and must never ship
+        # in the ARM zip. First clear the dir, then copy only if the fresh
+        # build artifact exists.
+        run: |
+          if (Test-Path '..\tools\parakeet') { Remove-Item '..\tools\parakeet' -Recurse -Force }
+          $exe = 'target\release\parakeet_engine.exe'
+          if (Test-Path $exe) {
+            New-Item -ItemType Directory -Force -Path '..\tools\parakeet' | Out-Null
+            Copy-Item $exe '..\tools\parakeet\parakeet_engine.exe' -Force
+            Get-Item '..\tools\parakeet\parakeet_engine.exe' | Format-List Name,Length
+            Write-Host "parakeet staged (native ARM64)"
+          } else {
+            Write-Host "skip parakeet: no fresh ARM64 build artifact (ARM zip ships without it; app tolerates the missing engine)"
+          }
+      - name: Cargo build (Rust GUI, aarch64-pc-windows-msvc host)
+        working-directory: quickstt-rust
+        # Host target on this runner is aarch64-pc-windows-msvc. The ort
+        # alternative-backend is compiled out on this target by the
+        # quickstt-core gate; see the wakeword/ort note at the top.
+        run: cargo build -p quickstt-slint --release
+      - name: Stage Windows ARM64 portable
+        shell: pwsh
+        # Mirror of the win64 staging in release-desktop.yml, ARM-safe:
+        # - same fonts / icon / LICENSE / README / python workers
+        # - DirectML.dll excluded (and x86 MinGW runtime dlls excluded)
+        # - nemotron: only the freshly built ARM binary is staged; the
+        #   tracked x86 quickstt-rust\tools\nemotron\transcribe-cli.exe is
+        #   never copied into the ARM zip.
+        run: |
+          $src = 'QuickSTT-Portable-ARM64'
+          if (Test-Path $src) { Remove-Item $src -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $src | Out-Null
+          $root = 'quickstt-rust'
+          $exe = Join-Path $root 'target\release\quickstt-slint.exe'
+          if (-not (Test-Path $exe)) {
+            $alt = Join-Path $root 'target\aarch64-pc-windows-msvc\release\quickstt-slint.exe'
+            if (Test-Path $alt) { $exe = $alt }
+          }
+          if (-not (Test-Path $exe)) { throw "quickstt-slint.exe not found under quickstt-rust\target" }
+          Copy-Item $exe (Join-Path $src 'QuickSTT.exe')
+          if (Test-Path 'wakeword_models') {
+            Copy-Item 'wakeword_models' (Join-Path $src 'wakeword_models') -Recurse
+          }
+          Copy-Item 'quickstt-rust\assets\Inter-VariableFont.ttf' (Join-Path $src 'Inter-VariableFont.ttf')
+          Copy-Item 'quickstt-rust\assets\MaterialSymbolsOutlined.ttf' (Join-Path $src 'MaterialSymbolsOutlined.ttf')
+          Copy-Item 'quickstt-rust\assets\Inter-VariableFont.ttf.license' (Join-Path $src 'Inter-VariableFont.ttf.license')
+          Copy-Item 'quickstt-rust\assets\icon_app.png' (Join-Path $src 'icon_app.png')
+          Copy-Item 'icon_app.ico' (Join-Path $src 'icon_app.ico')
+          Copy-Item 'LICENSE' (Join-Path $src 'LICENSE.txt')
+          function Copy-Engine {
+            param([string] $path)
+            if (Test-Path $path) {
+              $leaf = Split-Path $path -Leaf
+              Copy-Item $path (Join-Path $src "tools\$leaf") -Recurse -Force
+              "staged $leaf"
+            } else { "skip $path (not staged on this runner)" }
+          }
+          New-Item -ItemType Directory -Force -Path (Join-Path $src 'tools') | Out-Null
+          foreach ($d in @('tools\whisper_cpp', 'tools\lfm3_audio')) { Copy-Engine $d }
+          if (Test-Path 'tools\parakeet') {
+            $dst = Join-Path $src 'tools\parakeet'
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            foreach ($f in Get-ChildItem 'tools\parakeet' -Recurse -File) {
+              if ($f.Name -ieq 'DirectML.dll') { continue }
+              if ($f.Name -ieq 'libgcc_s_seh-1.dll' -or $f.Name -ieq 'libstdc++-6.dll' -or $f.Name -ieq 'libwinpthread-1.dll') { continue }
+              Copy-Item $f.FullName (Join-Path $dst $f.Name) -Force
+            }
+            Write-Host 'staged parakeet (DirectML + x86 MinGW dlls excluded)'
+          } else { Write-Host 'skip parakeet' }
+          $nemotronDst = Join-Path $src 'tools\nemotron'
+          New-Item -ItemType Directory -Force -Path $nemotronDst | Out-Null
+          if (Test-Path 'tools\nemotron\transcribe-cli.exe') {
+            Get-ChildItem 'tools\nemotron' -Recurse -File | ForEach-Object {
+              if ($_.Name -match '^(ggml-vulkan|.*\.bak|.*\.def|.*\.py|libtranscribe\.a|DirectML)') { return }
+              Copy-Item $_.FullName (Join-Path $nemotronDst $_.Name) -Force
+            }
+            Write-Host 'staged ARM nemotron runtime'
+          } else {
+            Write-Host 'skip nemotron: no ARM build staged (tracked x86 binary intentionally not shipped)'
+          }
+          foreach ($d in @('photon', 'canary', 'disfluency')) {
+            $srcDir = "quickstt-rust\tools\$d"
+            if (-not (Test-Path $srcDir)) { Write-Host "skip $d"; continue }
+            $dst = Join-Path (Join-Path $src 'tools') $d
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item (Join-Path $srcDir '*.py') $dst -Force
+            Write-Host "staged $d"
+          }
+          $readme = "QuickSTT portable (Windows ARM64)`n==================================`n`nDouble-click QuickSTT.exe to run it. Everything needed ships next to the exe;`nmodels download on demand (Speech Models tab).`n`nNative Windows ARM64 build (aarch64-pc-windows-msvc) - no x64 emulation.`n`nBundled engines: Whisper (whisper-cli), Nemotron (transcribe-cli), LFM3-Audio`n(llama-cli, via the llama.cpp project). Parakeet (parakeet_engine) ships only`nwhen its ARM build succeeded in CI; the app tolerates its absence.`nGPU acceleration is not bundled - CPU-only build.`nWakeword on ARM64 uses the ONNX Runtime backend (tract fallback is compiled`nout on aarch64 Windows, see workflow header).`n`nThe tray icon right-click is the same menu the app has always had.`n"
+          Set-Content -Path (Join-Path $src 'README.txt') -Value $readme -Encoding UTF8
+          if (-not (Test-Path (Join-Path $src 'QuickSTT.exe'))) { throw 'portable stage is missing QuickSTT.exe' }
+          if (-not (Test-Path (Join-Path $src 'tools\whisper_cpp\whisper-cli.exe'))) {
+            throw 'portable stage is missing the whisper.cpp engine staged earlier in this job'
+          }
+          Write-Host "portable staged at $src"
+          Get-ChildItem $src -Recurse -File | Measure-Object Length -Sum | ForEach-Object { "total MB: {0:N1}" -f ($_.Sum / 1MB) }
+          Get-ChildItem $src -Recurse | Select-Object FullName | ForEach-Object { $_.FullName }
+      - name: Zip ARM64 portable
+        shell: pwsh
+        # install.ps1 flattens a QuickSTT-Portable\ inner folder, so rename
+        # the staged dir to that name for the zip.
+        run: |
+          if (Test-Path 'QuickSTT-Portable') { Remove-Item 'QuickSTT-Portable' -Recurse -Force }
+          Rename-Item 'QuickSTT-Portable-ARM64' 'QuickSTT-Portable'
+          $zip = 'quickstt-arm64-portable.zip'
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -like 'desktop-v*') {
+            $zip = "quickstt-$env:GITHUB_REF_NAME-arm64-portable.zip"
+          }
+          Write-Host "zip name: $zip"
+          Compress-Archive -Path 'QuickSTT-Portable' -DestinationPath $zip -Force
+          Get-Item $zip | Format-List Name,Length
+      - name: Upload ARM64 portable artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64-dist
+          path: quickstt-*-arm64-portable.zip
+      - name: Attach ARM64 portable to tag release
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: quickstt-*-arm64-portable.zip
+          fail_on_unmatched_files: false
