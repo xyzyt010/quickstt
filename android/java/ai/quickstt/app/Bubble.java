@@ -86,6 +86,11 @@ public final class Bubble {
     private static volatile boolean inAppFieldFocused = false;
     private static volatile boolean userDismissedUntilImeReset = false;
 
+    // Drag-to-dismiss target (bottom-centre ✕ shown while dragging the pill).
+    private static DragTargetView dragTarget;
+    private static WindowManager dragTargetManager;
+    private static boolean dragTargetHot = false;
+
     static {
         try {
             System.loadLibrary("quickstt_android");
@@ -432,6 +437,7 @@ public final class Bubble {
     }
 
     private static String hidePillOnlyOnMain() {
+        hideDragTargetOnMain();
         try {
             if (current != null) {
                 current.stopAnimation();
@@ -455,6 +461,145 @@ public final class Bubble {
             currentParams = null;
             currentManager = null;
             return describe(t);
+        }
+    }
+
+    /**
+     * Called when the QuickSTT app itself comes to the foreground: a pill the
+     * user dragged away (or dismissed) is re-armed automatically — the user
+     * only has to open the app to get it back on the next keyboard popup.
+     */
+    public static void onAppForegrounded(final Context context) {
+        if (context != null) {
+            lastContext = context.getApplicationContext() != null
+                    ? context.getApplicationContext() : context;
+        }
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            MAIN_HANDLER.post(new Runnable() {
+                @Override
+                public void run() {
+                    onAppForegrounded(context != null ? context : lastContext);
+                }
+            });
+            return;
+        }
+        userDismissedUntilImeReset = false;
+        QuickSttAccessibilityService.onAppOpened();
+        Context ctx = context != null ? context : lastContext;
+        if (ctx != null && pillOnFocus(ctx)) {
+            ensureWatcherOnMain(ctx);
+            if (watcherImeVisible || imeServiceActive || inAppFieldFocused) {
+                showOnMain(ctx, "Ready", "");
+            }
+        }
+    }
+
+    // ── Drag-to-dismiss (bottom-centre ✕ target) ─────────────────────────
+
+    private static boolean isDragTargetHot(Context context, float rawY) {
+        int screenH = context.getResources().getDisplayMetrics().heightPixels;
+        return rawY > screenH - dp(context, 124f);
+    }
+
+    private static void showDragTargetOnMain(Context context, float rawY) {
+        try {
+            dragTargetHot = isDragTargetHot(context, rawY);
+            if (dragTarget != null && dragTargetManager != null && dragTarget.isAttachedToWindow()) {
+                dragTarget.setHot(dragTargetHot);
+                return;
+            }
+            hideDragTargetOnMain();
+            Context vCtx = visualContext(context);
+            WindowManager wm = resolveWindowManager(vCtx);
+            if (wm == null) {
+                return;
+            }
+            DragTargetView view = new DragTargetView(vCtx);
+            view.setHot(dragTargetHot);
+            int size = dp(vCtx, 76f);
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    size, size,
+                    TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT);
+            lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+            lp.y = dp(vCtx, 30f);
+            wm.addView(view, lp);
+            dragTarget = view;
+            dragTargetManager = wm;
+        } catch (Throwable t) {
+            Log.w(TAG, "drag target show failed", t);
+        }
+    }
+
+    /** Ends a drag: hides the ✕ target and reports whether the drop dismisses. */
+    private static boolean finishDragTargetOnMain(Context context, float rawY) {
+        boolean hot = context != null && isDragTargetHot(context, rawY);
+        hideDragTargetOnMain();
+        return hot;
+    }
+
+    private static void hideDragTargetOnMain() {
+        try {
+            if (dragTarget != null && dragTargetManager != null) {
+                try {
+                    dragTargetManager.removeViewImmediate(dragTarget);
+                } catch (Throwable ignored) {
+                    try {
+                        dragTargetManager.removeView(dragTarget);
+                    } catch (Throwable ignored2) {
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            dragTarget = null;
+            dragTargetManager = null;
+            dragTargetHot = false;
+        }
+    }
+
+    /** Bottom-centre circular ✕ shown while the pill is being dragged. */
+    private static final class DragTargetView extends View {
+        private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint glyph = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF rect = new RectF();
+        private boolean hot = false;
+
+        DragTargetView(Context context) {
+            super(context);
+            fill.setStyle(Paint.Style.FILL);
+            glyph.setStyle(Paint.Style.STROKE);
+            glyph.setStrokeCap(Paint.Cap.ROUND);
+            glyph.setColor(0xFFFFFFFF);
+        }
+
+        void setHot(boolean value) {
+            hot = value;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float w = getWidth();
+            float h = getHeight();
+            if (w <= 0 || h <= 0) {
+                return;
+            }
+            float cx = w / 2f;
+            float cy = h / 2f;
+            float r = Math.min(w, h) / 2f - dp(getContext(), 3f) * (hot ? 0.7f : 1f);
+            rect.set(cx - r, cy - r, cx + r, cy + r);
+            fill.setColor(hot ? 0xFFB3261E : 0xD91C1C1C);
+            canvas.drawOval(rect, fill);
+            glyph.setStrokeWidth(dp(getContext(), hot ? 3.2f : 2.6f));
+            float half = r * 0.34f;
+            canvas.drawLine(cx - half, cy - half, cx + half, cy + half, glyph);
+            canvas.drawLine(cx + half, cy - half, cx - half, cy + half, glyph);
         }
     }
 
@@ -1147,13 +1292,29 @@ public final class Bubble {
                         lastRawX = rawX;
                         lastRawY = rawY;
                         moveWindowBy(stepX, stepY);
+                        // Show the bottom-centre ✕ remove zone while dragging.
+                        showDragTargetOnMain(getContext(), rawY);
                     }
                     return true;
 
                 case MotionEvent.ACTION_UP:
-                    if (!dragged) {
+                    if (dragged) {
+                        boolean dropDismiss = finishDragTargetOnMain(getContext(), rawY);
+                        if (dropDismiss && !recording && !busy) {
+                            // Dragged onto ✕ at the bottom: go away until
+                            // the keyboard cycles or the app is re-opened.
+                            userDismissedUntilImeReset = true;
+                            hidePillOnlyOnMain();
+                            return true;
+                        }
+                    } else {
+                        hideDragTargetOnMain();
                         handleTap(event.getX(), event.getY());
                     }
+                    return true;
+
+                case MotionEvent.ACTION_CANCEL:
+                    hideDragTargetOnMain();
                     return true;
 
                 default:

@@ -782,6 +782,7 @@ export component AppWindow inherits Window {
     in-out property <bool> overlay-enabled: true;
     in-out property <bool> auto-type-ok: false;
     in-out property <bool> ime-enabled: false;
+    in-out property <bool> accessibility-ok: false;
     in-out property <bool> live-mode: true;
     in-out property <bool> busy: false;
     in-out property <bool> has-text: false;
@@ -831,6 +832,7 @@ export component AppWindow inherits Window {
     callback open-overlay-settings();
     callback toggle-live-mode();
     callback open-auto-type-settings();
+    callback open-accessibility-settings();
     callback type-into-app();
     callback share-text();
     callback copy-turn(string);
@@ -1618,6 +1620,23 @@ export component AppWindow inherits Window {
                                     primary: !root.auto-type-ok;
                                     blue: !root.auto-type-ok;
                                     clicked => { root.open-auto-type-settings(); }
+                                }
+
+                                Text {
+                                    text: "Keyboard Companion (any keyboard)";
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    color: #F5F5F5;
+                                    horizontal-alignment: left;
+                                }
+
+                                ActionButton {
+                                    label: root.accessibility-ok
+                                        ? "Companion on — pill follows Gboard ✓"
+                                        : "Enable Keyboard Companion";
+                                    primary: !root.accessibility-ok;
+                                    blue: !root.accessibility-ok;
+                                    clicked => { root.open-accessibility-settings(); }
                                 }
 
                                 if !root.battery-ok : ActionButton {

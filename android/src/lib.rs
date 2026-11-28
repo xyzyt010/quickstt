@@ -918,6 +918,7 @@ fn bubble(
 fn refresh_overlay_state(ui: &AppWindow) {
     ui.set_ime_enabled(platform::ime_enabled());
     ui.set_auto_type_ok(platform::ime_ready());
+    ui.set_accessibility_ok(platform::accessibility_enabled());
     let granted = platform::can_draw_overlays();
     ui.set_overlay_ok(granted);
     let want_pill = platform::pill_on_focus();
@@ -1535,6 +1536,32 @@ pub fn build_ui() -> AppWindow {
                 Err(e) => {
                     ui.set_status_text(format!("Could not open keyboard settings: {e}").into());
                     note(&weak, &log, &format!("Keyboard settings error: {e}"));
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let log = log.clone();
+        ui.on_open_accessibility_settings(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let already = platform::accessibility_enabled();
+            ui.set_accessibility_ok(already);
+            if already {
+                ui.set_status_text("Keyboard Companion is on — the pill follows any keyboard".into());
+                note(&weak, &log, "Keyboard Companion already enabled.");
+                return;
+            }
+            match platform::open_accessibility_settings() {
+                Ok(()) => {
+                    ui.set_status_text(
+                        "Enable “QuickSTT Keyboard Companion” (sideload: App info → ⋮ → Allow restricted settings first if greyed out)".into(),
+                    );
+                    note(&weak, &log, "Opened Accessibility settings for Keyboard Companion.");
+                }
+                Err(e) => {
+                    ui.set_status_text(format!("Could not open Accessibility settings: {e}").into());
+                    note(&weak, &log, &format!("Accessibility settings error: {e}"));
                 }
             }
         });
@@ -2327,6 +2354,7 @@ pub fn build_ui() -> AppWindow {
         ui.set_selected_model(index as i32);
         ui.set_ime_enabled(platform::ime_enabled());
         ui.set_auto_type_ok(platform::ime_ready());
+        ui.set_accessibility_ok(platform::accessibility_enabled());
 
         let initial_onload = stt::model_installed(index);
         if initial_onload {

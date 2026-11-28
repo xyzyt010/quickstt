@@ -216,10 +216,7 @@ installer did not unpack them, `Engine.java` unpacks one itself.
 
 QuickSTT ships a **standard Android voice keyboard**
 (`ai.quickstt.app.QuickSttInputMethodService`, `BIND_INPUT_METHOD` — the same
-API Gboard's voice typing uses). Google Play Protect's *Enhanced Fraud
-Protection* automatically blocks any sideloaded APK that declares
-`RECEIVE_SMS`, `READ_SMS`, `BIND_NOTIFICATION_LISTENER_SERVICE` or
-`BIND_ACCESSIBILITY_SERVICE`, so typing is built on the IME path:
+API Gboard's voice typing uses):
 
 1. The app types **live** while you speak: every partial transcript is pushed
    with `InputConnection.setComposingText()`, and
@@ -227,18 +224,47 @@ Protection* automatically blocks any sideloaded APK that declares
    recording stops — or copied once to the clipboard when no text box is
    focused.
 
-There is no root, no accessibility service and no signature permission — by
-design:
+There is no root and no signature permission — by design:
 
 * `INJECT_EVENTS` is a **signature** permission; an installed-app grant is
   impossible without root/userdebug. It was removed from the manifest.
-* Accessibility (`BIND_ACCESSIBILITY_SERVICE`) is what Play Protect blocks the
-  APK for. It was removed from the manifest.
-* `BIND_INPUT_METHOD` is the only supported path for cross-app text injection
-  without either of those. The cost: QuickSTT must be enabled and selected as
-  the on-screen keyboard. Onboarding page 3 and **Settings → Voice Auto-Type**
-  walk through exactly that (`ACTION_INPUT_METHOD_SETTINGS`, then the system
-  input-method picker).
+* `BIND_INPUT_METHOD` is the supported path for cross-app text injection.
+  The cost: QuickSTT must be enabled and selected as the on-screen keyboard.
+  Onboarding page 3 and **Settings → Keyboard** walk through exactly that
+  (`ACTION_INPUT_METHOD_SETTINGS`, then the system input-method picker).
+
+### Optional: Keyboard Companion (sideload only, no Play Store)
+
+For users who keep Gboard (or any other keyboard) selected, QuickSTT also
+ships an **optional, off-by-default** accessibility companion
+(`ai.quickstt.app.QuickSttAccessibilityService`). This build is distributed
+outside the Play Store, so the Play policy question does not apply; the
+remaining friction is Android's: on Android 13+ a sideloaded app may first
+need App info → ⋮ → **Allow restricted settings**, and Play Protect's
+enhanced fraud protection can block internet-sideloaded APKs that declare
+accessibility in some markets (ADB/USB installs are a different source).
+
+When enabled, the companion:
+
+* watches for a real input-method window (`TYPE_INPUT_METHOD`) **and** a
+  focused editable field, and only then shows a mic pill (accessibility
+  overlay — no "draw over apps" permission needed) just above the keyboard,
+* starts/stops the same dictation engine as the floating pill,
+* inserts the finished transcript into the focused field with
+  `ACTION_SET_TEXT` (selection-aware), falling back to clipboard +
+  `ACTION_PASTE`, then to plain clipboard with an explicit paste status,
+* refuses password fields entirely (never inserted, copied or stored),
+* can be dragged away to the bottom strip — it stays gone until the
+  keyboard is hidden and shown again, and simply opening QuickSTT re-arms it.
+
+Enable it in **Settings → Keyboard → Enable Keyboard Companion**.
+
+### Drag-to-remove floating pill
+
+The always-on floating pill can be dragged anywhere; while dragging, a
+bottom-centre ✕ target appears — drop the pill on it and it goes away
+(until the keyboard cycles). Opening QuickSTT again re-arms it
+automatically (`Bubble.onAppForegrounded`).
 
 While QuickSTT Voice Auto-Type is the active keyboard, a compact 56 dp grey
 Squircle bar with **⌨ Keyboard** (switch back to your previous keyboard in one
@@ -383,10 +409,11 @@ The manifest is generated from `[package.metadata.android]` in `Cargo.toml` —
 cargo-apk 0.10 ignores a hand-written `AndroidManifest.xml`. The eleven
 permissions (internet, mic, foreground service, overlay, notifications, wake
 lock, vibrate, battery-optimization exemption) are declared there and verified
-with `aapt2 dump badging`. There is **no** accessibility, SMS, notification or
-input-injection permission — the typing path is the standard
-`BIND_INPUT_METHOD` keyboard, which is why Play Protect does not block
-sideloaded installs.
+with `aapt2 dump badging`. There is **no** SMS, notification-listener or
+input-injection permission. Services: the foreground `SpeechService`, the
+`BIND_INPUT_METHOD` voice keyboard, and the optional (off-by-default,
+sideload-only) `BIND_ACCESSIBILITY_SERVICE` Keyboard Companion described
+above.
 
 Preview the exact same UI on Windows/Linux without a device:
 

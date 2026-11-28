@@ -51,14 +51,18 @@ pub fn has_window_focus() -> bool {
 
 /// Type text into the app that currently has the focus.
 ///
-/// Android-legal path only: the text is committed through QuickSTT's own
-/// Input Method (`QuickSttInputMethodService`), whose `InputConnection` is
-/// bound by the system to the currently focused editor. There is no other
-/// sanctioned way for one app to write into another app's field:
-/// `INJECT_EVENTS` is a signature permission (root/userdebug only) and an
-/// accessibility service is Play-Protect-blocked for sideloaded APKs — both
-/// were removed. When QuickSTT is not the active IME this returns `Err`
-/// and the caller falls back to clipboard + "tap the field and paste".
+/// Two Android-legal paths, in order:
+/// 1. QuickSTT's own IME (`QuickSttInputMethodService.commitFinalText`) —
+///    works when QuickSTT is the selected keyboard.
+/// 2. The optional sideload keyboard companion
+///    (`QuickSttAccessibilityService.insertText`, `ACTION_SET_TEXT` on the
+///    focused editable node) — works with ANY keyboard (e.g. Gboard) once
+///    the user explicitly enabled it in Accessibility settings. Password
+///    nodes are refused (-1).
+/// `INJECT_EVENTS` (signature permission) is impossible without
+/// root/userdebug and is not used. When neither path is available this
+/// returns `Err` and the caller falls back to clipboard + an explicit
+/// "tap the field and paste" status — text is never fake-typed.
 pub fn inject_text(text: &str) -> Result<(), String> {
     if text.trim().is_empty() {
         return Ok(());
@@ -66,7 +70,96 @@ pub fn inject_text(text: &str) -> Result<(), String> {
     if commit_final_text(text) {
         return Ok(());
     }
-    Err("QuickSTT is not the active keyboard - text was copied; tap the field and paste, or select the QuickSTT keyboard".into())
+    match accessibility_insert_text(text) {
+        1 => return Ok(()),
+        -1 => {
+            return Err(
+                "Password field — direct insert refused; use the QuickSTT keyboard".into(),
+            )
+        }
+        _ => {}
+    }
+    Err("No typing path available - text was copied; tap the field and paste, or enable the Keyboard Companion / QuickSTT keyboard".into())
+}
+
+/// Insert via the optional accessibility companion.
+/// 1 = inserted, 0 = unavailable, -1 = password field (refused).
+pub fn accessibility_insert_text(text: &str) -> i32 {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let body = env.new_string(text).ok()?;
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "accessibilityInsertText",
+                "(Ljava/lang/String;)I",
+                &[JValue::from(&body)],
+            )?;
+            value.i().ok()
+        })
+        .unwrap_or(0)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = text;
+        0
+    }
+}
+
+/// True when the optional keyboard-companion accessibility service is on.
+pub fn accessibility_enabled() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "accessibilityEnabled",
+                "(Landroid/content/Context;)Z",
+                &[JValue::from(activity)],
+            )?;
+            value.z().ok()
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    false
+}
+
+/// Open Android Accessibility settings (companion enable page).
+pub fn open_accessibility_settings() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let opened = with_activity(|env, activity| {
+            let value = call_app_static(
+                env,
+                activity,
+                "ai/quickstt/app/Overlay",
+                "openAccessibilitySettings",
+                "(Landroid/content/Context;)Ljava/lang/String;",
+                &[JValue::from(activity)],
+            )?;
+            let obj = value.l().ok()?;
+            if obj.is_null() {
+                return Some(String::new());
+            }
+            let s: String = env
+                .get_string(&JString::from(obj))
+                .map(|s| s.into())
+                .unwrap_or_default();
+            Some(s)
+        });
+        match opened {
+            Some(s) if s.is_empty() => Ok(()),
+            Some(s) => Err(s),
+            None => Err("accessibility settings unavailable".into()),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    Err("Android only".into())
 }
 
 /// Offer the text to other apps through the system share sheet. This always

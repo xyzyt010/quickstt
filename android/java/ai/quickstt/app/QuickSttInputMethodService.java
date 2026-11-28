@@ -244,6 +244,7 @@ public final class QuickSttInputMethodService extends InputMethodService {
         liveRecording = recording;
         liveBusy = busy;
         liveLevel = level;
+        QuickSttAccessibilityService.syncState(recording, busy);
         final QuickSttInputMethodService svc = instance;
         if (svc != null && svc.voiceBar != null) {
             svc.voiceBar.postInvalidateOnAnimation();

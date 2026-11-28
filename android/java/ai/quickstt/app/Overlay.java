@@ -155,7 +155,9 @@ public final class Overlay {
                             }
                             try {
                                 initNative(activity);
-                                Bubble.ensureWatcher(activity);
+                                // Opening QuickSTT re-arms a pill that was
+                                // dragged away / dismissed earlier.
+                                Bubble.onAppForegrounded(activity);
                                 QuickSttInputMethodService.maybeShowPendingPickerOnResume(activity);
                             } catch (Throwable ignored) {
                             }
@@ -262,7 +264,26 @@ public final class Overlay {
 
     /** True when the currently bound editor is a password / no-save field. */
     public static boolean currentFieldSensitive() {
-        return QuickSttInputMethodService.isCurrentFieldSensitive();
+        return QuickSttInputMethodService.isCurrentFieldSensitive()
+                || QuickSttAccessibilityService.isFocusedFieldSensitive();
+    }
+
+    /** True when the optional keyboard-companion accessibility service is on. */
+    public static boolean accessibilityEnabled(Context context) {
+        return QuickSttAccessibilityService.isEnabled(context);
+    }
+
+    /** Open Android Accessibility settings so the user can enable the companion. */
+    public static String openAccessibilitySettings(Context context) {
+        return QuickSttAccessibilityService.openSettings(context);
+    }
+
+    /**
+     * Insert text into the focused editable field via the accessibility
+     * companion. 1 = inserted, 0 = unavailable, -1 = password (refused).
+     */
+    public static int accessibilityInsertText(String text) {
+        return QuickSttAccessibilityService.insertText(text);
     }
 
     /** True when the QuickSTT Voice Auto-Type input method is enabled in system settings. */

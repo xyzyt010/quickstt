@@ -1,5 +1,30 @@
 # QuickSTT Android — Perfection Report
 
+> **Addendum (2026-11-28, alpha.58 follow-up):** Sections 1/5 below describe
+> the first pass (IME-only). The user then explicitly chose the sideload
+> route ("without Play Store, no root"), so the APK now ALSO ships the
+> optional Keyboard Companion:
+> - `java/ai/quickstt/app/QuickSttAccessibilityService.java` — off by
+>   default; watches `TYPE_INPUT_METHOD` windows + focused editable node,
+>   shows an accessibility-overlay mic pill only while a keyboard + field
+>   are present, inserts final text via selection-aware `ACTION_SET_TEXT`
+>   (fallback clipboard + `ACTION_PASTE`), refuses password nodes, drag to
+>   the bottom strip dismisses until the keyboard cycles.
+> - Drag-to-remove for the always-on floating pill: bottom-centre ✕ target
+>   while dragging (`Bubble.java` `DragTargetView`); dropping hides it until
+>   the keyboard cycles, and opening QuickSTT re-arms it automatically
+>   (`Bubble.onAppForegrounded` via `Overlay.watch`).
+> - Rust: `platform::inject_text` now tries IME → accessibility insert →
+>   clipboard-with-status; `accessibility_enabled/open_accessibility_settings`
+>   wired to Settings → Keyboard → "Keyboard Companion (any keyboard)".
+> - Verification: `cargo test` 18 passed + 1 ignored, ui_wiring 1 passed;
+>   signed APK 26,051,499 B; `aapt2 dump xmltree` proves the manifest now
+>   contains `QuickSttAccessibilityService` (`BIND_ACCESSIBILITY_SERVICE`)
+>   alongside the IME — and still no SMS/notification-listener/INJECT_EVENTS
+>   uses-permissions. No device attached: on-device keyboard-sync/insert is
+>   still not claimed (needs the user's phone + enable steps in README §
+>   "Optional: Keyboard Companion").
+
 Scope of this pass: `android/` only. Desktop (`quickstt-rust/**`) untouched,
 no version bump, nothing committed. Windows GUI was never launched or
 interacted with; all verification is build/test/badging level (no device

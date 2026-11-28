@@ -83,6 +83,24 @@
                 android:value="Keeps the microphone bubble of QuickSTT available in the background." />
         </service>
 
+        <!-- Optional keyboard companion (sideload builds; NOT a Play Store
+             target). Only runs when the user explicitly enables it in
+             Accessibility settings: it shows the mic pill while any keyboard
+             + editable field are present and inserts dictated text into the
+             focused field. Password fields are refused. -->
+        <service
+            android:name="ai.quickstt.app.QuickSttAccessibilityService"
+            android:label="@string/accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/quickstt_accessibility" />
+        </service>
+
         <!-- Voice Input Method (IME) for automatic and real-time live typing into
              any focused text box across apps without Play Protect sideload blocks. -->
         <service

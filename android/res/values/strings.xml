@@ -3,4 +3,6 @@
     <string name="app_name">QuickSTT</string>
     <string name="ime_label">QuickSTT Voice Auto-Type</string>
     <string name="ime_subtype_label">English (Voice Dictation)</string>
+    <string name="accessibility_label">QuickSTT Keyboard Companion</string>
+    <string name="accessibility_description">Shows the QuickSTT mic pill only while a keyboard and text field are on screen, and inserts dictated text into the focused field. Password fields are never read or filled.</string>
 </resources>
